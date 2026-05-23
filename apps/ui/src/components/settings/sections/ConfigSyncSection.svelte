@@ -291,7 +291,6 @@
           args.oauth_provider = 'github';
         } else if (gitAuthMode === 'oauth_gitlab') {
           args.oauth_provider = 'gitlab';
-          args.gitlab_base_url = gitlabOAuthBaseUrl || undefined;
         }
         await rpc.call('sync.configureGit', args);
       }

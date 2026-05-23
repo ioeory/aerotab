@@ -367,7 +367,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         )
                         .await
                     }
-                    ProfileKind::Rdp { rdp } | ProfileKind::Vnc { spec: rdp } => {
+                    ProfileKind::Rdp { .. } | ProfileKind::Vnc { .. } => {
                         return Err(invalid_params(
                             "profile is remote desktop; use remote.openProfile",
                         ));
@@ -703,8 +703,6 @@ struct ConfigureGitParams {
     /// `github` or `gitlab` — load access token from OS keyring.
     #[serde(default)]
     oauth_provider: Option<String>,
-    #[serde(default)]
-    gitlab_base_url: Option<String>,
 }
 
 fn default_remote_name() -> String {

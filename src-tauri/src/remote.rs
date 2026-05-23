@@ -29,29 +29,31 @@ fn launch_rdp(address: &str) -> Result<(), RemoteError> {
             .map_err(|e| RemoteError::Launch(e.to_string()))?;
         return Ok(());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "windows"))]
     {
-        // Microsoft Remote Desktop or open via open(1) with a .rdp file is heavy; try open.
-        let status = Command::new("open")
-            .args(["-a", "Microsoft Remote Desktop"])
-            .status()
-            .map_err(|e| RemoteError::Launch(e.to_string()))?;
-        if status.success() {
+        #[cfg(target_os = "macos")]
+        {
+            let status = Command::new("open")
+                .args(["-a", "Microsoft Remote Desktop"])
+                .status()
+                .map_err(|e| RemoteError::Launch(e.to_string()))?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+        if Command::new("xfreerdp")
+            .args([format!("/v:{address}"), "/cert:ignore".into()])
+            .spawn()
+            .is_ok()
+        {
             return Ok(());
         }
+        Command::new("remmina")
+            .args(["-c", &format!("rdp://{address}")])
+            .spawn()
+            .map_err(|e| RemoteError::Launch(format!("xfreerdp/remmina: {e}")))?;
+        Ok(())
     }
-    if Command::new("xfreerdp")
-        .args([format!("/v:{address}"), "/cert:ignore".into()])
-        .spawn()
-        .is_ok()
-    {
-        return Ok(());
-    }
-    Command::new("remmina")
-        .args(["-c", &format!("rdp://{address}")])
-        .spawn()
-        .map_err(|e| RemoteError::Launch(format!("mstsc/xfreerdp/remmina: {e}")))?;
-    Ok(())
 }
 
 fn launch_vnc(address: &str) -> Result<(), RemoteError> {
