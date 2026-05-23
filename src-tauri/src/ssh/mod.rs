@@ -18,7 +18,9 @@ use async_trait::async_trait;
 use russh::client;
 use russh::keys::{key, load_secret_key, PublicKeyBase64};
 use russh::{ChannelMsg, Disconnect};
+use russh_keys::agent::client::AgentClient;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use known_hosts::{KnownHosts, KnownHostsError};
@@ -61,8 +63,8 @@ pub enum SshError {
     Io(String),
     #[error("channel: {0}")]
     Channel(String),
-    #[error("agent auth not yet supported")]
-    AgentUnsupported,
+    #[error("agent auth: {0}")]
+    Agent(String),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
@@ -200,12 +202,81 @@ async fn authenticate(
                 .await
                 .map_err(SshError::from)?
         }
-        AuthMethod::Agent => return Err(SshError::AgentUnsupported),
+        AuthMethod::Agent => authenticate_agent(handle, profile).await?,
     };
     if !authed {
         Err(SshError::Auth)
     } else {
         Ok(())
+    }
+}
+
+async fn authenticate_agent(
+    handle: &mut client::Handle<TrustingClient>,
+    profile: &SshProfile,
+) -> Result<bool, SshError> {
+    #[cfg(unix)]
+    {
+        let agent = AgentClient::connect_env()
+            .await
+            .map_err(|e| SshError::Agent(e.to_string()))?;
+        return authenticate_agent_client(handle, &profile.user, agent).await;
+    }
+
+    #[cfg(windows)]
+    {
+        let pipe = std::env::var("SSH_AUTH_SOCK")
+            .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
+        let stream = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(pipe)
+            .map_err(|e| SshError::Agent(format!("connect openssh agent: {e}")))?;
+        let agent = AgentClient::connect(stream);
+        return authenticate_agent_client(handle, &profile.user, agent).await;
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = handle;
+        let _ = profile;
+        Err(SshError::Agent(
+            "system ssh-agent is unavailable on this platform".into(),
+        ))
+    }
+}
+
+async fn authenticate_agent_client<R>(
+    handle: &mut client::Handle<TrustingClient>,
+    user: &str,
+    mut agent: AgentClient<R>,
+) -> Result<bool, SshError>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(|e| SshError::Agent(format!("list identities: {e}")))?;
+    if identities.is_empty() {
+        return Err(SshError::Agent("agent has no identities".into()));
+    }
+
+    let mut last_error = None;
+    for identity in identities {
+        let (next_agent, result) = handle
+            .authenticate_future(user.to_string(), identity, agent)
+            .await;
+        agent = next_agent;
+        match result {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => last_error = Some(e.to_string()),
+        }
+    }
+
+    if let Some(error) = last_error {
+        Err(SshError::Agent(format!("signing failed: {error}")))
+    } else {
+        Ok(false)
     }
 }
 
@@ -322,10 +393,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn agent_auth_unsupported() {
+    async fn agent_auth_connects_before_auth() {
         // Use a port no SSH server is listening on so we never actually dial.
         // jump_via is empty, so the function will proceed to the connect step
-        // and we expect a Connect error rather than AgentUnsupported (since
+        // and we expect a Connect error rather than an agent error (since
         // the auth method check happens after connecting).
         let p = SshProfile {
             host: "127.0.0.1".into(),

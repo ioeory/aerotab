@@ -22,7 +22,7 @@
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.1.23-ui-20260523';
+  const buildId = '0.1.24-ui-20260523';
   type SettingsSectionId =
     | 'application'
     | 'appearance'

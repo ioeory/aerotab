@@ -159,8 +159,8 @@ fn inspect_auth(label: &str, auth: &AuthMethod, checks: &mut Vec<ProfileHealthCh
             push_check(
                 checks,
                 format!("{label} auth"),
-                HealthStatus::Warning,
-                "agent auth is configured but not supported by this backend yet",
+                HealthStatus::Ok,
+                "agent auth configured; live availability is checked during connection probing",
             );
         }
     }
@@ -302,12 +302,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warns_for_agent_until_supported() {
+    async fn accepts_agent_auth_configuration() {
         let result = check_profile(profile(AuthMethod::Agent), None, false).await;
         assert_eq!(result.status, HealthStatus::Warning);
         assert!(result
             .checks
             .iter()
-            .any(|check| check.message.contains("agent auth")));
+            .any(|check| check.status == HealthStatus::Ok && check.message.contains("agent auth")));
     }
 }
