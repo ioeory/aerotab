@@ -7,6 +7,7 @@ import type { SessionMeta } from './types';
 
 export type SplitDir = 'row' | 'col';
 export type SplitSide = 'before' | 'after';
+export type PaneDropSide = 'left' | 'right' | 'up' | 'down';
 export type FocusDirection = 'left' | 'right' | 'up' | 'down';
 
 export interface PaneLeaf {
@@ -97,6 +98,14 @@ function insertRelative(
     return { node: { ...node, children }, inserted: true };
   }
   return { node, inserted: false };
+}
+
+function directionForDropSide(side: PaneDropSide): SplitDir {
+  return side === 'left' || side === 'right' ? 'row' : 'col';
+}
+
+function splitSideForDropSide(side: PaneDropSide): SplitSide {
+  return side === 'left' || side === 'up' ? 'before' : 'after';
 }
 
 function removeLeaf(node: PaneNode, sessionId: string): { node: PaneNode | null; removed: SessionMeta | null } {
@@ -286,6 +295,33 @@ class TabStore {
     }
     this.bump();
     return { sessionId, tabClosed: false };
+  }
+
+  movePane(tabId: string, sourceId: string, targetId: string, side: PaneDropSide): boolean {
+    if (sourceId === targetId) return false;
+    const tab = this.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return false;
+    if (!tab.panes.some((pane) => pane.id === sourceId)) return false;
+    if (!tab.panes.some((pane) => pane.id === targetId)) return false;
+
+    const removed = removeLeaf(tab.layout, sourceId);
+    if (!removed.removed || !removed.node) return false;
+    const inserted = insertRelative(
+      removed.node,
+      targetId,
+      removed.removed,
+      directionForDropSide(side),
+      splitSideForDropSide(side),
+    );
+    if (!inserted.inserted) return false;
+
+    tab.layout = inserted.node;
+    tab.activePaneId = sourceId;
+    tab.maximizedPaneId = null;
+    this.activeId = tab.id;
+    this.refreshTab(tab);
+    this.bump();
+    return true;
   }
 
   activate(id: string) {

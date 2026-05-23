@@ -292,6 +292,7 @@ const en: Messages = {
   'pane.closePaneShortcut': 'Close pane (Ctrl+W)',
   'pane.closePane': 'Close pane',
   'pane.resizePane': 'Resize pane',
+  'pane.movePane': 'Move pane',
 
   'terminal.sessionEnded': 'Session ended',
   'terminal.historyVisible': 'History stays visible in the terminal.',
@@ -613,6 +614,7 @@ const zhCN: Messages = {
   'pane.closePaneShortcut': '关闭窗格 (Ctrl+W)',
   'pane.closePane': '关闭窗格',
   'pane.resizePane': '调整窗格大小',
+  'pane.movePane': '移动窗格',
 
   'terminal.sessionEnded': '会话已结束',
   'terminal.historyVisible': '历史输出仍保留在终端中。',

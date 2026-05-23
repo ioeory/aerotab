@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { Maximize2, Minimize2, X } from '@lucide/svelte';
+  import { GripVertical, Maximize2, Minimize2, X } from '@lucide/svelte';
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
-  import { tabs, type PaneNode, type Tab } from '../lib/tabs.svelte';
+  import { tabs, type PaneDropSide, type PaneNode, type Tab } from '../lib/tabs.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
@@ -16,6 +16,9 @@
   let { rpc, tab, node, settingsRev }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
+  let dropSide = $state<PaneDropSide | null>(null);
+
+  const PANE_DRAG_MIME = 'application/x-tabby-pane';
 
   const maximized = $derived(tab.maximizedPaneId ?? null);
   const hiddenByMaximize = $derived(!!maximized && !tabs.nodeContains(node, maximized));
@@ -30,6 +33,78 @@
   function toggleMaximize(sessionId: string, ev: Event) {
     ev.stopPropagation();
     tabs.toggleMaximize(tab.id, sessionId);
+  }
+
+  function dragPayload(ev: DragEvent): { tabId: string; paneId: string } | null {
+    const raw = ev.dataTransfer?.getData(PANE_DRAG_MIME);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed.tabId === 'string' && typeof parsed.paneId === 'string') {
+        return { tabId: parsed.tabId, paneId: parsed.paneId };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  function dropSideFromEvent(el: HTMLElement, ev: DragEvent): PaneDropSide {
+    const rect = el.getBoundingClientRect();
+    const x = (ev.clientX - rect.left) / Math.max(1, rect.width);
+    const y = (ev.clientY - rect.top) / Math.max(1, rect.height);
+    const distances = [
+      ['left', x],
+      ['right', 1 - x],
+      ['up', y],
+      ['down', 1 - y],
+    ] as Array<[PaneDropSide, number]>;
+    distances.sort((a, b) => a[1] - b[1]);
+    return distances[0]?.[0] ?? 'right';
+  }
+
+  function dropBandStyle(side: PaneDropSide): string {
+    switch (side) {
+      case 'left': return 'left: 0; top: 0; width: 34%; height: 100%;';
+      case 'right': return 'right: 0; top: 0; width: 34%; height: 100%;';
+      case 'up': return 'left: 0; top: 0; width: 100%; height: 34%;';
+      case 'down': return 'left: 0; bottom: 0; width: 100%; height: 34%;';
+    }
+  }
+
+  function onPaneDragStart(sessionId: string, ev: DragEvent) {
+    ev.stopPropagation();
+    ev.dataTransfer?.setData(PANE_DRAG_MIME, JSON.stringify({ tabId: tab.id, paneId: sessionId }));
+    if (ev.dataTransfer) {
+      ev.dataTransfer.effectAllowed = 'move';
+      ev.dataTransfer.dropEffect = 'move';
+    }
+  }
+
+  function onPaneDragOver(sessionId: string, ev: DragEvent) {
+    if (maximized) return;
+    const payload = dragPayload(ev);
+    if (!payload || payload.tabId !== tab.id || payload.paneId === sessionId) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+    dropSide = dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
+  }
+
+  function onPaneDragLeave(ev: DragEvent) {
+    const next = ev.relatedTarget;
+    if (next instanceof Node && (ev.currentTarget as HTMLElement).contains(next)) return;
+    dropSide = null;
+  }
+
+  function onPaneDrop(sessionId: string, ev: DragEvent) {
+    const payload = dragPayload(ev);
+    if (!payload || payload.tabId !== tab.id || payload.paneId === sessionId) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const side = dropSide ?? dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
+    dropSide = null;
+    tabs.movePane(tab.id, payload.paneId, sessionId, side);
   }
 
   function onResize(idx: number, ev: PointerEvent) {
@@ -76,6 +151,9 @@
     style="display: {hiddenByMaximize ? 'none' : 'block'};"
     class="relative h-full w-full min-w-0 min-h-0 bg-[var(--color-bg)] {focused ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
     onpointerdown={() => tabs.focusPane(tab.id, node.pane.id)}
+    ondragover={(e) => onPaneDragOver(node.pane.id, e)}
+    ondragleave={onPaneDragLeave}
+    ondrop={(e) => onPaneDrop(node.pane.id, e)}
   >
     <TerminalPane
       {rpc}
@@ -109,9 +187,26 @@
       >
         <X size={12} />
       </button>
-      <div class="absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[10px] bg-[var(--color-panel)]/70
-                  backdrop-blur text-[var(--color-fg-muted)] pointer-events-none">
-        {tabs.paneIndex(tab, node.pane.id) + 1}
+      <button
+        type="button"
+        draggable="true"
+        title={i18n.t('pane.movePane')}
+        aria-label={i18n.t('pane.movePane')}
+        class="absolute top-1 left-1 z-10 px-1 py-0.5 rounded text-[10px] bg-[var(--color-panel)]/80
+               backdrop-blur text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-panel)]
+               border border-[var(--color-border-soft)] inline-flex items-center gap-0.5 cursor-grab active:cursor-grabbing"
+        ondragstart={(e) => onPaneDragStart(node.pane.id, e)}
+        ondragend={() => (dropSide = null)}
+        onclick={(e) => e.stopPropagation()}
+        onpointerdown={(e) => e.stopPropagation()}
+      >
+        <GripVertical size={11} />
+        <span>{tabs.paneIndex(tab, node.pane.id) + 1}</span>
+      </button>
+    {/if}
+    {#if dropSide}
+      <div class="absolute inset-0 z-20 pointer-events-none border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10">
+        <div class="absolute bg-[var(--color-accent)]/25" style={dropBandStyle(dropSide)}></div>
       </div>
     {/if}
   </div>
