@@ -87,6 +87,21 @@ export interface StoredProfile {
   ssh: SshProfileSpec;
 }
 
+export type ProfileHealthStatus = 'ok' | 'warning' | 'error';
+
+export interface ProfileHealthCheck {
+  name: string;
+  status: ProfileHealthStatus;
+  message: string;
+}
+
+export interface ProfileHealthResult {
+  id: string;
+  name: string;
+  status: ProfileHealthStatus;
+  checks: ProfileHealthCheck[];
+}
+
 export type SerialParity = 'None' | 'Even' | 'Odd';
 export type SerialStopBits = 'One' | 'Two';
 export type SerialFlow = 'None' | 'Software' | 'Hardware';

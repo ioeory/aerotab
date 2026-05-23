@@ -23,16 +23,6 @@
   import WindowSection from './sections/WindowSection.svelte';
   import ConfigFileSection from './sections/ConfigFileSection.svelte';
 
-  interface Props {
-    rpc: RpcClient;
-    onClose: () => void;
-    onError: (msg: string) => void;
-    onSettingsChanged: () => void;
-  }
-  let { rpc, onClose, onError, onSettingsChanged }: Props = $props();
-
-  const buildId = '0.1.18-ui-20260523';
-
   type SectionId =
     | 'application'
     | 'appearance'
@@ -48,6 +38,17 @@
     | 'vault'
     | 'window'
     | 'configfile';
+
+  interface Props {
+    rpc: RpcClient;
+    initialSection?: SectionId;
+    onClose: () => void;
+    onError: (msg: string) => void;
+    onSettingsChanged: () => void;
+  }
+  let { rpc, initialSection = 'appearance', onClose, onError, onSettingsChanged }: Props = $props();
+
+  const buildId = '0.1.20-ui-20260523';
 
   interface NavEntry {
     id: SectionId;
@@ -82,6 +83,10 @@
   ];
 
   let active = $state<SectionId>('appearance');
+
+  $effect(() => {
+    active = initialSection;
+  });
 
   async function save() {
     try {

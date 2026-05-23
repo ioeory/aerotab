@@ -35,6 +35,7 @@
 //! | `settings.all`          | none                                | `[SettingEntry]`  |
 //! | `settings.remove`       | `{ key }`                           | `{ removed }`     |
 //! | `settings.reset`        | none                                | `null`            |
+//! | `profile.healthCheck`   | `{ ids?, connect? }`                | `[ProfileHealth]` |
 //!
 //! `session.pollOutput` is a stop-gap poll API for testing without a true
 //! event stream; the production transport (Tauri or websocket) will replace
@@ -745,6 +746,13 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
     struct IdParams {
         id: Uuid,
     }
+    #[derive(Debug, Deserialize)]
+    struct HealthCheckParams {
+        #[serde(default)]
+        ids: Vec<Uuid>,
+        #[serde(default)]
+        connect: bool,
+    }
 
     {
         let st = state.clone();
@@ -825,6 +833,24 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 "shells": shells,
                 "sshConfig": ssh_config,
             }))
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("profile.healthCheck", move |params| {
+            let st = st.clone();
+            async move {
+                let p: HealthCheckParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let store = require_profiles(&st).await?;
+                let mut profiles = store.list().await.map_err(|e| internal(e.to_string()))?;
+                if !p.ids.is_empty() {
+                    profiles.retain(|profile| p.ids.contains(&profile.id));
+                }
+                let kh = st.known_hosts.lock().await.clone();
+                let results = crate::profile_health::check_profiles(profiles, kh, p.connect).await;
+                serde_json::to_value(results).map_err(|e| internal(e.to_string()))
+            }
         });
     }
 }

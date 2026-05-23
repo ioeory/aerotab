@@ -9,8 +9,8 @@
   import SettingsLayout from './components/settings/SettingsLayout.svelte';
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
-  import { selectClient } from './lib/rpc';
-  import { tabs, type SplitSide } from './lib/tabs.svelte';
+  import { selectClient, uuidv4 } from './lib/rpc';
+  import { tabs, type PaneNode, type SplitDir, type SplitSide } from './lib/tabs.svelte';
   import { applyTheme, BUILTIN_THEMES } from './lib/theme';
   import { applyCustomCss, applyLigatures } from './lib/customCss';
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
@@ -21,7 +21,7 @@
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
 
   const rpc = selectClient();
-  const buildId = '0.1.18-ui-20260523';
+  const buildId = '0.1.20-ui-20260523';
   let status = $state(i18n.t('app.status.idle'));
   let coreVersion = $state<string | null>(null);
   let hostStats = $state<HostStats | null>(null);
@@ -35,10 +35,12 @@
   let serialModal: { open: () => Promise<void> } | null = $state(null);
   let sidebar: { refresh: () => Promise<void> } | null = $state(null);
   let settingsOpen = $state(false);
+  let settingsInitialSection = $state<'appearance' | 'profiles'>('appearance');
   let settingsRev = $state(0);
   let paletteOpen = $state(false);
   let pickerOpen = $state(false);
   let savedProfiles = $state<StoredProfile[]>([]);
+  let sessionWorkspaces = $state<SessionWorkspace[]>([]);
   let sidebarVisible = $state(true);
 
   interface SftpDockTarget {
@@ -67,6 +69,29 @@
     | { kind: 'shell'; command: string; args: string[]; label: string }
     | { kind: 'ssh-profile'; id: string }
     | { kind: 'ssh'; title: string; profile: Record<string, unknown> };
+  interface OpenedRestorable {
+    session: SessionMeta;
+    restore: Restorable;
+  }
+  type WorkspaceNode =
+    | { type: 'leaf'; paneIndex: number }
+    | { type: 'split'; direction: SplitDir; ratios: number[]; children: WorkspaceNode[] };
+  interface WorkspaceTab {
+    title: string;
+    layout: WorkspaceNode;
+    activePaneIndex: number;
+    maximizedPaneIndex?: number | null;
+    panes: Restorable[];
+    sftpDock?: SftpDockTarget | null;
+    sftpDockCollapsed?: boolean;
+  }
+  interface SessionWorkspace {
+    id: string;
+    name: string;
+    createdAt: number;
+    updatedAt: number;
+    tabs: WorkspaceTab[];
+  }
   const restoreMap = new Map<string, Restorable>();
   let restoreReady = false; // suppress persistence until first load completes
 
@@ -89,42 +114,214 @@
     rpc.call('settings.set', { key: 'openTabs', value: out }).catch(() => { /* ignore */ });
   }
 
+  async function openRestorableSession(r: Restorable): Promise<OpenedRestorable> {
+    if (r.kind === 'local') {
+      const meta = await rpc.call<{ id: string; kind: string; title: string }>(
+        'session.openLocal', {},
+      );
+      return { session: { id: meta.id, kind: meta.kind, title: meta.title }, restore: { kind: 'local' } };
+    }
+    if (r.kind === 'shell') {
+      const meta = await rpc.call<{ id: string; kind: string; title: string }>(
+        'session.openLocal',
+        { title: r.label, shell: r.command, shell_args: r.args },
+      );
+      return {
+        session: { id: meta.id, kind: meta.kind, title: meta.title, shellCommand: r.command, shellArgs: r.args },
+        restore: r,
+      };
+    }
+    if (r.kind === 'ssh-profile') {
+      const meta = await rpc.call<{ id: string; kind: string; title: string }>(
+        'session.openSshProfile', { profile_id: r.id },
+      );
+      return { session: { id: meta.id, kind: meta.kind, title: meta.title, profileId: r.id }, restore: r };
+    }
+    const meta = await rpc.call<{ id: string; kind: string; title: string }>(
+      'session.openSsh', { title: r.title, profile: r.profile },
+    );
+    return {
+      session: { id: meta.id, kind: meta.kind, title: meta.title, sshProfile: r.profile as unknown as SshProfileSpec },
+      restore: r,
+    };
+  }
+
   async function replayRestorable(r: Restorable) {
     try {
-      if (r.kind === 'local') {
-        const meta = await rpc.call<{ id: string; kind: string; title: string }>(
-          'session.openLocal', {},
-        );
-        tabs.add({ id: meta.id, kind: meta.kind, title: meta.title });
-        restoreMap.set(meta.id, { kind: 'local' });
-      } else if (r.kind === 'shell') {
-        const meta = await rpc.call<{ id: string; kind: string; title: string }>(
-          'session.openLocal',
-          { title: r.label, shell: r.command, shell_args: r.args },
-        );
-        tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, shellCommand: r.command, shellArgs: r.args });
-        restoreMap.set(meta.id, r);
-      } else if (r.kind === 'ssh-profile') {
-        const meta = await rpc.call<{ id: string; kind: string; title: string }>(
-          'session.openSshProfile', { profile_id: r.id },
-        );
-        tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, profileId: r.id });
-        restoreMap.set(meta.id, r);
-      } else if (r.kind === 'ssh') {
-        const meta = await rpc.call<{ id: string; kind: string; title: string }>(
-          'session.openSsh', { title: r.title, profile: r.profile },
-        );
-        tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, sshProfile: r.profile as unknown as SshProfileSpec });
-        restoreMap.set(meta.id, r);
-      }
+      const opened = await openRestorableSession(r);
+      tabs.add(opened.session);
+      restoreMap.set(opened.session.id, opened.restore);
     } catch (e) {
       console.warn('restore', r, e);
     }
   }
 
+  function cloneJson<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+
+  function normalizeRatios(ratios: number[], count: number): number[] {
+    const values = ratios.slice(0, count).map((value) => (Number.isFinite(value) && value > 0 ? value : 1));
+    while (values.length < count) values.push(1);
+    const total = values.reduce((sum, value) => sum + value, 0) || count || 1;
+    return values.map((value) => value / total);
+  }
+
+  function snapshotWorkspaceNode(node: PaneNode, paneIndex: Map<string, number>): WorkspaceNode | null {
+    if (node.type === 'leaf') {
+      const index = paneIndex.get(node.pane.id);
+      return typeof index === 'number' ? { type: 'leaf', paneIndex: index } : null;
+    }
+    const children: WorkspaceNode[] = [];
+    const ratios: number[] = [];
+    for (let index = 0; index < node.children.length; index++) {
+      const child = node.children[index];
+      if (!child) continue;
+      const snap = snapshotWorkspaceNode(child, paneIndex);
+      if (!snap) continue;
+      children.push(snap);
+      ratios.push(node.ratios[index] ?? 1);
+    }
+    if (children.length === 0) return null;
+    if (children.length === 1) return children[0] ?? null;
+    return { type: 'split', direction: node.direction, ratios: normalizeRatios(ratios, children.length), children };
+  }
+
+  function instantiateWorkspaceNode(node: WorkspaceNode, opened: Array<OpenedRestorable | null>): PaneNode | null {
+    if (node.type === 'leaf') {
+      const item = opened[node.paneIndex];
+      return item ? { type: 'leaf', id: item.session.id, pane: item.session } : null;
+    }
+    const children = node.children
+      .map((child) => instantiateWorkspaceNode(child, opened))
+      .filter((child): child is PaneNode => !!child);
+    if (children.length === 0) return null;
+    if (children.length === 1) return children[0] ?? null;
+    return {
+      type: 'split',
+      id: uuidv4(),
+      direction: node.direction,
+      children,
+      ratios: normalizeRatios(node.ratios, children.length),
+    };
+  }
+
+  function normalizeSessionWorkspaces(value: unknown): SessionWorkspace[] {
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is SessionWorkspace => {
+      if (!item || typeof item !== 'object') return false;
+      const row = item as Record<string, unknown>;
+      return typeof row.id === 'string'
+        && typeof row.name === 'string'
+        && Array.isArray(row.tabs);
+    });
+  }
+
+  async function loadSessionWorkspaces() {
+    try {
+      const result = await rpc.call<{ value: unknown }>('settings.get', { key: 'sessionWorkspaces' });
+      sessionWorkspaces = normalizeSessionWorkspaces(result.value);
+    } catch {
+      sessionWorkspaces = [];
+    }
+  }
+
+  async function saveSessionWorkspaces(next: SessionWorkspace[]) {
+    sessionWorkspaces = next;
+    await rpc.call('settings.set', { key: 'sessionWorkspaces', value: next });
+  }
+
+  function snapshotCurrentWorkspace(name: string): SessionWorkspace | null {
+    const workspaceTabs: WorkspaceTab[] = [];
+    for (const tab of tabs.tabs) {
+      const paneIndex = new Map<string, number>();
+      const panes: Restorable[] = [];
+      for (const pane of tab.panes) {
+        const restore = restoreMap.get(pane.id);
+        if (!restore) continue;
+        paneIndex.set(pane.id, panes.length);
+        panes.push(cloneJson(restore));
+      }
+      const layout = snapshotWorkspaceNode(tab.layout, paneIndex);
+      if (!layout || panes.length === 0) continue;
+      const activePaneIndex = paneIndex.get(tab.activePaneId) ?? 0;
+      const maximizedPaneIndex = tab.maximizedPaneId ? paneIndex.get(tab.maximizedPaneId) ?? null : null;
+      workspaceTabs.push({
+        title: tab.title,
+        layout,
+        activePaneIndex,
+        maximizedPaneIndex,
+        panes,
+        sftpDock: sftpDocks[tab.id] ? cloneJson(sftpDocks[tab.id]) : null,
+        sftpDockCollapsed: !!sftpDockCollapsed[tab.id],
+      });
+    }
+    if (workspaceTabs.length === 0) return null;
+    const now = Date.now();
+    return { id: uuidv4(), name, createdAt: now, updatedAt: now, tabs: workspaceTabs };
+  }
+
+  async function saveCurrentSessionWorkspace() {
+    if (tabs.tabs.length === 0) {
+      onError(i18n.t('workspace.noOpenTabs'));
+      return;
+    }
+    const fallbackName = i18n.t('workspace.defaultName', { count: sessionWorkspaces.length + 1 });
+    const name = prompt(i18n.t('workspace.namePrompt'), fallbackName)?.trim();
+    if (!name) return;
+    const snapshot = snapshotCurrentWorkspace(name);
+    if (!snapshot) {
+      onError(i18n.t('workspace.emptyNoRestorable'));
+      return;
+    }
+    await saveSessionWorkspaces([snapshot, ...sessionWorkspaces.filter((item) => item.name !== name)]);
+    status = i18n.t('workspace.saved', { name });
+  }
+
+  async function openSessionWorkspace(workspace: SessionWorkspace) {
+    let openedTabs = 0;
+    for (const tab of workspace.tabs) {
+      const opened: Array<OpenedRestorable | null> = [];
+      for (const restore of tab.panes) {
+        try {
+          opened.push(await openRestorableSession(restore));
+        } catch (e) {
+          opened.push(null);
+          onError(`workspace: ${(e as Error).message}`);
+        }
+      }
+      const layout = instantiateWorkspaceNode(tab.layout, opened);
+      if (!layout) continue;
+      const active = opened[tab.activePaneIndex]?.session.id;
+      const maximized = typeof tab.maximizedPaneIndex === 'number'
+        ? opened[tab.maximizedPaneIndex]?.session.id ?? null
+        : null;
+      const created = tabs.addLayout(tab.title, layout, active, maximized);
+      for (const item of opened) {
+        if (item) restoreMap.set(item.session.id, item.restore);
+      }
+      if (tab.sftpDock) {
+        sftpDocks = { ...sftpDocks, [created.id]: cloneJson(tab.sftpDock) };
+        sftpDockCollapsed = { ...sftpDockCollapsed, [created.id]: !!tab.sftpDockCollapsed };
+      }
+      openedTabs += 1;
+    }
+    if (openedTabs > 0) {
+      persistOpenTabs();
+      status = i18n.t('workspace.opened', { name: workspace.name });
+    }
+  }
+
+  async function deleteSessionWorkspace(workspace: SessionWorkspace) {
+    if (!confirm(i18n.t('workspace.deleteConfirm', { name: workspace.name }))) return;
+    await saveSessionWorkspaces(sessionWorkspaces.filter((item) => item.id !== workspace.id));
+    status = i18n.t('workspace.deleted', { name: workspace.name });
+  }
+
 
   onMount(async () => {
     await i18n.load(rpc);
+    await loadSessionWorkspaces();
     status = i18n.t('app.status.idle');
     try {
       const v = await rpc.call<{ version: string }>('core.version');
@@ -198,6 +395,11 @@
 
   function onError(msg: string) {
     status = msg;
+  }
+
+  function openSettings(section: 'appearance' | 'profiles' = 'appearance') {
+    settingsInitialSection = section;
+    settingsOpen = true;
   }
 
   async function loadHostStatsSettings() {
@@ -594,11 +796,27 @@
       { id: 'focus-down', title: i18n.t('action.focusPaneDown'), shortcut: 'Alt+↓', run: () => focusPaneDirection('down') },
       { id: 'next-pane', title: i18n.t('action.nextPane'), shortcut: 'Alt+]', run: () => cyclePane(1) },
       { id: 'prev-pane', title: i18n.t('action.previousPane'), shortcut: 'Alt+[', run: () => cyclePane(-1) },
-      { id: 'settings', title: i18n.t('action.openSettings'), shortcut: 'Ctrl+,', run: () => (settingsOpen = true) },
+      { id: 'settings', title: i18n.t('action.openSettings'), shortcut: 'Ctrl+,', run: () => openSettings() },
+      { id: 'profile-health', title: i18n.t('action.profileHealthCheck'), subtitle: i18n.t('settings.nav.profiles'), run: () => openSettings('profiles') },
+      { id: 'workspace-save', title: i18n.t('action.saveSessionWorkspace'), run: () => saveCurrentSessionWorkspace() },
       { id: 'toggle-sidebar', title: sidebarVisible ? i18n.t('action.hideSidebar') : i18n.t('action.showSidebar'), shortcut: 'Ctrl+Alt+S', run: () => { void setSidebarVisible(!sidebarVisible); } },
       { id: 'new-profile', title: i18n.t('action.newSshProfile'), run: () => profileModal?.open() },
       { id: 'new-serial', title: i18n.t('action.newSerialConnection'), run: () => serialModal?.open() },
     ];
+    for (const workspace of sessionWorkspaces) {
+      acts.push({
+        id: `workspace-open-${workspace.id}`,
+        title: i18n.t('action.openSessionWorkspace', { name: workspace.name }),
+        subtitle: i18n.t('workspace.tabsSummary', { count: workspace.tabs.length, suffix: workspace.tabs.length === 1 ? '' : 's' }),
+        run: () => openSessionWorkspace(workspace),
+      });
+      acts.push({
+        id: `workspace-delete-${workspace.id}`,
+        title: i18n.t('action.deleteSessionWorkspace', { name: workspace.name }),
+        subtitle: i18n.t('workspace.tabsSummary', { count: workspace.tabs.length, suffix: workspace.tabs.length === 1 ? '' : 's' }),
+        run: () => deleteSessionWorkspace(workspace),
+      });
+    }
     for (const p of savedProfiles) {
       acts.push({
         id: `connect-${p.id}`,
@@ -655,7 +873,7 @@
     hotkeys.registerHandler('next-pane',   () => cyclePane(1));
     hotkeys.registerHandler('prev-pane',   () => cyclePane(-1));
     hotkeys.registerHandler('palette',     () => { paletteOpen = true; });
-    hotkeys.registerHandler('settings',    () => { settingsOpen = true; });
+    hotkeys.registerHandler('settings',    () => openSettings());
     hotkeys.registerHandler('toggle-sidebar', () => { void setSidebarVisible(!sidebarVisible); });
     hotkeys.registerHandler('search',      () => {
       document.dispatchEvent(new CustomEvent('tabby:search'));
@@ -688,7 +906,10 @@
   }
   // Keep palette profile list fresh whenever it opens.
   $effect(() => {
-    if (paletteOpen) void refreshProfileList();
+    if (paletteOpen) {
+      void refreshProfileList();
+      void loadSessionWorkspaces();
+    }
   });
 
   // M9 — re-persist the open-tabs list whenever it changes (add / close /
@@ -737,7 +958,7 @@
       openProfileModal={(p) => profileModal?.open(p)}
       openSerialModal={() => serialModal?.open()}
       openSftp={(p) => openSftpDock({ name: p.name, ssh: p.ssh })}
-      openSettings={() => (settingsOpen = true)}
+      openSettings={() => openSettings()}
       {onError}
     />
   {/if}
@@ -839,6 +1060,7 @@
 {#if settingsOpen}
   <SettingsLayout
     {rpc}
+    initialSection={settingsInitialSection}
     onClose={() => (settingsOpen = false)}
     onSettingsChanged={() => (settingsRev += 1)}
     {onError}

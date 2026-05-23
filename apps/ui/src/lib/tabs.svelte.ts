@@ -212,6 +212,31 @@ class TabStore {
     return tab;
   }
 
+  /** Open a new tab from a prebuilt pane tree, used by session workspace restore. */
+  addLayout(
+    title: string,
+    layout: PaneNode,
+    activePaneId?: string,
+    maximizedPaneId?: string | null,
+  ): Tab {
+    const panes = flatten(layout);
+    const first = panes[0];
+    if (!first) throw new Error('cannot add empty tab layout');
+    const tab: Tab = {
+      id: first.id,
+      layout,
+      panes,
+      activePaneId: activePaneId && panes.some((pane) => pane.id === activePaneId) ? activePaneId : first.id,
+      maximizedPaneId: maximizedPaneId && panes.some((pane) => pane.id === maximizedPaneId) ? maximizedPaneId : null,
+      title: title || first.title || first.id.slice(0, 8),
+      activity: {},
+    };
+    this.tabs.push(tab);
+    this.activeId = tab.id;
+    this.bump();
+    return tab;
+  }
+
   /** Split the active pane in an existing tab and focus the new pane. */
   addPane(tabId: string, session: SessionMeta, direction: SplitDir = 'row', side: SplitSide = 'after') {
     const tab = this.tabs.find((candidate) => candidate.id === tabId);

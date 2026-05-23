@@ -16,6 +16,7 @@ pub mod error;
 pub mod ipc;
 pub mod plugins;
 pub mod profile;
+pub mod profile_health;
 pub mod secret;
 pub mod serial;
 pub mod settings;
