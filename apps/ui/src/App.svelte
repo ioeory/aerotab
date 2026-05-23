@@ -10,7 +10,7 @@
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
   import { selectClient, uuidv4 } from './lib/rpc';
-  import { tabs, type PaneNode, type SplitDir, type SplitSide } from './lib/tabs.svelte';
+  import { tabs, type PaneNode, type SplitDir, type SplitSide, type Tab } from './lib/tabs.svelte';
   import { applyTheme, BUILTIN_THEMES } from './lib/theme';
   import { applyCustomCss, applyLigatures } from './lib/customCss';
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
@@ -20,10 +20,11 @@
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
   import { dispatchFocusPane } from './lib/focusPane';
+  import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.1.29-ui-20260524';
+  const buildId = '0.1.30-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -62,6 +63,9 @@
   let savedProfiles = $state<StoredProfile[]>([]);
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
   let sidebarVisible = $state(true);
+  const SFTP_DOCK_WIDTH_MIN = 280;
+  const SFTP_DOCK_WIDTH_MAX = 720;
+  let sftpDockWidthPx = $state(400);
 
   interface SftpDockTarget {
     name: string;
@@ -457,6 +461,7 @@
 
   onMount(async () => {
     await i18n.load(rpc);
+    await loadSftpDockWidth();
     await loadSessionWorkspaces();
     status = i18n.t('app.status.idle');
     try {
@@ -785,6 +790,127 @@
     tabs.toggleMaximize(tab.id, tab.activePaneId);
   }
 
+  async function closeTabSessions(tab: Tab) {
+    const pane_ids = tab.panes.map((p) => p.id);
+    tabs.remove(tab.id);
+    for (const id of pane_ids) {
+      try { await rpc.call('session.close', { id }); } catch (e) { console.warn(e); }
+    }
+    const { [tab.id]: _o, ...restOpen } = sftpDockOpen;
+    const { [tab.id]: _p, ...restPinned } = sftpDockPinned;
+    const { [tab.id]: _c, ...restCollapsed } = sftpDockCollapsed;
+    sftpDockOpen = restOpen;
+    sftpDockPinned = restPinned;
+    sftpDockCollapsed = restCollapsed;
+  }
+
+  async function closeOtherTabs(keepId: string) {
+    for (const tab of [...tabs.tabs]) {
+      if (tab.id !== keepId) await closeTabSessions(tab);
+    }
+  }
+
+  async function closeTabsToRight(fromIndex: number) {
+    for (let i = tabs.tabs.length - 1; i > fromIndex; i--) {
+      const tab = tabs.tabs[i];
+      if (tab) await closeTabSessions(tab);
+    }
+  }
+
+  async function closeAllTabs() {
+    for (const tab of [...tabs.tabs]) {
+      await closeTabSessions(tab);
+    }
+  }
+
+  async function duplicateTab(source: Tab) {
+    const paneIndex = new Map<string, number>();
+    const panes: Restorable[] = [];
+    for (const pane of source.panes) {
+      const restore = restoreMap.get(pane.id);
+      if (!restore) {
+        onError(i18n.t('tabbar.duplicateFailed'));
+        return;
+      }
+      paneIndex.set(pane.id, panes.length);
+      panes.push(cloneJson(restore));
+    }
+    const layoutSnap = snapshotWorkspaceNode(source.layout, paneIndex);
+    if (!layoutSnap) {
+      onError(i18n.t('tabbar.duplicateFailed'));
+      return;
+    }
+    const opened: Array<OpenedRestorable | null> = [];
+    for (const restore of panes) {
+      try {
+        opened.push(await openRestorableSession(restore));
+      } catch (e) {
+        opened.push(null);
+        onError(`duplicate: ${(e as Error).message}`);
+      }
+    }
+    const layout = instantiateWorkspaceNode(layoutSnap, opened);
+    if (!layout) return;
+    const activeIdx = paneIndex.get(source.activePaneId) ?? 0;
+    const active = opened[activeIdx]?.session.id;
+    const maxIdx = source.maximizedPaneId ? paneIndex.get(source.maximizedPaneId) : undefined;
+    const maximized = typeof maxIdx === 'number' ? opened[maxIdx]?.session.id ?? null : null;
+    const created = tabs.addLayout(`${source.title} (copy)`, layout, active, maximized);
+    for (const item of opened) {
+      if (item) restoreMap.set(item.session.id, item.restore);
+    }
+    if (sftpDockOpen[source.id]) {
+      sftpDockOpen = { ...sftpDockOpen, [created.id]: true };
+      if (sftpDockCollapsed[source.id]) {
+        sftpDockCollapsed = { ...sftpDockCollapsed, [created.id]: true };
+      }
+    }
+    tabs.activate(created.id);
+    requestAnimationFrame(() => focusActivePane());
+  }
+
+  async function loadSftpDockWidth() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sftp' });
+      if (r.value && typeof r.value === 'object') {
+        const v = r.value as Record<string, unknown>;
+        if (typeof v.dockWidthPx === 'number') {
+          sftpDockWidthPx = Math.max(SFTP_DOCK_WIDTH_MIN, Math.min(SFTP_DOCK_WIDTH_MAX, v.dockWidthPx));
+        }
+      }
+    } catch { /* optional */ }
+  }
+
+  async function persistSftpDockWidth() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sftp' });
+      const current = r.value && typeof r.value === 'object' ? r.value as Record<string, unknown> : {};
+      await rpc.call('settings.set', {
+        key: 'sftp',
+        value: { ...current, dockWidthPx: sftpDockWidthPx },
+      });
+    } catch (e) {
+      onError(`sftp settings: ${(e as Error).message}`);
+    }
+  }
+
+  function onSftpDockResizePointerDown(ev: PointerEvent) {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = sftpDockWidthPx;
+    const onMove = (move: PointerEvent) => {
+      const delta = startX - move.clientX;
+      sftpDockWidthPx = Math.max(SFTP_DOCK_WIDTH_MIN, Math.min(SFTP_DOCK_WIDTH_MAX, startWidth + delta));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      void persistSftpDockWidth();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
   function openSftpDock(target: SftpDockTarget, tabId = tabs.activeId ?? GLOBAL_SFTP_KEY) {
     sftpDockOpen = { ...sftpDockOpen, [tabId]: true };
     sftpDockCollapsed = { ...sftpDockCollapsed, [tabId]: false };
@@ -930,15 +1056,16 @@
       return;
     }
     if (item.kind === 'ssh-config') {
-      const sshProfile: SshProfileSpec = {
-        host: item.entry.host,
-        port: item.entry.port,
-        user: item.entry.user ?? 'root',
-        auth: item.entry.identity_file
-          ? { PublicKey: { key_path: item.entry.identity_file } }
-          : 'Agent',
-        jump_via: [],
+      let catalog: SshConfigEntry[] = [];
+      try {
+        const d = await rpc.call<{ sshConfig: SshConfigEntry[] }>('profile.discover');
+        catalog = d.sshConfig ?? [];
+      } catch { catalog = []; }
+      const entry: SshConfigEntry = {
+        ...item.entry,
+        proxy_jump: item.entry.proxy_jump ?? [],
       };
+      const sshProfile = sshProfileFromSshConfig(entry, catalog);
       try {
         const meta = await rpc.call<{ id: string; kind: string; title: string }>(
           'session.openSsh',
@@ -1187,6 +1314,10 @@
       onAddTab={() => (pickerOpen = true)}
       onSplit={(direction) => { void splitActive(direction); }}
       onOpenSftp={() => { void openSftpForActivePane(); }}
+      onDuplicateTab={(tab) => { void duplicateTab(tab); }}
+      onCloseOthers={(id) => { void closeOtherTabs(id); }}
+      onCloseToRight={(idx) => { void closeTabsToRight(idx); }}
+      onCloseAll={() => { void closeAllTabs(); }}
     />
 
     <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">
@@ -1230,7 +1361,16 @@
             </button>
           </div>
         {:else}
-          <div class="shrink-0 min-w-[320px] max-w-[520px] h-full border-l border-[var(--color-border-soft)]" style="width: clamp(320px, 38vw, 460px);">
+          <button
+            type="button"
+            aria-label={i18n.t('sftp.resizeDock')}
+            class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
+            onpointerdown={onSftpDockResizePointerDown}
+          ></button>
+          <div
+            class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
+            style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
+          >
             {#key sftpBrowserKey}
               <SftpBrowser
                 {rpc}

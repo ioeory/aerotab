@@ -4,6 +4,7 @@
   import { uuidv4 } from '../lib/rpc';
   import type { StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
+  import { loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
   import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -38,23 +39,6 @@
     return jumps
       .map((j) => `${j.user}@${j.host}${j.port === 22 ? '' : ':' + j.port}`)
       .join('\n');
-  }
-
-  function parseJumps(text: string, auth: SshAuth): SshProfileSpec[] {
-    return text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .map((line) => {
-        const at = line.indexOf('@');
-        if (at < 0) throw new Error(`jump host "${line}" missing user@`);
-        const u = line.slice(0, at);
-        const rest = line.slice(at + 1);
-        const colon = rest.lastIndexOf(':');
-        const h = colon >= 0 ? rest.slice(0, colon) : rest;
-        const p = colon >= 0 ? Number(rest.slice(colon + 1)) || 22 : 22;
-        return { host: h, port: p, user: u, auth, jump_via: [] };
-      });
   }
 
   export function open(existing?: StoredProfile) {
@@ -117,7 +101,8 @@
         : { Password: { secret: password } };
     let jump_via: SshProfileSpec[];
     try {
-      jump_via = parseJumps(jumpsText, auth);
+      const profiles = await loadProfilesForJumps(rpc);
+      jump_via = parseJumpLines(jumpsText, auth, profiles);
     } catch (e) {
       onError((e as Error).message);
       return;
@@ -245,9 +230,10 @@
       id="pm-jumps"
       bind:value={jumpsText}
       rows="2"
-      placeholder="jumpuser@bastion.example.com&#10;deep@inner.gw:2222"
+      placeholder="jumpuser@bastion.example.com&#10;@prod-bastion"
       class="input font-mono text-[11.5px]"
     ></textarea>
+    <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">{i18n.t('profileModal.proxyJumpProfileRef')}</p>
 
     <div class="flex justify-end gap-2 mt-5">
       <button type="button" onclick={close} class="btn-secondary">{i18n.t('common.cancel')}</button>

@@ -21,6 +21,8 @@ pub struct SshConfigEntry {
     pub port: u16,
     pub user: Option<String>,
     pub identity_file: Option<String>,
+    /// Host aliases from `ProxyJump` / `Proxyjump` (left-to-right bastion order).
+    pub proxy_jump: Vec<String>,
 }
 
 /// Default location, honouring `$HOME`. Returns None on platforms where
@@ -71,6 +73,7 @@ pub fn parse(text: &str) -> Vec<SshConfigEntry> {
                 port: 22,
                 user: None,
                 identity_file: None,
+                proxy_jump: Vec::new(),
             });
         } else if let Some(e) = current.as_mut() {
             match kw_lc.as_str() {
@@ -82,6 +85,15 @@ pub fn parse(text: &str) -> Vec<SshConfigEntry> {
                     }
                 }
                 "identityfile" => e.identity_file = Some(expand_tilde(val)),
+                "proxyjump" => {
+                    e.proxy_jump = val
+                        .split(',')
+                        .flat_map(|part| part.split_whitespace())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
                 _ => {}
             }
         }
@@ -183,5 +195,21 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].host, "2.2.2.2");
         assert_eq!(entries[0].port, 2200);
+    }
+
+    #[test]
+    fn parses_proxy_jump() {
+        let cfg = "
+            Host bastion
+              HostName 10.0.0.1
+              User jump
+
+            Host target
+              HostName 10.0.0.2
+              ProxyJump bastion
+        ";
+        let entries = parse(cfg);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].proxy_jump, vec!["bastion".to_string()]);
     }
 }

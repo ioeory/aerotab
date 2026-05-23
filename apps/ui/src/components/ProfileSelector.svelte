@@ -32,6 +32,7 @@
     port: number;
     user: string | null;
     identity_file: string | null;
+    proxy_jump?: string[];
   }
 
   // Discriminated union of every clickable item the picker can show.

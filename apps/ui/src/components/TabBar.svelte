@@ -11,10 +11,28 @@
     onAddTab?: () => void;
     onSplit?: (direction: SplitDir) => void;
     onOpenSftp?: () => void;
+    onDuplicateTab?: (tab: Tab) => void;
+    onCloseOthers?: (tabId: string) => void;
+    onCloseToRight?: (tabIndex: number) => void;
+    onCloseAll?: () => void;
   }
-  let { rpc, onAddTab, onSplit, onOpenSftp }: Props = $props();
+  let {
+    rpc,
+    onAddTab,
+    onSplit,
+    onOpenSftp,
+    onDuplicateTab,
+    onCloseOthers,
+    onCloseToRight,
+    onCloseAll,
+  }: Props = $props();
 
   let dragIdx: number | null = $state(null);
+  let menuOpen = $state(false);
+  let menuX = $state(0);
+  let menuY = $state(0);
+  let menuTab = $state<Tab | null>(null);
+  let menuTabIndex = $state(-1);
 
   function iconFor(kind: string) {
     if (kind === 'Ssh') return Server;
@@ -22,8 +40,8 @@
     return TerminalIcon;
   }
 
-  async function close(tab: Tab, ev: Event) {
-    ev.stopPropagation();
+  async function closeTab(tab: Tab, ev?: Event) {
+    ev?.stopPropagation();
     const ws = getWindowSettings();
     if (ws.confirmCloseWithMultipleTabs !== false && tab.panes.length > 1) {
       if (!confirm(i18n.t('tabbar.closeMultiPaneConfirm', { count: tab.panes.length }))) return;
@@ -35,8 +53,23 @@
     }
   }
 
+  function showTabMenu(tab: Tab, index: number, ev: MouseEvent) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    menuTab = tab;
+    menuTabIndex = index;
+    menuX = ev.clientX;
+    menuY = ev.clientY;
+    menuOpen = true;
+  }
+
+  function closeMenu() {
+    menuOpen = false;
+    menuTab = null;
+    menuTabIndex = -1;
+  }
+
   function onTabHover(tab: Tab) {
-    // focus-follows-mouse: activating on hover when enabled in Window section.
     if (getWindowSettings().focusFollowsMouse) tabs.activate(tab.id);
   }
 
@@ -66,6 +99,8 @@
   }
 </script>
 
+<svelte:window onclick={closeMenu} />
+
 <div class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
   {#each tabs.tabs as tab, i (tab.id)}
     {@const first = tabs.firstPane(tab)}
@@ -80,6 +115,7 @@
       ondragover={onDragOver}
       ondrop={(e) => onDrop(i, e)}
       onclick={() => activateTab(tab.id)}
+      oncontextmenu={(e) => showTabMenu(tab, i, e)}
       onpointerenter={() => onTabHover(tab)}
       onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') activateTab(tab.id); }}
       class="group flex items-center gap-2 px-3 py-1.5 rounded-t-md cursor-pointer text-[12.5px] border-t border-l border-r transition-colors
@@ -107,7 +143,7 @@
         title={i18n.t('tabbar.closeTab')}
         aria-label={i18n.t('tabbar.closeTab')}
         class="opacity-50 group-hover:opacity-100 hover:text-[var(--color-danger)] -mr-1 p-0.5"
-        onclick={(e) => close(tab, e)}
+        onclick={(e) => closeTab(tab, e)}
       >
         <X size={12} />
       </button>
@@ -149,3 +185,58 @@
     </div>
   {/if}
 </div>
+
+{#if menuOpen && menuTab}
+  <div
+    class="fixed z-[200] min-w-[180px] py-1 rounded-md border border-[var(--color-border)]
+           bg-[var(--color-panel)] shadow-xl text-[12px]"
+    style="left: {menuX}px; top: {menuY}px;"
+    role="menu"
+  >
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { const t = menuTab!; closeMenu(); void closeTab(t); }}>
+      {i18n.t('tabbar.closeTab')}
+    </button>
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { const id = menuTab!.id; closeMenu(); onCloseOthers?.(id); }}>
+      {i18n.t('tabbar.closeOthers')}
+    </button>
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { const idx = menuTabIndex; closeMenu(); onCloseToRight?.(idx); }}
+            disabled={menuTabIndex >= tabs.tabs.length - 1}>
+      {i18n.t('tabbar.closeToRight')}
+    </button>
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { closeMenu(); onCloseAll?.(); }}>
+      {i18n.t('tabbar.closeAll')}
+    </button>
+    <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { const t = menuTab!; closeMenu(); onDuplicateTab?.(t); }}>
+      {i18n.t('tabbar.duplicateTab')}
+    </button>
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { const t = menuTab!; closeMenu(); activateTab(t.id); onOpenSftp?.(); }}
+            disabled={!menuTab.panes.some((p) => p.kind === 'Ssh' || p.profileId || p.sshProfile)}>
+      {i18n.t('tabbar.openSftpTab')}
+    </button>
+  </div>
+{/if}
+
+<style>
+  .ctx-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.4rem 0.75rem;
+    color: var(--color-fg);
+  }
+  .ctx-item:hover:not(:disabled) {
+    background: var(--color-panel-2);
+    color: var(--color-accent);
+  }
+  .ctx-item:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+</style>

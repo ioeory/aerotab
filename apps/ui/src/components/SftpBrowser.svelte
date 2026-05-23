@@ -458,6 +458,14 @@
     updateTransfer(id, { status: 'canceled', message: 'Canceled' });
   }
 
+  function cancelActiveTransfers() {
+    for (const task of transfers) {
+      if (task.status === 'queued' || task.status === 'running') {
+        updateTransfer(task.id, { status: 'canceled', message: 'Canceled' });
+      }
+    }
+  }
+
   function clearFinishedTransfers() {
     const finished = new Set(
       transfers
@@ -904,6 +912,11 @@
         <div class="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-[var(--color-panel)] border-b border-[var(--color-border-soft)]">
           <div class="text-[11px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">{i18n.t('sftp.transfers')}</div>
           <div class="text-[11px] text-[var(--color-fg-muted)]">{transfers.length}</div>
+          <button
+            type="button"
+            class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            onclick={cancelActiveTransfers}
+          >{i18n.t('sftp.cancelAll')}</button>
           <button
             type="button"
             class="ml-auto text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
