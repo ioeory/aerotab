@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { RefreshCw, Server, Trash2 } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
-  import type { KnownHostEntry } from '../../../lib/types';
+  import type { KnownHostEntry, StoredProfile, TunnelKind, TunnelMeta } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
 
@@ -34,7 +34,83 @@
   let knownHostsBusy = $state(false);
   let knownHostsStatus = $state('');
 
+  let sshProfiles = $state<StoredProfile[]>([]);
+  let tunnelKind = $state<TunnelKind>('local');
+  let tunnelProfileId = $state('');
+  let tunnelBindHost = $state('127.0.0.1');
+  let tunnelBindPort = $state(8080);
+  let tunnelTargetHost = $state('127.0.0.1');
+  let tunnelTargetPort = $state(80);
+  let tunnels = $state<TunnelMeta[]>([]);
+  let tunnelsBusy = $state(false);
+
   function markDirty() { settingsCoord.markDirty(); }
+
+  function tunnelKindLabel(kind: TunnelKind): string {
+    if (kind === 'local') return i18n.t('ssh.tunnelKind.local');
+    if (kind === 'remote') return i18n.t('ssh.tunnelKind.remote');
+    return i18n.t('ssh.tunnelKind.dynamic');
+  }
+
+  async function loadSshProfiles() {
+    try {
+      const list = await rpc.call<StoredProfile[]>('profile.list');
+      sshProfiles = list.filter((p) => p.kind === 'ssh');
+      const first = sshProfiles[0];
+      if (!tunnelProfileId && first) {
+        tunnelProfileId = first.id;
+      }
+    } catch (e) {
+      onError(`profiles: ${(e as Error).message}`);
+    }
+  }
+
+  async function loadTunnels() {
+    tunnelsBusy = true;
+    try {
+      tunnels = await rpc.call<TunnelMeta[]>('tunnel.list', {});
+    } catch (e) {
+      onError(`tunnel.list: ${(e as Error).message}`);
+    } finally {
+      tunnelsBusy = false;
+    }
+  }
+
+  async function openTunnel() {
+    const profile = sshProfiles.find((p) => p.id === tunnelProfileId);
+    if (!profile) {
+      onError('tunnel: no SSH profile selected');
+      return;
+    }
+    tunnelsBusy = true;
+    try {
+      await rpc.call<TunnelMeta>('tunnel.open', {
+        profile: profile.ssh,
+        kind: tunnelKind,
+        bind_host: tunnelBindHost,
+        bind_port: tunnelBindPort,
+        target_host: tunnelTargetHost,
+        target_port: tunnelTargetPort,
+      });
+      await loadTunnels();
+    } catch (e) {
+      onError(i18n.t('ssh.tunnelOpenFailed', { message: (e as Error).message }));
+    } finally {
+      tunnelsBusy = false;
+    }
+  }
+
+  async function closeTunnel(id: string) {
+    tunnelsBusy = true;
+    try {
+      await rpc.call('tunnel.close', { id });
+      await loadTunnels();
+    } catch (e) {
+      onError(`tunnel.close: ${(e as Error).message}`);
+    } finally {
+      tunnelsBusy = false;
+    }
+  }
 
   async function load() {
     try {
@@ -127,6 +203,8 @@
     void (async () => {
       await load();
       await loadKnownHosts();
+      await loadSshProfiles();
+      await loadTunnels();
     })();
   });
   onDestroy(() => settingsCoord.unregisterSaver('ssh'));
@@ -254,6 +332,78 @@
     <span class="row-label">{i18n.t('ssh.warnClose')}</span>
     <input type="checkbox" bind:checked={warnOnClose} onchange={markDirty} />
   </label>
+
+  <div class="section-h">{i18n.t('ssh.tunnels')}</div>
+  <label class="row">
+    <span class="row-label">{i18n.t('ssh.tunnelKind')}</span>
+    <select bind:value={tunnelKind}>
+      <option value="local">{i18n.t('ssh.tunnelKind.local')}</option>
+      <option value="remote">{i18n.t('ssh.tunnelKind.remote')}</option>
+      <option value="dynamic">{i18n.t('ssh.tunnelKind.dynamic')}</option>
+    </select>
+  </label>
+  <label class="row">
+    <span class="row-label">{i18n.t('ssh.tunnelProfile')}</span>
+    <select bind:value={tunnelProfileId} disabled={sshProfiles.length === 0}>
+      {#each sshProfiles as p (p.id)}
+        <option value={p.id}>{p.name}</option>
+      {/each}
+    </select>
+  </label>
+  <label class="row">
+    <span class="row-label">
+      {tunnelKind === 'remote' ? i18n.t('ssh.tunnelRemoteBind') : i18n.t('ssh.tunnelBind')}
+    </span>
+    <div class="inline-row">
+      <input type="text" bind:value={tunnelBindHost} placeholder="127.0.0.1" />
+      <input type="number" min="1" max="65535" bind:value={tunnelBindPort} class="port-input" />
+    </div>
+  </label>
+  {#if tunnelKind === 'dynamic'}
+    <p class="tunnel-hint">{i18n.t('ssh.tunnelDynamicHint')}</p>
+  {:else}
+    <label class="row">
+      <span class="row-label">
+        {tunnelKind === 'remote' ? i18n.t('ssh.tunnelLocalTarget') : i18n.t('ssh.tunnelTarget')}
+      </span>
+      <div class="inline-row">
+        <input type="text" bind:value={tunnelTargetHost} placeholder="127.0.0.1" />
+        <input type="number" min="1" max="65535" bind:value={tunnelTargetPort} class="port-input" />
+      </div>
+    </label>
+  {/if}
+  <div class="tunnel-toolbar">
+    <button type="button" class="btn-secondary" onclick={openTunnel}
+            disabled={tunnelsBusy || sshProfiles.length === 0}>
+      {i18n.t('ssh.tunnelOpen')}
+    </button>
+    <button type="button" class="btn-secondary" onclick={loadTunnels} disabled={tunnelsBusy}>
+      {i18n.t('ssh.tunnelRefresh')}
+    </button>
+  </div>
+  <div class="known-hosts-list">
+    {#if tunnels.length === 0}
+      <div class="known-host-empty">{i18n.t('ssh.tunnelNone')}</div>
+    {:else}
+      {#each tunnels as t (t.id)}
+        <div class="known-host-row">
+          <div class="min-w-0 flex-1 text-[12px]">
+            {i18n.t('ssh.tunnelRow', {
+              kind: tunnelKindLabel(t.kind),
+              bind: `${t.bind_host}:${t.bind_port}`,
+              target: t.kind === 'dynamic' ? 'SOCKS5' : `${t.target_host}:${t.target_port}`,
+              user: t.ssh_user,
+              host: t.ssh_host,
+            })}
+          </div>
+          <button type="button" class="btn-danger" onclick={() => closeTunnel(t.id)}
+                  disabled={tunnelsBusy} title={i18n.t('ssh.tunnelClose')}>
+            {i18n.t('ssh.tunnelClose')}
+          </button>
+        </div>
+      {/each}
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -335,5 +485,16 @@
     padding: 8px;
     color: var(--color-fg-muted);
     font-style: italic;
+  }
+  .port-input { max-width: 88px !important; }
+  .tunnel-hint {
+    margin: 0 0 8px;
+    font-size: 11.5px;
+    color: var(--color-fg-muted);
+  }
+  .tunnel-toolbar {
+    display: flex;
+    gap: 8px;
+    margin: 8px 0;
   }
 </style>

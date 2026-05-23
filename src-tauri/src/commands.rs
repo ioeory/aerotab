@@ -36,6 +36,9 @@
 //! | `settings.remove`       | `{ key }`                           | `{ removed }`     |
 //! | `settings.reset`        | none                                | `null`            |
 //! | `profile.healthCheck`   | `{ ids?, connect? }`                | `[ProfileHealth]` |
+//! | `tunnel.open`           | `{ profile, kind, bind_*, target_* }`| `TunnelMeta`      |
+//! | `tunnel.close`          | `{ id }`                            | `{ closed }`      |
+//! | `tunnel.list`           | none                                | `[TunnelMeta]`    |
 //!
 //! `session.pollOutput` is a stop-gap poll API for testing without a true
 //! event stream; the production transport (Tauri or websocket) will replace
@@ -60,6 +63,7 @@ use crate::serial::{SerialChannel, SerialProfile};
 use crate::settings::SettingsStore;
 use crate::ssh::known_hosts::KnownHosts;
 use crate::ssh::sftp::{Sftp, SftpOpenOptions};
+use crate::ssh::tunnel::{TunnelKind, TunnelManager, TunnelOpenRequest};
 use crate::ssh::{self, SshProfile, SshShell};
 use crate::sync::backends::git::GitBackend;
 use crate::sync::backends::webdav::WebDavBackend;
@@ -166,6 +170,8 @@ pub struct AppState {
     pub git_backend: Mutex<Option<GitBackend>>,
     /// Open SFTP sessions, keyed by an opaque per-session id.
     pub sftp_sessions: Mutex<HashMap<Uuid, Arc<Sftp>>>,
+    /// SSH port-forwarding tunnels (`-L` / `-R` / `-D`).
+    pub tunnels: TunnelManager,
     /// Persistent settings store. Configured via `settings.configure`.
     pub settings: Mutex<Option<SettingsStore>>,
     /// Master-password vault (M10). Configured via `vault.configure`.
@@ -567,6 +573,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
     register_known_hosts(dispatcher, state.clone());
     register_ssh_stats(dispatcher, state.clone());
     register_sftp(dispatcher, state.clone());
+    register_tunnel(dispatcher, state.clone());
     register_settings(dispatcher, state.clone());
     register_vault(dispatcher, state.clone());
     register_plugins(dispatcher, state.clone());
@@ -1227,6 +1234,73 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     .await
                     .map_err(|e| internal(e.to_string()))?;
                 Ok(json!({ "path": real }))
+            }
+        });
+    }
+}
+
+// --- tunnel.* ------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TunnelOpenParams {
+    profile: SshProfile,
+    kind: TunnelKind,
+    bind_host: String,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct TunnelIdParams {
+    id: Uuid,
+}
+
+fn register_tunnel(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    {
+        let st = state.clone();
+        dispatcher.register("tunnel.open", move |params| {
+            let st = st.clone();
+            async move {
+                let p: TunnelOpenParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let kh = st.known_hosts.lock().await.clone();
+                let req = TunnelOpenRequest {
+                    profile: p.profile,
+                    kind: p.kind,
+                    bind_host: p.bind_host,
+                    bind_port: p.bind_port,
+                    target_host: p.target_host,
+                    target_port: p.target_port,
+                };
+                let meta = st
+                    .tunnels
+                    .open(req, kh)
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+                serde_json::to_value(meta).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("tunnel.close", move |params| {
+            let st = st.clone();
+            async move {
+                let p: TunnelIdParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let removed = st.tunnels.close(p.id).await;
+                Ok(json!({ "closed": removed }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("tunnel.list", move |_params| {
+            let st = st.clone();
+            async move {
+                let list = st.tunnels.list().await;
+                serde_json::to_value(list).map_err(|e| internal(e.to_string()))
             }
         });
     }

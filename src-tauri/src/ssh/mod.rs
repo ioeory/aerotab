@@ -9,6 +9,7 @@
 pub mod known_hosts;
 pub mod sftp;
 pub mod stats;
+pub mod tunnel;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -182,10 +183,14 @@ fn ssh_config() -> Arc<client::Config> {
     })
 }
 
-async fn authenticate(
-    handle: &mut client::Handle<TrustingClient>,
+async fn authenticate_custom<H>(
+    handle: &mut client::Handle<H>,
     profile: &SshProfile,
-) -> Result<(), SshError> {
+) -> Result<(), SshError>
+where
+    H: client::Handler,
+    H::Error: From<russh::Error>,
+{
     let authed = match &profile.auth {
         AuthMethod::Password { secret } => handle
             .authenticate_password(&profile.user, secret)
@@ -202,7 +207,7 @@ async fn authenticate(
                 .await
                 .map_err(SshError::from)?
         }
-        AuthMethod::Agent => authenticate_agent(handle, profile).await?,
+        AuthMethod::Agent => authenticate_agent_generic(handle, profile).await?,
     };
     if !authed {
         Err(SshError::Auth)
@@ -211,16 +216,20 @@ async fn authenticate(
     }
 }
 
-async fn authenticate_agent(
-    handle: &mut client::Handle<TrustingClient>,
+async fn authenticate_agent_generic<H>(
+    handle: &mut client::Handle<H>,
     profile: &SshProfile,
-) -> Result<bool, SshError> {
+) -> Result<bool, SshError>
+where
+    H: client::Handler,
+    H::Error: From<russh::Error>,
+{
     #[cfg(unix)]
     {
         let agent = AgentClient::connect_env()
             .await
             .map_err(|e| SshError::Agent(e.to_string()))?;
-        return authenticate_agent_client(handle, &profile.user, agent).await;
+        return authenticate_agent_client_generic(handle, &profile.user, agent).await;
     }
 
     #[cfg(windows)]
@@ -231,7 +240,7 @@ async fn authenticate_agent(
             .open(pipe)
             .map_err(|e| SshError::Agent(format!("connect openssh agent: {e}")))?;
         let agent = AgentClient::connect(stream);
-        return authenticate_agent_client(handle, &profile.user, agent).await;
+        return authenticate_agent_client_generic(handle, &profile.user, agent).await;
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -244,12 +253,14 @@ async fn authenticate_agent(
     }
 }
 
-async fn authenticate_agent_client<R>(
-    handle: &mut client::Handle<TrustingClient>,
+async fn authenticate_agent_client_generic<H, R>(
+    handle: &mut client::Handle<H>,
     user: &str,
     mut agent: AgentClient<R>,
 ) -> Result<bool, SshError>
 where
+    H: client::Handler,
+    H::Error: From<russh::Error>,
     R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let identities = agent
@@ -286,28 +297,31 @@ where
 ///
 /// `known_hosts` is consulted for every hop (each hop's `host:port` is keyed
 /// independently).
-pub async fn connect_authenticated(
+/// Dials and authenticates against `profile`, walking `jump_via` left-to-right.
+/// `make_handler` is invoked per hop; `is_final` is true on the last hop.
+pub async fn connect_authenticated_custom<H>(
     profile: &SshProfile,
-    known_hosts: Option<KnownHosts>,
-) -> Result<client::Handle<TrustingClient>, SshError> {
-    // Build the dial chain: jumps first, then the final target.
+    _known_hosts: Option<KnownHosts>,
+    mut make_handler: impl FnMut(&SshProfile, bool) -> H,
+) -> Result<client::Handle<H>, SshError>
+where
+    H: client::Handler + Send + 'static,
+    H::Error: From<russh::Error> + Send + std::fmt::Debug + std::fmt::Display,
+{
     let mut chain: Vec<&SshProfile> = profile.jump_via.iter().collect();
     chain.push(profile);
+    let final_idx = chain.len().saturating_sub(1);
 
-    let mut prev_handle: Option<client::Handle<TrustingClient>> = None;
-    for hop in chain {
-        let handler = TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: known_hosts.clone(),
-            pinned_host_key_b64: None,
-        };
+    let mut prev_handle: Option<client::Handle<H>> = None;
+    for (idx, hop) in chain.into_iter().enumerate() {
+        let is_final = idx == final_idx;
+        let handler = make_handler(hop, is_final);
         let cfg = ssh_config();
         let mut handle = match prev_handle.take() {
             None => client::connect(cfg, (hop.host.as_str(), hop.port), handler)
                 .await
                 .map_err(|e| SshError::Connect(e.to_string()))?,
             Some(prev) => {
-                // Tunnel to `hop` via direct-tcpip on `prev`.
                 let channel = prev
                     .channel_open_direct_tcpip(&hop.host, hop.port as u32, "127.0.0.1", 0)
                     .await
@@ -318,11 +332,24 @@ pub async fn connect_authenticated(
                     .map_err(|e| SshError::Connect(format!("jump connect: {e}")))?
             }
         };
-        authenticate(&mut handle, hop).await?;
+        authenticate_custom(&mut handle, hop).await?;
         prev_handle = Some(handle);
     }
 
     prev_handle.ok_or_else(|| SshError::Connect("empty connection chain".into()))
+}
+
+pub async fn connect_authenticated(
+    profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+) -> Result<client::Handle<TrustingClient>, SshError> {
+    let kh = known_hosts.clone();
+    connect_authenticated_custom(profile, known_hosts, move |hop, _| TrustingClient {
+        host_port: format!("{}:{}", hop.host, hop.port),
+        known_hosts: kh.clone(),
+        pinned_host_key_b64: None,
+    })
+    .await
 }
 
 /// Same as [`connect_shell`] but with a persistent host-key store.

@@ -51,6 +51,21 @@ export interface SshProfileSpec {
   jump_via: SshProfileSpec[];
 }
 
+export type TunnelKind = 'local' | 'remote' | 'dynamic';
+
+export interface TunnelMeta {
+  id: string;
+  kind: TunnelKind;
+  bind_host: string;
+  bind_port: number;
+  target_host: string;
+  target_port: number;
+  ssh_host: string;
+  ssh_user: string;
+  status: string;
+  error?: string;
+}
+
 export interface HostStats {
   hostname?: string | null;
   kernel?: string | null;
