@@ -8,7 +8,18 @@
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode, tauriInvoke } from '../lib/rpc';
   import { i18n } from '../lib/i18n.svelte';
-  import type { SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
+  import type { LocalEntry, SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
+  import SftpLocalPane from './SftpLocalPane.svelte';
+  import {
+    SFTP_DRAG_LOCAL,
+    SFTP_DRAG_REMOTE,
+    joinLocalPath,
+    parentLocalPath,
+    parseLocalDrag,
+    parseRemoteDrag,
+    type LocalDragPayload,
+    type RemoteDragPayload,
+  } from '../lib/sftpLocal';
 
   interface SftpSource {
     name: string;
@@ -51,9 +62,22 @@
   const downloadEntries = new Map<string, SftpEntry>();
   const knownRemoteDirs = new Set<string>();
   const CHUNK_SIZE = 256 * 1024;
+  const TEXT_EDIT_MAX_BYTES = 512 * 1024;
+
+  let localCwd = $state('');
+  let localEntries = $state<LocalEntry[]>([]);
+  let localLoading = $state(false);
+  let localListError = $state<string | null>(null);
+  let localListSeq = 0;
+
+  let editOpen = $state(false);
+  let editName = $state('');
+  let editRemotePath = $state('');
+  let editContent = $state('');
+  let editSaving = $state(false);
 
   type TransferKind = 'upload' | 'download';
-  type TransferStatus = 'queued' | 'running' | 'done' | 'error' | 'canceled';
+  type TransferStatus = 'queued' | 'running' | 'paused' | 'done' | 'error' | 'canceled';
   interface TransferTask {
     id: string;
     kind: TransferKind;
@@ -63,9 +87,226 @@
     transferred: number;
     status: TransferStatus;
     localPath?: string;
+    localFilePath?: string;
     localBaseDir?: string;
     relativePath?: string[];
     message?: string;
+  }
+
+  async function initLocalPane() {
+    if (defaultDownloadDir) {
+      localCwd = defaultDownloadDir;
+    } else {
+      const home = await tauriInvoke<string>('local_home_dir');
+      if (home) localCwd = home;
+    }
+    if (localCwd) await refreshLocal();
+  }
+
+  async function refreshLocal() {
+    if (!localCwd) return;
+    const seq = ++localListSeq;
+    localLoading = true;
+    localListError = null;
+    try {
+      const list = await tauriInvoke<LocalEntry[]>('local_list_dir', { path: localCwd });
+      if (!list) throw new Error('local file browser is not available');
+      if (seq !== localListSeq) return;
+      localEntries = list;
+    } catch (e) {
+      if (seq !== localListSeq) return;
+      localListError = (e as Error).message;
+      localEntries = [];
+    } finally {
+      if (seq === localListSeq) localLoading = false;
+    }
+  }
+
+  async function navigateLocal(path: string) {
+    localCwd = path;
+    await refreshLocal();
+  }
+
+  async function localGoUp() {
+    localCwd = parentLocalPath(localCwd);
+    await refreshLocal();
+  }
+
+  async function localGoHome() {
+    const home = await tauriInvoke<string>('local_home_dir');
+    if (home) {
+      localCwd = home;
+      await refreshLocal();
+    }
+  }
+
+  function preventDragDefaults(e: DragEvent) {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+
+  async function handleRemotePaneDrop(e: DragEvent) {
+    e.preventDefault();
+    const localRaw = e.dataTransfer?.getData(SFTP_DRAG_LOCAL);
+    if (localRaw) {
+      const payload = parseLocalDrag(localRaw);
+      if (payload) await enqueueUploadFromLocal(payload);
+      return;
+    }
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length > 0) {
+      for (const f of files) {
+        const id = nextTransferId();
+        uploadFiles.set(id, f);
+        enqueueTransfer({
+          id,
+          kind: 'upload',
+          name: f.name,
+          path: joinPath(cwd, f.name),
+          size: f.size,
+          transferred: 0,
+          status: 'queued',
+        });
+      }
+    }
+  }
+
+  async function handleLocalPaneDrop(e: DragEvent) {
+    e.preventDefault();
+    const remoteRaw = e.dataTransfer?.getData(SFTP_DRAG_REMOTE);
+    if (!remoteRaw || !sessionId) return;
+    const payload = parseRemoteDrag(remoteRaw);
+    if (!payload) return;
+    if (payload.kind === 'Dir') {
+      await downloadDirectoryToLocal(payload.path, [payload.name], localCwd);
+      return;
+    }
+    const dest = joinLocalPath(localCwd, payload.name);
+    const id = nextTransferId();
+    downloadEntries.set(id, {
+      name: payload.name,
+      kind: 'File',
+      size: payload.size,
+      mode: 0,
+      mtime: null,
+    });
+    enqueueDownloadTransfer(
+      { name: payload.name, kind: 'File', size: payload.size, mode: 0, mtime: null },
+      payload.path,
+      payload.name,
+      { id, localPath: dest },
+    );
+  }
+
+  async function enqueueUploadFromLocal(payload: LocalDragPayload) {
+    if (!sessionId) return;
+    if (payload.kind === 'dir') {
+      await collectLocalDirectoryUploads(payload.path, [payload.name]);
+      return;
+    }
+    const id = nextTransferId();
+    enqueueTransfer({
+      id,
+      kind: 'upload',
+      name: payload.name,
+      path: joinPath(cwd, payload.name),
+      size: payload.size,
+      transferred: 0,
+      status: 'queued',
+      localFilePath: payload.path,
+    });
+  }
+
+  async function collectLocalDirectoryUploads(dirPath: string, relative: string[]) {
+    const list = await tauriInvoke<LocalEntry[]>('local_list_dir', { path: dirPath });
+    if (!list) throw new Error('local file browser is not available');
+    for (const entry of list) {
+      const childPath = joinLocalPath(dirPath, entry.name);
+      const childRelative = [...relative, entry.name];
+      if (entry.kind === 'dir') {
+        await collectLocalDirectoryUploads(childPath, childRelative);
+      } else if (entry.kind === 'file') {
+        const id = nextTransferId();
+        enqueueTransfer({
+          id,
+          kind: 'upload',
+          name: childRelative.join('/'),
+          path: joinPathSegments(cwd, childRelative),
+          size: entry.size,
+          transferred: 0,
+          status: 'queued',
+          localFilePath: childPath,
+        });
+      }
+    }
+  }
+
+  async function downloadDirectoryToLocal(remotePath: string, relative: string[], baseDir: string) {
+    if (!sessionId) return;
+    await mkdirLocalRelative(baseDir, relative);
+    const list = sortEntries(await rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: remotePath }));
+    for (const entry of list) {
+      const childPath = joinPath(remotePath, entry.name);
+      const childRelative = [...relative, entry.name];
+      if (entry.kind === 'Dir') {
+        await downloadDirectoryToLocal(childPath, childRelative, baseDir);
+      } else if (entry.kind === 'File') {
+        const id = nextTransferId();
+        enqueueDownloadTransfer(entry, childPath, childRelative.join('/'), {
+          id,
+          localBaseDir: baseDir,
+          relativePath: childRelative,
+        });
+      }
+    }
+  }
+
+  function onRemoteDragStart(e: DragEvent, entry: SftpEntry) {
+    const path = joinPath(cwd, entry.name);
+    const payload: RemoteDragPayload = {
+      path,
+      name: entry.name,
+      kind: entry.kind === 'Dir' ? 'Dir' : 'File',
+      size: entry.size,
+    };
+    e.dataTransfer?.setData(SFTP_DRAG_REMOTE, JSON.stringify(payload));
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+  }
+
+  async function openTextEditor(e: SftpEntry) {
+    if (!sessionId || e.kind !== 'File') return;
+    if (e.size > TEXT_EDIT_MAX_BYTES) {
+      onError(i18n.t('sftp.editTooLarge', { max: formatSize(TEXT_EDIT_MAX_BYTES) }));
+      return;
+    }
+    try {
+      const path = joinPath(cwd, e.name);
+      const r = await rpc.call<{ data: string }>('sftp.read', { id: sessionId, path });
+      editRemotePath = path;
+      editName = e.name;
+      editContent = new TextDecoder().decode(b64decode(r.data));
+      editOpen = true;
+    } catch (err) {
+      onError(`read: ${(err as Error).message}`);
+    }
+  }
+
+  async function saveTextEditor() {
+    if (!sessionId || !editRemotePath) return;
+    editSaving = true;
+    try {
+      await rpc.call('sftp.write', {
+        id: sessionId,
+        path: editRemotePath,
+        data: b64encode(new TextEncoder().encode(editContent)),
+      });
+      editOpen = false;
+      await refresh();
+    } catch (err) {
+      onError(`save: ${(err as Error).message}`);
+    } finally {
+      editSaving = false;
+    }
   }
 
   async function loadSftpSettings() {
@@ -301,6 +542,30 @@
     return transfers.find((transfer) => transfer.id === id)?.status === 'canceled';
   }
 
+  function isPaused(id: string): boolean {
+    return transfers.find((transfer) => transfer.id === id)?.status === 'paused';
+  }
+
+  async function waitWhilePaused(id: string) {
+    while (isPaused(id) && !isCanceled(id)) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+
+  function pauseTransfer(id: string) {
+    const status = transfers.find((transfer) => transfer.id === id)?.status;
+    if (status === 'queued' || status === 'running') {
+      updateTransfer(id, { status: 'paused', message: i18n.t('sftp.paused') });
+    }
+  }
+
+  function resumeTransfer(id: string) {
+    const status = transfers.find((transfer) => transfer.id === id)?.status;
+    if (status !== 'paused') return;
+    updateTransfer(id, { status: 'queued', message: undefined });
+    void processTransfers();
+  }
+
   function enqueueTransfer(task: TransferTask) {
     transfers = [...transfers, task];
     void processTransfers();
@@ -346,14 +611,16 @@
   async function runUpload(task: TransferTask) {
     if (!sessionId) throw new Error('SFTP session is not open');
     const file = uploadFiles.get(task.id);
-    if (!file) throw new Error('local file is not available');
+    const localPath = task.localFilePath;
+    if (!file && !localPath) throw new Error('local file is not available');
+    const totalSize = file?.size ?? task.size;
     const destinationDir = parentPath(task.path);
     if (destinationDir !== '/' && destinationDir !== '.') {
       updateTransfer(task.id, { message: 'Preparing directories' });
       await ensureRemoteDir(destinationDir);
     }
     updateTransfer(task.id, { message: undefined });
-    if (file.size === 0) {
+    if (totalSize === 0) {
       await rpc.call('sftp.writeChunk', {
         id: sessionId,
         path: task.path,
@@ -365,10 +632,25 @@
       return;
     }
     let offset = 0;
-    while (offset < file.size) {
+    while (offset < totalSize) {
+      await waitWhilePaused(task.id);
       if (isCanceled(task.id)) return;
-      const chunk = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
-      const bytes = new Uint8Array(await chunk.arrayBuffer());
+      let bytes: Uint8Array;
+      if (file) {
+        const chunk = file.slice(offset, Math.min(totalSize, offset + CHUNK_SIZE));
+        bytes = new Uint8Array(await chunk.arrayBuffer());
+      } else if (localPath) {
+        const len = Math.min(CHUNK_SIZE, totalSize - offset);
+        const r = await tauriInvoke<{ data: string }>('local_read_chunk', {
+          path: localPath,
+          offset,
+          len,
+        });
+        if (!r) throw new Error('desktop file reader is not available');
+        bytes = b64decode(r.data);
+      } else {
+        throw new Error('local file is not available');
+      }
       await rpc.call('sftp.writeChunk', {
         id: sessionId,
         path: task.path,
@@ -423,6 +705,7 @@
     }
     let offset = 0;
     while (offset < entry.size) {
+      await waitWhilePaused(task.id);
       if (isCanceled(task.id)) return;
       const len = Math.min(CHUNK_SIZE, entry.size - offset);
       const r = await rpc.call<{ data: string }>('sftp.readChunk', {
@@ -460,7 +743,7 @@
 
   function cancelActiveTransfers() {
     for (const task of transfers) {
-      if (task.status === 'queued' || task.status === 'running') {
+      if (task.status === 'queued' || task.status === 'running' || task.status === 'paused') {
         updateTransfer(task.id, { status: 'canceled', message: 'Canceled' });
       }
     }
@@ -469,7 +752,9 @@
   function clearFinishedTransfers() {
     const finished = new Set(
       transfers
-        .filter((transfer) => transfer.status === 'done' || transfer.status === 'error' || transfer.status === 'canceled')
+        .filter((transfer) =>
+          transfer.status === 'done' || transfer.status === 'error' || transfer.status === 'canceled',
+        )
         .map((transfer) => transfer.id),
     );
     for (const id of finished) {
@@ -659,11 +944,12 @@
   }
 
   function transferSummary(task: TransferTask): string {
-    if (task.status === 'queued') return 'Queued';
+    if (task.status === 'queued') return i18n.t('sftp.transferQueued');
+    if (task.status === 'paused') return task.message ?? i18n.t('sftp.paused');
     if (task.status === 'running') return task.message ?? `${formatSize(task.transferred)} / ${formatSize(task.size)}`;
-    if (task.status === 'done') return 'Done';
-    if (task.status === 'canceled') return 'Canceled';
-    return task.message ?? 'Failed';
+    if (task.status === 'done') return i18n.t('sftp.transferDone');
+    if (task.status === 'canceled') return i18n.t('sftp.transferCanceled');
+    return task.message ?? i18n.t('sftp.transferFailed');
   }
 
   let breadcrumbs = $derived.by(() => {
@@ -702,8 +988,11 @@
   }
 
   onMount(() => {
-    void loadSftpSettings();
-    void connect();
+    void (async () => {
+      await loadSftpSettings();
+      await initLocalPane();
+      await connect();
+    })();
   });
 
   onDestroy(() => {
@@ -723,7 +1012,7 @@
 >
   <div
     class={mode === 'modal'
-      ? 'bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl w-full max-w-[900px] h-full max-h-[640px] flex flex-col overflow-hidden'
+      ? 'bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl w-full max-w-[min(1200px,96vw)] h-full max-h-[720px] flex flex-col overflow-hidden'
       : 'h-full w-full flex flex-col overflow-hidden'}
   >
     <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
@@ -814,81 +1103,126 @@
       </div>
     {/if}
 
-    <div class="flex-1 min-h-0 overflow-y-auto">
-      {#if loading && entries.length === 0 && !listError}
-        <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
-      {:else if entries.length === 0 && !listError}
-        <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
-      {:else}
-        <table class="w-full text-[12px]">
-          <thead class="sticky top-0 bg-[var(--color-panel)] text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
-            <tr>
-              <th class="text-left px-3 py-1.5 font-normal">{i18n.t('sftp.name')}</th>
-              <th class="text-right px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.size')}</th>
-              <th class="text-left px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.mode')}</th>
-              <th class="w-[80px]"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each entries as e (e.name)}
-              <tr class="hover:bg-[var(--color-panel-2)] group">
-                <td class="px-3 py-1 truncate">
-                  <button
-                    type="button"
-                    class="flex items-center gap-2 w-full text-left"
-                    ondblclick={() => enter(e)}
-                    onclick={() => e.kind === 'Dir' && enter(e)}
-                  >
-                    {#if e.kind === 'Dir'}
-                      <Folder size={13} class="text-[var(--color-accent)]" />
-                    {:else}
-                      <FileText size={13} class="text-[var(--color-fg-muted)]" />
-                    {/if}
-                    <span class="truncate text-[var(--color-fg)]">{e.name}</span>
-                  </button>
-                </td>
-                <td class="px-3 py-1 text-right text-[var(--color-fg-muted)]">
-                  {e.kind === 'File' ? formatSize(e.size) : ''}
-                </td>
-                <td class="px-3 py-1 text-[var(--color-fg-muted)] font-mono text-[11px]">
-                  {(e.mode & 0o777).toString(8).padStart(3, '0')}
-                </td>
-                <td class="px-2 py-1 text-right whitespace-nowrap">
-                  {#if e.kind === 'File' || e.kind === 'Dir'}
-                    <button
-                      type="button"
-                      class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                      onclick={() => downloadEntry(e)}
-                      title={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
-                      aria-label={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
-                    >
-                      {#if e.kind === 'Dir'}<FolderDown size={12} />{:else}<Download size={12} />{/if}
-                    </button>
-                  {/if}
-                  <button
-                    type="button"
-                    class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                    onclick={() => renameEntry(e)}
-                    title={i18n.t('common.rename')}
-                    aria-label={i18n.t('common.rename')}
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
-                    onclick={() => removeEntry(e)}
-                    title={i18n.t('common.delete')}
-                    aria-label={i18n.t('common.delete')}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+    <div class="flex-1 min-h-0 flex">
+      {#if localCwd}
+        <div class="w-[42%] min-w-[200px] max-w-[50%] flex flex-col min-h-0">
+          <SftpLocalPane
+            cwd={localCwd}
+            entries={localEntries}
+            loading={localLoading}
+            listError={localListError}
+            onRefresh={() => { void refreshLocal(); }}
+            onNavigate={(p) => { void navigateLocal(p); }}
+            onGoUp={() => { void localGoUp(); }}
+            onGoHome={() => { void localGoHome(); }}
+            onDragOverPane={preventDragDefaults}
+            onDropRemote={(e) => { void handleLocalPaneDrop(e); }}
+            onDropFiles={() => {}}
+          />
+        </div>
       {/if}
+      <div
+        class="flex-1 min-w-0 flex flex-col min-h-0"
+        role="region"
+        aria-label={i18n.t('sftp.remotePane')}
+        ondragover={preventDragDefaults}
+        ondrop={(e) => { void handleRemotePaneDrop(e); }}
+      >
+        <div class="px-2 py-1 text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)] border-b border-[var(--color-border-soft)]">
+          {i18n.t('sftp.remotePane')}
+        </div>
+        <div class="flex-1 min-h-0 overflow-y-auto">
+          {#if loading && entries.length === 0 && !listError}
+            <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
+          {:else if entries.length === 0 && !listError}
+            <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
+          {:else}
+            <table class="w-full text-[12px]">
+              <thead class="sticky top-0 bg-[var(--color-panel)] text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
+                <tr>
+                  <th class="text-left px-3 py-1.5 font-normal">{i18n.t('sftp.name')}</th>
+                  <th class="text-right px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.size')}</th>
+                  <th class="text-left px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.mode')}</th>
+                  <th class="w-[96px]"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each entries as e (e.name)}
+                  <tr
+                    class="hover:bg-[var(--color-panel-2)] group"
+                    draggable={e.kind === 'File' || e.kind === 'Dir'}
+                    ondragstart={(ev) => onRemoteDragStart(ev, e)}
+                  >
+                    <td class="px-3 py-1 truncate">
+                      <button
+                        type="button"
+                        class="flex items-center gap-2 w-full text-left"
+                        ondblclick={() => enter(e)}
+                        onclick={() => e.kind === 'Dir' && enter(e)}
+                      >
+                        {#if e.kind === 'Dir'}
+                          <Folder size={13} class="text-[var(--color-accent)]" />
+                        {:else}
+                          <FileText size={13} class="text-[var(--color-fg-muted)]" />
+                        {/if}
+                        <span class="truncate text-[var(--color-fg)]">{e.name}</span>
+                      </button>
+                    </td>
+                    <td class="px-3 py-1 text-right text-[var(--color-fg-muted)]">
+                      {e.kind === 'File' ? formatSize(e.size) : ''}
+                    </td>
+                    <td class="px-3 py-1 text-[var(--color-fg-muted)] font-mono text-[11px]">
+                      {(e.mode & 0o777).toString(8).padStart(3, '0')}
+                    </td>
+                    <td class="px-2 py-1 text-right whitespace-nowrap">
+                      {#if e.kind === 'File'}
+                        <button
+                          type="button"
+                          class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                          onclick={() => { void openTextEditor(e); }}
+                          title={i18n.t('sftp.editFile')}
+                          aria-label={i18n.t('sftp.editFile')}
+                        >
+                          <FileText size={12} />
+                        </button>
+                      {/if}
+                      {#if e.kind === 'File' || e.kind === 'Dir'}
+                        <button
+                          type="button"
+                          class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                          onclick={() => downloadEntry(e)}
+                          title={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
+                          aria-label={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
+                        >
+                          {#if e.kind === 'Dir'}<FolderDown size={12} />{:else}<Download size={12} />{/if}
+                        </button>
+                      {/if}
+                      <button
+                        type="button"
+                        class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                        onclick={() => renameEntry(e)}
+                        title={i18n.t('common.rename')}
+                        aria-label={i18n.t('common.rename')}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
+                        onclick={() => removeEntry(e)}
+                        title={i18n.t('common.delete')}
+                        aria-label={i18n.t('common.delete')}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+      </div>
     </div>
 
     <div class="border-t border-[var(--color-border-soft)] px-3 py-1.5 text-[11px] text-[var(--color-fg-muted)]
@@ -930,6 +1264,8 @@
               <div class="flex items-center gap-2 min-w-0">
                 {#if task.status === 'queued'}
                   <Clock3 size={13} class="text-[var(--color-fg-muted)] shrink-0" />
+                {:else if task.status === 'paused'}
+                  <Clock3 size={13} class="text-[var(--color-warning)] shrink-0" />
                 {:else if task.status === 'running'}
                   <Loader2 size={13} class="text-[var(--color-accent)] shrink-0 animate-spin" />
                 {:else if task.status === 'done'}
@@ -948,7 +1284,28 @@
                   </div>
                   <div class="mt-1 truncate text-[10.5px] text-[var(--color-fg-muted)]">{transferSummary(task)}</div>
                 </div>
-                {#if task.status === 'queued' || task.status === 'running'}
+                {#if task.status === 'queued' || task.status === 'running' || task.status === 'paused'}
+                  {#if task.status === 'paused'}
+                    <button
+                      type="button"
+                      class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                      title={i18n.t('sftp.resumeTransfer')}
+                      aria-label={i18n.t('sftp.resumeTransfer')}
+                      onclick={() => resumeTransfer(task.id)}
+                    >
+                      <RefreshCw size={12} />
+                    </button>
+                  {:else}
+                    <button
+                      type="button"
+                      class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-warning)]"
+                      title={i18n.t('sftp.pauseTransfer')}
+                      aria-label={i18n.t('sftp.pauseTransfer')}
+                      onclick={() => pauseTransfer(task.id)}
+                    >
+                      <Clock3 size={12} />
+                    </button>
+                  {/if}
                   <button
                     type="button"
                     class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
@@ -967,6 +1324,37 @@
     {/if}
   </div>
 </div>
+
+{#if editOpen}
+  <div class="fixed inset-0 z-[60] bg-black/50 grid place-items-center p-6" role="dialog" aria-modal="true">
+    <div class="bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl w-full max-w-[720px] max-h-[80vh] flex flex-col">
+      <header class="flex items-center gap-2 px-4 py-2 border-b border-[var(--color-border-soft)]">
+        <span class="font-semibold text-[13px] truncate">{editName}</span>
+        <button type="button" class="ml-auto p-1" onclick={() => { editOpen = false; }} aria-label={i18n.t('common.close')}>
+          <X size={14} />
+        </button>
+      </header>
+      <textarea
+        class="flex-1 min-h-[320px] m-3 p-2 font-mono text-[12px] bg-[var(--color-bg-soft)] text-[var(--color-fg)] border border-[var(--color-border)] rounded resize-y"
+        bind:value={editContent}
+        spellcheck="false"
+      ></textarea>
+      <footer class="flex justify-end gap-2 px-4 py-2 border-t border-[var(--color-border-soft)]">
+        <button type="button" class="btn-secondary text-[12px] px-3 py-1" onclick={() => { editOpen = false; }}>
+          {i18n.t('common.cancel')}
+        </button>
+        <button
+          type="button"
+          class="btn-secondary text-[12px] px-3 py-1 text-[var(--color-accent)]"
+          disabled={editSaving}
+          onclick={() => { void saveTextEditor(); }}
+        >
+          {editSaving ? i18n.t('common.saving') : i18n.t('common.save')}
+        </button>
+      </footer>
+    </div>
+  </div>
+{/if}
 
 <style>
   .toolbtn {

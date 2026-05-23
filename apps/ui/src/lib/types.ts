@@ -82,6 +82,14 @@ export interface HostStats {
 
 export type SftpKind = 'File' | 'Dir' | 'Symlink' | 'Other';
 
+export type LocalEntryKind = 'file' | 'dir' | 'other';
+
+export interface LocalEntry {
+  name: string;
+  kind: LocalEntryKind;
+  size: number;
+}
+
 export interface SftpEntry {
   name: string;
   kind: SftpKind;

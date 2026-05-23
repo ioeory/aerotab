@@ -24,6 +24,7 @@ const en: Messages = {
   'common.rename': 'Rename',
   'common.reset': 'Reset',
   'common.save': 'Save',
+  'common.saving': 'Saving…',
   'common.search': 'Search...',
   'common.selectAll': 'Select all',
   'common.up': 'Up',
@@ -371,6 +372,17 @@ const en: Messages = {
   'sftp.mode': 'Mode',
   'sftp.transfers': 'Transfers',
   'sftp.cancelTransfer': 'Cancel transfer',
+  'sftp.localPane': 'Local',
+  'sftp.remotePane': 'Remote',
+  'sftp.editFile': 'Edit file',
+  'sftp.editTooLarge': 'File exceeds edit limit ({max})',
+  'sftp.pauseTransfer': 'Pause',
+  'sftp.resumeTransfer': 'Resume',
+  'sftp.paused': 'Paused',
+  'sftp.transferQueued': 'Queued',
+  'sftp.transferDone': 'Done',
+  'sftp.transferCanceled': 'Canceled',
+  'sftp.transferFailed': 'Failed',
 };
 
 const zhCN: Messages = {
@@ -392,6 +404,7 @@ const zhCN: Messages = {
   'common.rename': '重命名',
   'common.reset': '重置',
   'common.save': '保存',
+  'common.saving': '保存中…',
   'common.search': '搜索...',
   'common.selectAll': '全选',
   'common.up': '上级',
@@ -739,6 +752,17 @@ const zhCN: Messages = {
   'sftp.mode': '模式',
   'sftp.transfers': '传输',
   'sftp.cancelTransfer': '取消传输',
+  'sftp.localPane': '本地',
+  'sftp.remotePane': '远端',
+  'sftp.editFile': '编辑文件',
+  'sftp.editTooLarge': '文件超过编辑大小限制（{max}）',
+  'sftp.pauseTransfer': '暂停',
+  'sftp.resumeTransfer': '继续',
+  'sftp.paused': '已暂停',
+  'sftp.transferQueued': '排队中',
+  'sftp.transferDone': '完成',
+  'sftp.transferCanceled': '已取消',
+  'sftp.transferFailed': '失败',
 };
 
 const messages: Record<ResolvedLocale, Messages> = {

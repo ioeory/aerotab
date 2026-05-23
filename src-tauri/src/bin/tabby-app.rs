@@ -231,6 +231,14 @@ struct LocalPathInfo {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalDirEntry {
+    name: String,
+    kind: &'static str,
+    size: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct LocalReadChunk {
     data: String,
 }
@@ -267,6 +275,58 @@ async fn local_read_dir(path: String) -> Result<Vec<String>, String> {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
     Ok(names)
+}
+
+#[tauri::command]
+fn local_home_dir() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.is_empty() {
+                return Ok(profile);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return Ok(home);
+            }
+        }
+    }
+    Err("home directory is not available".into())
+}
+
+#[tauri::command]
+async fn local_list_dir(path: String) -> Result<Vec<LocalDirEntry>, String> {
+    let mut entries = tokio::fs::read_dir(&path).await.map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+        let kind = if meta.is_file() {
+            "file"
+        } else if meta.is_dir() {
+            "dir"
+        } else {
+            "other"
+        };
+        out.push(LocalDirEntry {
+            name,
+            kind,
+            size: meta.len(),
+        });
+    }
+    out.sort_by(|a, b| {
+        let a_dir = a.kind == "dir";
+        let b_dir = b.kind == "dir";
+        a_dir
+            .cmp(&b_dir)
+            .reverse()
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
 }
 
 #[tauri::command]
@@ -560,6 +620,8 @@ fn main() {
             local_stat,
             local_realpath,
             local_read_dir,
+            local_list_dir,
+            local_home_dir,
             local_read_chunk,
             local_mkdir,
             local_remove,
