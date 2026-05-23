@@ -2,17 +2,19 @@
   // Application: updater controls + core version display.
 
   import { onDestroy, onMount } from 'svelte';
-  import { Download, RefreshCw, Trash2 } from '@lucide/svelte';
+  import { Download, FileDown, RefreshCw, Trash2 } from '@lucide/svelte';
   import { tauriInvoke, type RpcClient } from '../../../lib/rpc';
+  import { diagnostics, exportDiagnosticPack } from '../../../lib/diagnostics.svelte';
   import { i18n, type LocaleSetting } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import type { SessionMeta } from '../../../lib/types';
 
   interface Props {
     rpc: RpcClient;
+    buildId: string;
     onError: (msg: string) => void;
   }
-  let { rpc, onError }: Props = $props();
+  let { rpc, buildId, onError }: Props = $props();
 
   let coreVersion = $state<string | null>(null);
   let protocolVersion = $state<number | null>(null);
@@ -24,6 +26,8 @@
   let updateAvailable = $state<{ version: string; current: string; notes?: string } | null>(null);
   let updateBusy = $state(false);
   let locale = $state<LocaleSetting>('system');
+  let diagnosticsBusy = $state(false);
+  let diagnosticsStatus = $state('');
 
   const localeOptions: LocaleSetting[] = ['system', 'en', 'zh-CN'];
 
@@ -104,6 +108,29 @@
     } finally {
       updateBusy = false;
     }
+  }
+
+  async function exportDiagnostics() {
+    diagnosticsBusy = true;
+    diagnosticsStatus = '';
+    try {
+      const result = await exportDiagnosticPack(buildId, coreVersion);
+      diagnosticsStatus = result === 'cancelled'
+        ? i18n.t('application.diagnostics.cancelled')
+        : i18n.t('application.diagnostics.exported');
+    } catch (e) {
+      const message = (e as Error).message ?? String(e);
+      diagnostics.record('app', 'diagnostics.export', message, 'error');
+      onError(`diagnostics: ${message}`);
+    } finally {
+      diagnosticsBusy = false;
+    }
+  }
+
+  function clearDiagnostics() {
+    if (!confirm(i18n.t('application.diagnostics.clearConfirm'))) return;
+    diagnostics.clear();
+    diagnosticsStatus = i18n.t('application.diagnostics.cleared');
   }
 
   async function loadApplicationSettings() {
@@ -227,6 +254,37 @@
     {#if updateAvailable?.notes}
       <pre class="mt-2 text-[11px] whitespace-pre-wrap bg-[var(--color-bg)]
                   border border-[var(--color-border)] rounded p-2 max-h-32 overflow-auto">{updateAvailable.notes}</pre>
+    {/if}
+  </div>
+
+  <div>
+    <div class="section-h">{i18n.t('application.diagnostics')}</div>
+    <div class="help">{i18n.t('application.diagnosticsHelp')}</div>
+    <div class="row">
+      <button type="button" class="btn-secondary flex items-center gap-1.5"
+              onclick={exportDiagnostics} disabled={diagnosticsBusy}>
+        <FileDown size={12} /> {i18n.t('application.exportDiagnostics')}
+      </button>
+      <button type="button" class="btn-secondary" onclick={clearDiagnostics} disabled={diagnosticsBusy || diagnostics.events.length === 0}>
+        {i18n.t('application.clearDiagnostics')}
+      </button>
+      <span class="help">{i18n.t('application.diagnosticsCount', { count: diagnostics.events.length })}</span>
+    </div>
+    {#if diagnostics.events.length > 0}
+      <div class="border border-[var(--color-border)] rounded divide-y divide-[var(--color-border-soft)] mt-2 max-h-40 overflow-auto">
+        {#each diagnostics.events.slice(-8).reverse() as event (event.id)}
+          <div class="px-2 py-1.5 text-[11px]">
+            <div class="flex items-center gap-2">
+              <span class="uppercase tracking-[0.08em] text-[var(--color-fg-muted)]">{event.category}</span>
+              <span class="text-[var(--color-fg-muted)]">{new Date(event.ts).toLocaleString()}</span>
+            </div>
+            <div class="truncate text-[var(--color-fg)]">{event.source}: {event.message}</div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+    {#if diagnosticsStatus}
+      <div class="help">{diagnosticsStatus}</div>
     {/if}
   </div>
 </div>

@@ -7,6 +7,7 @@
     id: string;
     title: string;
     subtitle?: string;
+    keywords?: string[];
     shortcut?: string;
     run: () => void | Promise<void>;
   }
@@ -25,7 +26,8 @@
     actions.filter((a) => {
       const q = query.trim().toLowerCase();
       if (!q) return true;
-      return a.title.toLowerCase().includes(q) || (a.subtitle ?? '').toLowerCase().includes(q);
+      const haystack = [a.title, a.subtitle ?? '', ...(a.keywords ?? [])].join(' ').toLowerCase();
+      return haystack.includes(q);
     }),
   );
 

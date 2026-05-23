@@ -41,14 +41,13 @@
 
   interface Props {
     rpc: RpcClient;
+    buildId: string;
     initialSection?: SectionId;
     onClose: () => void;
     onError: (msg: string) => void;
     onSettingsChanged: () => void;
   }
-  let { rpc, initialSection = 'appearance', onClose, onError, onSettingsChanged }: Props = $props();
-
-  const buildId = '0.1.20-ui-20260523';
+  let { rpc, buildId, initialSection = 'appearance', onClose, onError, onSettingsChanged }: Props = $props();
 
   interface NavEntry {
     id: SectionId;
@@ -159,7 +158,7 @@
 
       <div class="overflow-y-auto p-5 text-[12.5px]">
         {#if active === 'application'}
-          <ApplicationSection {rpc} {onError} />
+          <ApplicationSection {rpc} {buildId} {onError} />
         {:else if active === 'appearance'}
           <AppearanceSection {rpc} {onError} />
         {:else if active === 'profiles'}

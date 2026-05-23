@@ -16,12 +16,30 @@
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
   import { settingsCoord } from './lib/settingsStore.svelte';
   import { i18n } from './lib/i18n.svelte';
+  import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
 
-  const rpc = selectClient();
-  const buildId = '0.1.20-ui-20260523';
+  const rpc = instrumentRpcClient(selectClient());
+  const buildId = '0.1.22-ui-20260523';
+  type SettingsSectionId =
+    | 'application'
+    | 'appearance'
+    | 'profiles'
+    | 'terminal'
+    | 'ai'
+    | 'colorscheme'
+    | 'configsync'
+    | 'hotkeys'
+    | 'plugins'
+    | 'shell'
+    | 'ssh'
+    | 'vault'
+    | 'window'
+    | 'configfile';
+  type SyncGroup = 'Connections' | 'Appearance' | 'Shortcuts' | 'PluginCfg' | 'Credentials';
+  const syncGroups: SyncGroup[] = ['Connections', 'Appearance', 'Shortcuts', 'PluginCfg', 'Credentials'];
   let status = $state(i18n.t('app.status.idle'));
   let coreVersion = $state<string | null>(null);
   let hostStats = $state<HostStats | null>(null);
@@ -35,7 +53,7 @@
   let serialModal: { open: () => Promise<void> } | null = $state(null);
   let sidebar: { refresh: () => Promise<void> } | null = $state(null);
   let settingsOpen = $state(false);
-  let settingsInitialSection = $state<'appearance' | 'profiles'>('appearance');
+  let settingsInitialSection = $state<SettingsSectionId>('appearance');
   let settingsRev = $state(0);
   let paletteOpen = $state(false);
   let pickerOpen = $state(false);
@@ -318,6 +336,72 @@
     status = i18n.t('workspace.deleted', { name: workspace.name });
   }
 
+  async function exportDiagnosticsFromPalette() {
+    try {
+      const result = await exportDiagnosticPack(buildId, coreVersion);
+      if (result !== 'cancelled') status = i18n.t('application.diagnostics.exported');
+    } catch (e) {
+      onError(`diagnostics: ${(e as Error).message}`);
+    }
+  }
+
+  function selectedSyncGroupsFromSettings(value: unknown): SyncGroup[] {
+    const raw = value && typeof value === 'object' ? (value as Record<string, unknown>).enabledGroups : null;
+    const defaultEnabled: Record<SyncGroup, boolean> = {
+      Connections: true,
+      Appearance: true,
+      Shortcuts: true,
+      PluginCfg: true,
+      Credentials: false,
+    };
+    const enabled = raw && typeof raw === 'object' ? raw as Record<string, unknown> : defaultEnabled;
+    return syncGroups.filter((group) => {
+      const value = enabled[group];
+      return typeof value === 'boolean' ? value : defaultEnabled[group];
+    });
+  }
+
+  async function loadSelectedSyncGroups(): Promise<SyncGroup[]> {
+    const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sync' });
+    return selectedSyncGroupsFromSettings(r.value);
+  }
+
+  async function showSyncStatusFromPalette() {
+    try {
+      const s = await rpc.call<{
+        configured: boolean;
+        kind: string | null;
+        lastSyncMs: number | null;
+        autoIntervalMs: number | null;
+      }>('sync.status', {});
+      if (!s.configured) {
+        status = i18n.t('sync.notConfigured');
+        return;
+      }
+      status = i18n.t('sync.statusLine', {
+        backend: s.kind ?? '?',
+        last: s.lastSyncMs ? new Date(s.lastSyncMs).toLocaleString() : i18n.t('sync.never'),
+      });
+    } catch (e) {
+      onError(`sync status: ${(e as Error).message}`);
+    }
+  }
+
+  async function syncNowFromPalette() {
+    try {
+      const groups = await loadSelectedSyncGroups();
+      if (groups.length === 0) {
+        status = i18n.t('sync.noGroups');
+        return;
+      }
+      status = i18n.t('sync.syncing');
+      const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
+      status = i18n.t('sync.complete', { count: Object.keys(stats).length });
+    } catch (e) {
+      onError(`sync now: ${(e as Error).message}`);
+    }
+  }
+
 
   onMount(async () => {
     await i18n.load(rpc);
@@ -395,11 +479,31 @@
 
   function onError(msg: string) {
     status = msg;
+    diagnostics.record(categoryForStatus(msg), 'status', msg, 'error');
   }
 
-  function openSettings(section: 'appearance' | 'profiles' = 'appearance') {
+  function openSettings(section: SettingsSectionId = 'appearance') {
     settingsInitialSection = section;
     settingsOpen = true;
+  }
+
+  function profileCommandSubtitle(p: StoredProfile): string {
+    const pieces = [p.ssh.user ? `${p.ssh.user}@${p.ssh.host}` : p.ssh.host];
+    if (p.group) pieces.push(`group:${p.group}`);
+    if (p.tags?.length) pieces.push(p.tags.map((tag) => `tag:${tag}`).join(' '));
+    if (p.favorite) pieces.push('favorite');
+    return pieces.join(' · ');
+  }
+
+  function profileCommandKeywords(p: StoredProfile): string[] {
+    return [
+      p.name,
+      p.group ?? '',
+      ...(p.tags ?? []),
+      p.ssh.host,
+      p.ssh.user ?? '',
+      p.favorite ? 'favorite starred pinned' : '',
+    ].filter(Boolean);
   }
 
   async function loadHostStatsSettings() {
@@ -798,7 +902,11 @@
       { id: 'prev-pane', title: i18n.t('action.previousPane'), shortcut: 'Alt+[', run: () => cyclePane(-1) },
       { id: 'settings', title: i18n.t('action.openSettings'), shortcut: 'Ctrl+,', run: () => openSettings() },
       { id: 'profile-health', title: i18n.t('action.profileHealthCheck'), subtitle: i18n.t('settings.nav.profiles'), run: () => openSettings('profiles') },
+      { id: 'sync-status', title: i18n.t('action.syncStatus'), subtitle: i18n.t('settings.nav.configSync'), run: () => showSyncStatusFromPalette() },
+      { id: 'sync-now', title: i18n.t('action.syncNow'), subtitle: i18n.t('settings.nav.configSync'), run: () => syncNowFromPalette() },
+      { id: 'sync-settings', title: i18n.t('action.openSyncSettings'), subtitle: i18n.t('settings.nav.configSync'), run: () => openSettings('configsync') },
       { id: 'workspace-save', title: i18n.t('action.saveSessionWorkspace'), run: () => saveCurrentSessionWorkspace() },
+      { id: 'diagnostics-export', title: i18n.t('application.exportDiagnostics'), subtitle: i18n.t('application.diagnostics'), run: () => exportDiagnosticsFromPalette() },
       { id: 'toggle-sidebar', title: sidebarVisible ? i18n.t('action.hideSidebar') : i18n.t('action.showSidebar'), shortcut: 'Ctrl+Alt+S', run: () => { void setSidebarVisible(!sidebarVisible); } },
       { id: 'new-profile', title: i18n.t('action.newSshProfile'), run: () => profileModal?.open() },
       { id: 'new-serial', title: i18n.t('action.newSerialConnection'), run: () => serialModal?.open() },
@@ -821,12 +929,15 @@
       acts.push({
         id: `connect-${p.id}`,
         title: i18n.t('action.connectProfile', { name: p.name }),
-        subtitle: p.kind === 'ssh' ? `ssh ${p.ssh.user ?? ''}@${p.ssh.host}` : p.kind,
+        subtitle: profileCommandSubtitle(p),
+        keywords: profileCommandKeywords(p),
         run: () => connectProfile(p),
       });
       acts.push({
         id: `sftp-${p.id}`,
         title: i18n.t('action.sftpBrowserProfile', { name: p.name }),
+        subtitle: profileCommandSubtitle(p),
+        keywords: ['sftp', 'transfer', ...profileCommandKeywords(p)],
         run: () => openSftpDock({ name: p.name, ssh: p.ssh }),
       });
     }
@@ -1060,6 +1171,7 @@
 {#if settingsOpen}
   <SettingsLayout
     {rpc}
+    {buildId}
     initialSection={settingsInitialSection}
     onClose={() => (settingsOpen = false)}
     onSettingsChanged={() => (settingsRev += 1)}
