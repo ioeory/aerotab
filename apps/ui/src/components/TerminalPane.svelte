@@ -14,6 +14,12 @@
   import { tabs } from '../lib/tabs.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { TerminalTransferDetector, type TerminalTransferDetection } from '../lib/terminalTransfer';
+  import {
+    createTrzszFilter,
+    type TrzszFilterInstance,
+    type TrzszTerminalInput,
+    type TrzszTerminalOutput,
+  } from '../lib/trzszBridge';
 
   interface Props {
     rpc: RpcClient;
@@ -35,6 +41,7 @@
   let rendererAddon: { dispose: () => void } | null = null;
   let activeRenderer: 'dom' | 'canvas' | 'webgl' = 'dom';
   let pollHandle: number | null = null;
+  const encoder = new TextEncoder();
   const decoder = new TextDecoder('utf-8');
 
   // Search overlay state.
@@ -65,11 +72,25 @@
   let transferDetectionEnabled = false;
   let transferNotice = $state<TerminalTransferDetection | null>(null);
   let transferNoticeHandle: number | null = null;
+  let transferFilter = $state<TrzszFilterInstance | null>(null);
+  let transferFilterGeneration = 0;
   const transferDetector = new TerminalTransferDetector();
   const canOpenSftp = $derived(session.kind === 'Ssh' && !!onOpenSftp);
 
+  function isLocalWindowsShell(): boolean {
+    if (session.kind !== 'LocalShell') return false;
+    return typeof navigator !== 'undefined' && /Win/i.test(navigator.userAgent);
+  }
+
   // Liveness state. Flips to true when backend reports session ended.
   let exited = $state(false);
+  let reconnecting = $state(false);
+  const canReconnect = $derived(
+    exited && session.kind === 'Ssh' && !!(session.profileId || session.sshProfile),
+  );
+  const canUseTrzszTransfer = $derived(
+    transferDetectionEnabled && !!transferFilter && active && !exited,
+  );
 
   interface PollResult { chunks: string[]; alive: boolean }
 
@@ -78,6 +99,49 @@
     exited = true;
     term?.write('\r\n\x1b[31m[session ended]\x1b[0m The process exited or the connection was closed.\r\n');
     tabs.markActivity(session.id, 'bell');
+  }
+
+  async function reconnectSession() {
+    if (!canReconnect || reconnecting) return;
+    reconnecting = true;
+    const oldId = session.id;
+    const tab = tabs.tabOf(oldId);
+    try {
+      let meta: { id: string; kind: string; title: string };
+      let next: SessionMeta;
+      if (session.profileId) {
+        meta = await rpc.call('session.openSshProfile', { profile_id: session.profileId });
+        next = {
+          id: meta.id,
+          kind: meta.kind,
+          title: meta.title,
+          profileId: session.profileId,
+          sshProfile: session.sshProfile,
+        };
+      } else if (session.sshProfile) {
+        meta = await rpc.call('session.openSsh', {
+          title: session.title,
+          profile: session.sshProfile,
+        });
+        next = {
+          id: meta.id,
+          kind: meta.kind,
+          title: meta.title,
+          sshProfile: session.sshProfile,
+        };
+      } else {
+        return;
+      }
+      if (tab) tabs.replacePaneSession(tab.id, oldId, next);
+      document.dispatchEvent(
+        new CustomEvent('tabby:session-replaced', { detail: { oldId, session: next } }),
+      );
+      try { await rpc.call('session.close', { id: oldId }); } catch { /* old session may already be gone */ }
+    } catch (err) {
+      console.warn('reconnect failed', err);
+    } finally {
+      reconnecting = false;
+    }
   }
 
   function startPolling() {
@@ -90,9 +154,10 @@
           max_chunks: 64,
         });
         for (const c of r.chunks) {
-          const text = decoder.decode(b64decode(c));
+          const bytes = b64decode(c);
+          const text = decoder.decode(bytes);
           inspectTransferOutput(text);
-          term.write(text);
+          processSessionOutput(bytes, text);
         }
         if (r.chunks.length > 0 && !active) tabs.markActivity(session.id, 'output');
         if (!r.alive && !exited) {
@@ -242,6 +307,8 @@
     if (!transferDetectionEnabled) return;
     const detected = transferDetector.push(text);
     if (!detected) return;
+    // trzsz is handled by the active filter; keep the banner for ZMODEM/lrzsz only.
+    if (transferFilter && detected.protocol === 'trzsz') return;
     transferNotice = detected;
     if (transferNoticeHandle != null) window.clearTimeout(transferNoticeHandle);
     transferNoticeHandle = window.setTimeout(() => {
@@ -265,6 +332,87 @@
     if (detected.direction === 'upload') return i18n.t('terminal.transferUploadDetected', { protocol });
     if (detected.direction === 'download') return i18n.t('terminal.transferDownloadDetected', { protocol });
     return i18n.t('terminal.transferDetected', { protocol });
+  }
+
+  function transferHint(detected: TerminalTransferDetection): string {
+    return i18n.t(detected.protocol === 'trzsz' ? 'terminal.transferTrzszHint' : 'terminal.transferHint');
+  }
+
+  async function terminalInputBytes(input: TrzszTerminalInput): Promise<Uint8Array> {
+    if (typeof input === 'string') return encoder.encode(input);
+    if (input instanceof Uint8Array) return input;
+    if (input instanceof ArrayBuffer) return new Uint8Array(input);
+    if (input instanceof Blob) return new Uint8Array(await input.arrayBuffer());
+    return encoder.encode(String(input));
+  }
+
+  function sendSessionInput(input: TrzszTerminalInput): void {
+    void terminalInputBytes(input)
+      .then((bytes) => rpc.call('session.write', {
+        id: session.id,
+        data: b64encode(bytes),
+      }))
+      .catch((err: unknown) => console.warn('terminal write failed', err));
+  }
+
+  function writeTerminalOutput(output: TrzszTerminalOutput): void {
+    if (!term) return;
+    if (typeof output === 'string' || output instanceof Uint8Array) {
+      term.write(output);
+      return;
+    }
+    if (output instanceof ArrayBuffer) {
+      term.write(new Uint8Array(output));
+      return;
+    }
+    if (output instanceof Blob) {
+      void output.arrayBuffer()
+        .then((buffer) => term?.write(new Uint8Array(buffer)))
+        .catch((err: unknown) => console.warn('terminal blob write failed', err));
+    }
+  }
+
+  function processSessionOutput(bytes: Uint8Array, textFallback: string): void {
+    if (!transferFilter) {
+      term?.write(textFallback);
+      return;
+    }
+    try {
+      transferFilter.processServerOutput(bytes);
+    } catch (err) {
+      console.warn('trzsz output processing failed', err);
+      term?.write(textFallback);
+    }
+  }
+
+  async function configureTransferFilter(enabled: boolean): Promise<void> {
+    const generation = ++transferFilterGeneration;
+    if (!enabled) {
+      if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
+      transferFilter = null;
+      return;
+    }
+    if (transferFilter) {
+      transferFilter.setTerminalColumns(term?.cols ?? 80);
+      return;
+    }
+    try {
+      const filter = await createTrzszFilter({
+        writeToTerminal: writeTerminalOutput,
+        sendToServer: sendSessionInput,
+        terminalColumns: term?.cols ?? 80,
+        isWindowsShell: isLocalWindowsShell(),
+        maxDataChunkSize: 1024 * 1024,
+        dragInitTimeout: 8000,
+      });
+      if (generation !== transferFilterGeneration || !transferDetectionEnabled) {
+        if (filter.isTransferringFiles()) filter.stopTransferringFiles();
+        return;
+      }
+      transferFilter = filter;
+    } catch (err) {
+      console.warn('trzsz filter unavailable', err);
+    }
   }
 
   async function applyRenderer(renderer: 'dom' | 'canvas' | 'webgl') {
@@ -372,18 +520,39 @@
     // chain is somehow stale.
     const settingsListener = () => { void reloadSettingsLive(); };
     document.addEventListener('tabby:settings-changed', settingsListener);
+    const focusListener = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId && detail.sessionId !== session.id) return;
+      if (!active) return;
+      requestAnimationFrame(() => term?.focus());
+    };
+    const fitListener = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId && detail.sessionId !== session.id) return;
+      requestAnimationFrame(() => {
+        fit?.fit();
+        requestAnimationFrame(() => fit?.fit());
+      });
+    };
+    document.addEventListener('tabby:focus-pane', focusListener);
+    document.addEventListener('tabby:fit-pane', fitListener);
     cleanupSearchListener = () => {
       document.removeEventListener('tabby:search', searchListener);
       document.removeEventListener('tabby:settings-changed', settingsListener);
+      document.removeEventListener('tabby:focus-pane', focusListener);
+      document.removeEventListener('tabby:fit-pane', fitListener);
     };
 
     term.onData((data) => {
-      void rpc.call('session.write', {
-        id: session.id,
-        data: b64encode(new TextEncoder().encode(data)),
-      });
+      if (transferFilter) transferFilter.processTerminalInput(data);
+      else sendSessionInput(data);
+    });
+    term.onBinary((data) => {
+      if (transferFilter) transferFilter.processBinaryInput(data);
+      else sendSessionInput(data);
     });
     term.onResize(({ cols, rows }) => {
+      transferFilter?.setTerminalColumns(cols);
       void rpc.call('session.resize', { id: session.id, cols, rows });
     });
     term.onSelectionChange(() => {
@@ -399,6 +568,7 @@
     const ro = new ResizeObserver(() => fit?.fit());
     if (host) ro.observe(host);
 
+    await configureTransferFilter(cfg.experimentalTransferDetection);
     startPolling();
 
     cleanupHost = () => ro.disconnect();
@@ -414,11 +584,13 @@
       tabs.clearActivity(session.id);
       requestAnimationFrame(() => {
         fit?.fit();
-        term?.focus();
+        requestAnimationFrame(() => {
+          fit?.fit();
+          term?.focus();
+        });
       });
-    } else {
-      // keep polling running to drain buffers; xterm will not render hidden.
     }
+    // Inactive panes keep polling so output stays visible in split layouts.
   });
 
   // Live-apply settings changes (font / theme / scrollback) without re-mounting
@@ -441,6 +613,7 @@
     term.options.scrollOnUserInput = cfg.scrollOnInput;
     term.options.wordSeparator = cfg.wordSeparator;
     term.options.allowTransparency = isTranslucent();
+    await configureTransferFilter(cfg.experimentalTransferDetection);
     await applyRenderer(cfg.renderer);
     applyLigatures(cfg.ligatures);
     // Force a full redraw so canvas/webgl renderers invalidate their glyph
@@ -464,6 +637,8 @@
     cleanupSearchListener = null;
     stopPolling();
     clearTransferNotice();
+    if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
+    transferFilter = null;
     search?.dispose();
     search = null;
     term?.dispose();
@@ -550,10 +725,7 @@
       term?.paste(text);
     } else {
       // Bypass bracketed-paste wrapping by writing through onData path.
-      void rpc.call('session.write', {
-        id: session.id,
-        data: b64encode(new TextEncoder().encode(text)),
-      });
+      sendSessionInput(text);
     }
   }
   async function doPaste() { await doPasteFromClipboard(); }
@@ -595,6 +767,26 @@
     term?.selectAll();
   }
 
+  function onTransferDragOver(ev: DragEvent) {
+    if (!canUseTrzszTransfer) return;
+    if (!ev.dataTransfer?.types.includes('Files')) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'copy';
+  }
+
+  async function onTransferDrop(ev: DragEvent) {
+    if (!canUseTrzszTransfer || !transferFilter) return;
+    const items = ev.dataTransfer?.items;
+    if (!items?.length) return;
+    ev.preventDefault();
+    clearTransferNotice();
+    try {
+      await transferFilter.uploadFiles(items);
+    } catch (err) {
+      console.warn('trzsz upload failed', err);
+    }
+  }
+
   async function onPointerUp(ev: PointerEvent) {
     // Middle-click paste.
     if (middleClickPaste && ev.button === 1) {
@@ -616,13 +808,14 @@
 <div
   bind:this={host}
   role="application"
-  class="h-full w-full p-1 relative"
-  style="display: {active ? 'block' : 'none'};"
+  class="h-full w-full relative {active ? '' : 'pointer-events-none opacity-[0.92]'}"
   oncontextmenu={onContextMenu}
   onpointerup={onPointerUp}
+  ondragover={onTransferDragOver}
+  ondrop={onTransferDrop}
 ></div>
 
-{#if exited && active}
+{#if exited}
   <div class="absolute bottom-3 right-3 z-20 max-w-[min(320px,calc(100%-24px))] pointer-events-none">
     <div class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
                 rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur">
@@ -630,6 +823,16 @@
         <div class="text-[var(--color-danger)] font-semibold leading-tight">{i18n.t('terminal.sessionEnded')}</div>
         <div class="text-[var(--color-fg-muted)] leading-tight truncate">{i18n.t('terminal.historyVisible')}</div>
       </div>
+      {#if canReconnect}
+        <button
+          type="button"
+          class="btn-primary shrink-0 text-[12px] px-2 py-1"
+          disabled={reconnecting}
+          onclick={() => { void reconnectSession(); }}
+        >
+          {reconnecting ? i18n.t('terminal.reconnecting') : i18n.t('terminal.reconnect')}
+        </button>
+      {/if}
       {#if onClosePane}
         <button type="button" class="btn-secondary shrink-0 text-[12px] px-2 py-1" onclick={() => onClosePane?.()}>
           {i18n.t('common.close')}
@@ -654,7 +857,7 @@
       </div>
       <div class="min-w-0">
         <div class="text-[var(--color-accent)] font-semibold leading-tight truncate">{transferTitle(transferNotice)}</div>
-        <div class="text-[var(--color-fg-muted)] leading-tight">{i18n.t('terminal.transferHint')}</div>
+        <div class="text-[var(--color-fg-muted)] leading-tight">{transferHint(transferNotice)}</div>
       </div>
       {#if canOpenSftp}
         <button type="button" class="btn-secondary shrink-0 text-[12px] px-2 py-1 inline-flex items-center gap-1.5" onclick={() => onOpenSftp?.()}>
@@ -677,7 +880,8 @@
 {#if searchOpen}
   <div class="absolute top-2 right-2 z-30 flex items-center gap-1 bg-[var(--color-panel)]/95
               border border-[var(--color-border)] rounded shadow-lg backdrop-blur p-1"
-       style="display: {active ? 'flex' : 'none'};">
+       class:pointer-events-none={!active}
+       class:opacity-0={!active}>
     <input id="search-input-{session.id}"
            type="search" placeholder={i18n.t('common.search')} bind:value={searchQuery}
            onkeydown={(e) => {

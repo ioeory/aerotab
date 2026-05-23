@@ -14,6 +14,7 @@ use std::{
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use serde::Serialize;
 use tabby_core::commands::{register_all, AppState};
 use tabby_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
 use tabby_core::settings::SettingsStore;
@@ -24,7 +25,7 @@ use tauri::{
     Manager, WindowEvent,
 };
 use tauri_plugin_updater::UpdaterExt;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing_subscriber::EnvFilter;
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -201,10 +202,118 @@ fn pick_save_file(default_name: Option<String>) -> Result<Option<String>, String
 }
 
 #[tauri::command]
+fn pick_open_files(directory: Option<bool>) -> Result<Option<Vec<String>>, String> {
+    if directory.unwrap_or(false) {
+        return Ok(rfd::FileDialog::new()
+            .pick_folder()
+            .map(|path| vec![path.to_string_lossy().into_owned()]));
+    }
+    Ok(rfd::FileDialog::new().pick_files().map(|paths| {
+        paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }))
+}
+
+#[tauri::command]
 fn pick_directory() -> Result<Option<String>, String> {
     Ok(rfd::FileDialog::new()
         .pick_folder()
         .map(|path| path.to_string_lossy().into_owned()))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalPathInfo {
+    kind: &'static str,
+    size: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalReadChunk {
+    data: String,
+}
+
+#[tauri::command]
+async fn local_stat(path: String) -> Result<LocalPathInfo, String> {
+    let meta = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?;
+    let kind = if meta.is_file() {
+        "file"
+    } else if meta.is_dir() {
+        "dir"
+    } else {
+        "other"
+    };
+    Ok(LocalPathInfo {
+        kind,
+        size: meta.len(),
+    })
+}
+
+#[tauri::command]
+async fn local_realpath(path: String) -> Result<String, String> {
+    let path = tokio::fs::canonicalize(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn local_read_dir(path: String) -> Result<Vec<String>, String> {
+    let mut entries = tokio::fs::read_dir(path).await.map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(names)
+}
+
+#[tauri::command]
+async fn local_read_chunk(path: String, offset: u64, len: u64) -> Result<LocalReadChunk, String> {
+    let len = usize::try_from(len.min(16 * 1024 * 1024)).map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut buf = vec![0_u8; len];
+    let n = file.read(&mut buf).await.map_err(|e| e.to_string())?;
+    buf.truncate(n);
+    Ok(LocalReadChunk {
+        data: BASE64.encode(buf),
+    })
+}
+
+#[tauri::command]
+async fn local_mkdir(path: String) -> Result<(), String> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn local_remove(path: String, recursive: Option<bool>) -> Result<bool, String> {
+    let Ok(meta) = tokio::fs::metadata(&path).await else {
+        return Ok(false);
+    };
+    if meta.is_dir() {
+        if recursive.unwrap_or(false) {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .map_err(|e| e.to_string())?;
+        } else {
+            tokio::fs::remove_dir(path)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        tokio::fs::remove_file(path)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(true)
 }
 
 #[tauri::command]
@@ -445,8 +554,15 @@ fn main() {
             rpc,
             check_update,
             install_update,
+            pick_open_files,
             pick_save_file,
             pick_directory,
+            local_stat,
+            local_realpath,
+            local_read_dir,
+            local_read_chunk,
+            local_mkdir,
+            local_remove,
             local_mkdir_relative,
             local_write_chunk,
             local_write_relative_chunk,

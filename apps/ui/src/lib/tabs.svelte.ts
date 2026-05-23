@@ -139,6 +139,26 @@ function updateSplitRatios(node: PaneNode, splitId: string, ratios: number[]): P
   return { ...node, children: node.children.map((child) => updateSplitRatios(child, splitId, ratios)) };
 }
 
+function findLeafNode(node: PaneNode, sessionId: string): PaneLeaf | null {
+  if (node.type === 'leaf') return node.pane.id === sessionId ? node : null;
+  for (const child of node.children) {
+    const found = findLeafNode(child, sessionId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function replaceLeafSession(node: PaneNode, oldId: string, session: SessionMeta): PaneNode {
+  if (node.type === 'leaf') {
+    if (node.pane.id !== oldId) return node;
+    return { type: 'leaf', id: session.id, pane: session };
+  }
+  return {
+    ...node,
+    children: node.children.map((child) => replaceLeafSession(child, oldId, session)),
+  };
+}
+
 function collectRects(node: PaneNode, rect: Omit<PaneRect, 'id'>, out: PaneRect[]) {
   if (node.type === 'leaf') {
     out.push({ id: node.pane.id, ...rect });
@@ -396,6 +416,25 @@ class TabStore {
     tab.maximizedPaneId = tab.maximizedPaneId === paneId ? null : paneId;
     tab.activePaneId = paneId;
     this.activeId = tab.id;
+    this.bump();
+  }
+
+  findLeaf(tab: Tab, sessionId: string): PaneLeaf | null {
+    return findLeafNode(tab.layout, sessionId);
+  }
+
+  /** Swap a pane's live session id/metadata without changing layout structure. */
+  replacePaneSession(tabId: string, oldSessionId: string, session: SessionMeta) {
+    const tab = this.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    if (!tab.panes.some((pane) => pane.id === oldSessionId)) return;
+    tab.layout = replaceLeafSession(tab.layout, oldSessionId, session);
+    if (tab.activePaneId === oldSessionId) tab.activePaneId = session.id;
+    if (tab.maximizedPaneId === oldSessionId) tab.maximizedPaneId = session.id;
+    const { [oldSessionId]: _drop, ...restActivity } = tab.activity;
+    tab.activity = restActivity;
+    this.refreshTab(tab);
+    this.bump();
   }
 
   move(fromIdx: number, toIdx: number) {

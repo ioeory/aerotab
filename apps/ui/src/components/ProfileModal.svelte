@@ -10,9 +10,10 @@
   interface Props {
     rpc: RpcClient;
     onSaved: () => void;
+    onClosed?: () => void;
     onError: (msg: string) => void;
   }
-  let { rpc, onSaved, onError }: Props = $props();
+  let { rpc, onSaved, onClosed, onError }: Props = $props();
 
   let dialog: HTMLDialogElement | null = null;
   let editing = $state<StoredProfile | null>(null);
@@ -142,7 +143,7 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="min-w-[420px]">
+<dialog bind:this={dialog} class="min-w-[420px]" onclose={() => onClosed?.()}>
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">

@@ -18,8 +18,11 @@ fi
 
 rustup target add "$target" >/dev/null
 
-cargo tauri build \
-  --runner cargo-xwin \
-  --target "$target" \
-  --bundles "$bundles" \
-  "$@"
+(
+  cd src-tauri
+  cargo tauri build \
+    --runner cargo-xwin \
+    --target "$target" \
+    --bundles "$bundles" \
+    "$@"
+)

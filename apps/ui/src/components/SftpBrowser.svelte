@@ -38,6 +38,10 @@
   let cwd = $state('.');
   let entries = $state<SftpEntry[]>([]);
   let loading = $state(false);
+  let listError = $state<string | null>(null);
+  let listSeq = 0;
+  let defaultDownloadDir = $state<string | null>(null);
+  let lastDownloadPath = $state<string | null>(null);
   let preparingTransfers = $state(false);
   let transfers = $state<TransferTask[]>([]);
   let processingTransfers = false;
@@ -64,9 +68,25 @@
     message?: string;
   }
 
+  async function loadSftpSettings() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sftp' });
+      if (r.value && typeof r.value === 'object') {
+        const v = r.value as Record<string, unknown>;
+        if (typeof v.defaultDownloadDir === 'string' && v.defaultDownloadDir.trim()) {
+          defaultDownloadDir = v.defaultDownloadDir.trim();
+          lastDownloadPath = defaultDownloadDir;
+        }
+      }
+    } catch {
+      /* optional settings */
+    }
+  }
+
   async function connect() {
     if (!target) return;
     loading = true;
+    listError = null;
     try {
       const r = await rpc.call<{ id: string }>('sftp.open', { profile: target.ssh, sudo: sudoMode });
       sessionId = r.id;
@@ -78,6 +98,7 @@
     } catch (e) {
       sessionId = null;
       entries = [];
+      listError = (e as Error).message;
       onError(`sftp: ${(e as Error).message}`);
     } finally {
       loading = false;
@@ -86,24 +107,56 @@
 
   async function reconnect(nextSudo = sudoMode) {
     const current = sessionId;
+    const prevCwd = cwd;
     sessionId = null;
     entries = [];
+    listError = null;
     knownRemoteDirs.clear();
     if (current) await rpc.call('sftp.close', { id: current }).catch(() => {});
     sudoMode = nextSudo;
-    await connect();
+    loading = true;
+    try {
+      const r = await rpc.call<{ id: string }>('sftp.open', { profile: target!.ssh, sudo: sudoMode });
+      sessionId = r.id;
+      knownRemoteDirs.clear();
+      let nextCwd = prevCwd;
+      try {
+        const real = await rpc.call<{ path: string }>('sftp.realpath', { id: r.id, path: prevCwd });
+        nextCwd = real.path || prevCwd;
+        await rpc.call<SftpEntry[]>('sftp.list', { id: r.id, path: nextCwd });
+        cwd = nextCwd;
+      } catch {
+        const home = await rpc.call<{ path: string }>('sftp.realpath', { id: r.id, path: '.' });
+        cwd = home.path || '/';
+        onError(i18n.t('sftp.cwdFallback'));
+      }
+      await refresh();
+    } catch (e) {
+      sessionId = null;
+      entries = [];
+      listError = (e as Error).message;
+      onError(`sftp: ${(e as Error).message}`);
+    } finally {
+      loading = false;
+    }
   }
 
   async function refresh() {
     if (!sessionId) return;
+    const seq = ++listSeq;
     loading = true;
+    listError = null;
     try {
       const list = await rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: cwd });
+      if (seq !== listSeq) return;
       entries = sortEntries(list);
     } catch (e) {
+      if (seq !== listSeq) return;
+      listError = (e as Error).message;
+      entries = [];
       onError(`list: ${(e as Error).message}`);
     } finally {
-      loading = false;
+      if (seq === listSeq) loading = false;
     }
   }
 
@@ -275,6 +328,10 @@
           }
           if (isCanceled(task.id)) continue;
           updateTransfer(task.id, { status: 'done', transferred: task.size });
+          if (task.kind === 'download') {
+            if (task.localPath) lastDownloadPath = task.localPath;
+            else if (task.localBaseDir) lastDownloadPath = task.localBaseDir;
+          }
         } catch (e) {
           if (isCanceled(task.id)) continue;
           updateTransfer(task.id, { status: 'error', message: (e as Error).message });
@@ -453,8 +510,13 @@
       return;
     }
     if (e.kind !== 'File') return;
-    const savePath = await pickSavePath(e.name);
+    let savePath = await pickSavePath(e.name);
+    if (savePath === undefined && defaultDownloadDir) {
+      const sep = defaultDownloadDir.includes('\\') ? '\\' : '/';
+      savePath = `${defaultDownloadDir.replace(/[/\\]+$/, '')}${sep}${e.name}`;
+    }
     if (savePath === null) return;
+    if (savePath) lastDownloadPath = savePath;
     const id = nextTransferId();
     const path = joinPath(cwd, e.name);
     downloadEntries.set(id, e);
@@ -486,12 +548,14 @@
   }
 
   async function downloadDirectory(e: SftpEntry) {
-    const baseDir = await pickDirectoryPath();
+    let baseDir = await pickDirectoryPath();
+    if (baseDir === undefined && defaultDownloadDir) baseDir = defaultDownloadDir;
     if (baseDir === null) return;
     if (baseDir === undefined) {
       onError('download folder: desktop directory picker is not available');
       return;
     }
+    lastDownloadPath = baseDir;
     preparingTransfers = true;
     try {
       await collectDirectoryDownloads(joinPath(cwd, e.name), [e.name], baseDir);
@@ -614,7 +678,23 @@
     void reconnect(!sudoMode);
   }
 
+  async function chooseDownloadDir() {
+    const picked = await pickDirectoryPath();
+    if (!picked) return;
+    defaultDownloadDir = picked;
+    lastDownloadPath = picked;
+    try {
+      await rpc.call('settings.set', {
+        key: 'sftp',
+        value: { defaultDownloadDir: picked },
+      });
+    } catch (e) {
+      onError(`sftp settings: ${(e as Error).message}`);
+    }
+  }
+
   onMount(() => {
+    void loadSftpSettings();
     void connect();
   });
 
@@ -716,10 +796,20 @@
       </div>
     </div>
 
+    {#if listError}
+      <div class="mx-3 mt-2 px-3 py-2 rounded border border-[var(--color-danger)]/40 bg-[var(--color-danger)]/10
+                  text-[12px] text-[var(--color-fg)] flex items-center gap-2">
+        <span class="min-w-0 truncate">{i18n.t('sftp.listFailed', { message: listError })}</span>
+        <button type="button" class="btn-secondary shrink-0 text-[11px] px-2 py-0.5" onclick={() => { void refresh(); }}>
+          {i18n.t('sftp.retryList')}
+        </button>
+      </div>
+    {/if}
+
     <div class="flex-1 min-h-0 overflow-y-auto">
-      {#if loading && entries.length === 0}
+      {#if loading && entries.length === 0 && !listError}
         <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
-      {:else if entries.length === 0}
+      {:else if entries.length === 0 && !listError}
         <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
       {:else}
         <table class="w-full text-[12px]">
@@ -791,6 +881,22 @@
           </tbody>
         </table>
       {/if}
+    </div>
+
+    <div class="border-t border-[var(--color-border-soft)] px-3 py-1.5 text-[11px] text-[var(--color-fg-muted)]
+                flex items-center gap-2 min-h-[28px]">
+      {#if lastDownloadPath}
+        <span class="truncate min-w-0" title={lastDownloadPath}>
+          {i18n.t('sftp.downloadDir', { path: lastDownloadPath })}
+        </span>
+      {/if}
+      <button
+        type="button"
+        class="ml-auto shrink-0 text-[var(--color-accent)] hover:underline"
+        onclick={() => { void chooseDownloadDir(); }}
+      >
+        {i18n.t('sftp.pickDownloadDir')}
+      </button>
     </div>
 
     {#if transfers.length > 0}

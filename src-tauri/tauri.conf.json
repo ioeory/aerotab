@@ -1,19 +1,19 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tabby v2",
-  "version": "0.1.26",
+  "version": "0.1.29",
   "identifier": "org.tabby.v2",
   "build": {
     "beforeDevCommand": "cd apps/ui && npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "cd apps/ui && npm run build",
     "frontendDist": "../apps/ui/dist"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Tabby v2 0.1.26",
+        "title": "Tabby v2 0.1.29",
         "width": 1100,
         "height": 720,
         "minWidth": 640,

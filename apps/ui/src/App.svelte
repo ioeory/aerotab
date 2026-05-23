@@ -19,10 +19,11 @@
   import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
-  import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
+  import { dispatchFocusPane } from './lib/focusPane';
+  import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.1.26-ui-20260523';
+  const buildId = '0.1.29-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -48,6 +49,7 @@
   let hostStatsIntervalSec = $state(30);
   let hostStatsPollHandle: number | null = null;
   let hostStatsSeq = 0;
+  let hostStatsUpdatedAt = $state<number | null>(null);
 
   let profileModal: { open: (existing?: StoredProfile) => void } | null = $state(null);
   let serialModal: { open: () => Promise<void> } | null = $state(null);
@@ -71,13 +73,59 @@
     target: SftpDockTarget;
   }
   const GLOBAL_SFTP_KEY = '__global__';
-  let sftpDocks = $state<Record<string, SftpDockTarget>>({});
+  /** Tab (or global) id → dock visible. Target follows the tab's active SSH pane. */
+  let sftpDockOpen = $state<Record<string, boolean>>({});
+  /** Fallback target when dock is open but the active pane is not SSH (e.g. sidebar / global). */
+  let sftpDockPinned = $state<Record<string, SftpDockTarget>>({});
   let sftpDockCollapsed = $state<Record<string, boolean>>({});
   let sftpWindows = $state<SftpWindow[]>([]);
   let sftpWindowSeq = 0;
+  let paneSftpTarget = $state<SftpDockTarget | null>(null);
+  let paneSftpTargetSeq = 0;
+
   const activeSftpKey = $derived(tabs.activeId ?? GLOBAL_SFTP_KEY);
-  const currentSftpDock = $derived(sftpDocks[activeSftpKey] ?? null);
+  const activeTab = $derived(tabs.tabs.find((t) => t.id === tabs.activeId));
+  const activePane = $derived(activeTab ? tabs.activePane(activeTab) : undefined);
+
+  $effect(() => {
+    void tabs.revision;
+    void activeTab?.activePaneId;
+    const tabId = tabs.activeId;
+    if (!tabId || !sftpDockOpen[tabId]) {
+      paneSftpTarget = null;
+      return;
+    }
+    const pane = activeTab ? tabs.activePane(activeTab) : undefined;
+    if (!pane?.profileId) {
+      paneSftpTarget = null;
+      return;
+    }
+    const seq = ++paneSftpTargetSeq;
+    void rpc.call<StoredProfile>('profile.get', { id: pane.profileId })
+      .then((profile) => {
+        if (seq !== paneSftpTargetSeq) return;
+        paneSftpTarget = { name: profile.name, ssh: profile.ssh };
+      })
+      .catch(() => {
+        if (seq === paneSftpTargetSeq) paneSftpTarget = null;
+      });
+  });
+
+  const currentSftpDock = $derived.by((): SftpDockTarget | null => {
+    const key = activeSftpKey;
+    if (!sftpDockOpen[key]) return null;
+    if (activePane?.sshProfile) {
+      return { name: activePane.title || 'SSH session', ssh: activePane.sshProfile };
+    }
+    if (activePane?.profileId) return paneSftpTarget;
+    return sftpDockPinned[key] ?? null;
+  });
   const currentSftpCollapsed = $derived(sftpDockCollapsed[activeSftpKey] ?? false);
+  const sftpBrowserKey = $derived(
+    currentSftpDock
+      ? `${activeSftpKey}:${activePane?.id ?? 'none'}:${currentSftpDock.ssh.user}@${currentSftpDock.ssh.host}:${currentSftpDock.ssh.port}`
+      : '',
+  );
 
   // ── M9 — session restore ────────────────────────────────────────────────
   // A `Restorable` describes how to re-open a session after a restart. We
@@ -100,7 +148,8 @@
     activePaneIndex: number;
     maximizedPaneIndex?: number | null;
     panes: Restorable[];
-    sftpDock?: SftpDockTarget | null;
+    /** `true` = dock open (target follows active SSH pane); legacy snapshots may store a full target. */
+    sftpDock?: boolean | SftpDockTarget | null;
     sftpDockCollapsed?: boolean;
   }
   interface SessionWorkspace {
@@ -270,7 +319,7 @@
         activePaneIndex,
         maximizedPaneIndex,
         panes,
-        sftpDock: sftpDocks[tab.id] ? cloneJson(sftpDocks[tab.id]) : null,
+        sftpDock: sftpDockOpen[tab.id] ? true : null,
         sftpDockCollapsed: !!sftpDockCollapsed[tab.id],
       });
     }
@@ -319,7 +368,10 @@
         if (item) restoreMap.set(item.session.id, item.restore);
       }
       if (tab.sftpDock) {
-        sftpDocks = { ...sftpDocks, [created.id]: cloneJson(tab.sftpDock) };
+        sftpDockOpen = { ...sftpDockOpen, [created.id]: true };
+        if (typeof tab.sftpDock === 'object' && tab.sftpDock) {
+          sftpDockPinned = { ...sftpDockPinned, [created.id]: cloneJson(tab.sftpDock) };
+        }
         sftpDockCollapsed = { ...sftpDockCollapsed, [created.id]: !!tab.sftpDockCollapsed };
       }
       openedTabs += 1;
@@ -482,9 +534,20 @@
     diagnostics.record(categoryForStatus(msg), 'status', msg, 'error');
   }
 
+  function focusActivePane() {
+    const tab = tabs.tabs.find((candidate) => candidate.id === tabs.activeId);
+    const pane = tab ? tabs.activePane(tab) : undefined;
+    if (pane) dispatchFocusPane(pane.id);
+  }
+
   function openSettings(section: SettingsSectionId = 'appearance') {
     settingsInitialSection = section;
     settingsOpen = true;
+  }
+
+  function closeSettings() {
+    settingsOpen = false;
+    requestAnimationFrame(() => focusActivePane());
   }
 
   function profileCommandSubtitle(p: StoredProfile): string {
@@ -569,11 +632,17 @@
       if (seq !== hostStatsSeq) return;
       hostStats = stats;
       hostStatsStatus = 'ok';
+      hostStatsUpdatedAt = Date.now();
     } catch {
       if (seq !== hostStatsSeq) return;
       hostStats = null;
       hostStatsStatus = 'unavailable';
     }
+  }
+
+  function formatHostStatsUpdated(ts: number | null): string {
+    if (!ts) return '';
+    return new Date(ts).toLocaleTimeString();
   }
 
   function formatPercent(value: number | null | undefined): string {
@@ -677,7 +746,10 @@
     if (tabs.tabs.length === 0) return;
     const i = tabs.tabs.findIndex((t) => t.id === tabs.activeId);
     const next = tabs.tabs[(i + delta + tabs.tabs.length) % tabs.tabs.length];
-    if (next) tabs.activate(next.id);
+    if (next) {
+      tabs.activate(next.id);
+      requestAnimationFrame(() => focusActivePane());
+    }
   }
 
   function cyclePane(delta: number) {
@@ -685,13 +757,17 @@
     if (!tab) return;
     const i = tab.panes.findIndex((p) => p.id === tab.activePaneId);
     const next = tab.panes[(i + delta + tab.panes.length) % tab.panes.length];
-    if (next) tabs.focusPane(tab.id, next.id);
+    if (next) {
+      tabs.focusPane(tab.id, next.id);
+      requestAnimationFrame(() => dispatchFocusPane(next.id));
+    }
   }
 
   function focusPaneDirection(direction: 'left' | 'right' | 'up' | 'down') {
     const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
     if (!tab) return;
     tabs.focusDirectional(tab.id, direction);
+    requestAnimationFrame(() => focusActivePane());
   }
 
   async function closeActivePane() {
@@ -710,8 +786,17 @@
   }
 
   function openSftpDock(target: SftpDockTarget, tabId = tabs.activeId ?? GLOBAL_SFTP_KEY) {
-    sftpDocks = { ...sftpDocks, [tabId]: target };
+    sftpDockOpen = { ...sftpDockOpen, [tabId]: true };
     sftpDockCollapsed = { ...sftpDockCollapsed, [tabId]: false };
+    const tab = tabs.tabs.find((t) => t.id === tabId);
+    const pane = tab ? tabs.activePane(tab) : undefined;
+    const sshPane = pane && (pane.sshProfile || pane.profileId);
+    if (!sshPane) {
+      sftpDockPinned = { ...sftpDockPinned, [tabId]: target };
+    } else {
+      const { [tabId]: _drop, ...rest } = sftpDockPinned;
+      sftpDockPinned = rest;
+    }
   }
 
   function openSftpWindow(target: SftpDockTarget) {
@@ -727,9 +812,11 @@
   }
 
   function closeSftpDock(tabId = activeSftpKey) {
-    const { [tabId]: _dropDock, ...restDocks } = sftpDocks;
+    const { [tabId]: _open, ...restOpen } = sftpDockOpen;
+    const { [tabId]: _pin, ...restPinned } = sftpDockPinned;
     const { [tabId]: _dropCollapsed, ...restCollapsed } = sftpDockCollapsed;
-    sftpDocks = restDocks;
+    sftpDockOpen = restOpen;
+    sftpDockPinned = restPinned;
     sftpDockCollapsed = restCollapsed;
   }
 
@@ -1002,9 +1089,29 @@
       }
     })();
 
-    kbdHandler = (e: KeyboardEvent) => { hotkeys.dispatch(e); };
+    kbdHandler = (e: KeyboardEvent) => {
+      if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'r' || e.key === 'R'))) {
+        e.preventDefault();
+        return;
+      }
+      hotkeys.dispatch(e);
+    };
     window.addEventListener('keydown', kbdHandler);
+    const onSessionReplaced = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ oldId: string; session: SessionMeta }>).detail;
+      if (!detail?.oldId || !detail.session) return;
+      const restore = restoreMap.get(detail.oldId);
+      if (restore) {
+        restoreMap.delete(detail.oldId);
+        restoreMap.set(detail.session.id, restore);
+        persistOpenTabs();
+      }
+    };
     document.addEventListener('tabby:settings-changed', onAppSettingsChanged);
+    document.addEventListener('tabby:session-replaced', onSessionReplaced);
+    return () => {
+      document.removeEventListener('tabby:session-replaced', onSessionReplaced);
+    };
   });
   onDestroy(() => {
     if (kbdHandler) window.removeEventListener('keydown', kbdHandler);
@@ -1124,7 +1231,7 @@
           </div>
         {:else}
           <div class="shrink-0 min-w-[320px] max-w-[520px] h-full border-l border-[var(--color-border-soft)]" style="width: clamp(320px, 38vw, 460px);">
-            {#key `${activeSftpKey}:${currentSftpDock.name}:${currentSftpDock.ssh.host}:${currentSftpDock.ssh.port}`}
+            {#key sftpBrowserKey}
               <SftpBrowser
                 {rpc}
                 source={currentSftpDock}
@@ -1151,9 +1258,21 @@
       </button>
       <span>{status}</span>
       {#if hostStatsEnabled && hostStatsStatus === 'ok' && hostStats}
-        <span class="hidden lg:inline-flex truncate max-w-[520px]" title={hostStatsTitle(hostStats)}>
-          {formatHostStats(hostStats)}
+        <span class="hidden lg:inline-flex items-center gap-2 truncate max-w-[520px]" title={hostStatsTitle(hostStats)}>
+          <span class="truncate">{formatHostStats(hostStats)}</span>
+          {#if hostStatsUpdatedAt}
+            <span class="shrink-0 opacity-70">{i18n.t('app.footer.statsUpdated', { time: formatHostStatsUpdated(hostStatsUpdatedAt) })}</span>
+          {/if}
         </span>
+        <button
+          type="button"
+          class="hidden lg:inline p-0.5 rounded hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]"
+          title={i18n.t('app.footer.refreshStats')}
+          aria-label={i18n.t('app.footer.refreshStats')}
+          onclick={() => { void refreshHostStats(); }}
+        >
+          <RefreshCw size={12} />
+        </button>
       {:else if hostStatsEnabled && hostStatsStatus === 'loading'}
         <span class="hidden lg:inline text-[var(--color-fg-muted)]">{i18n.t('app.footer.statsLoading')}</span>
       {:else if hostStatsEnabled && hostStatsStatus === 'unavailable'}
@@ -1166,23 +1285,42 @@
   </main>
 </div>
 
-<ProfileModal {rpc} bind:this={profileModal} onSaved={() => sidebar?.refresh()} {onError} />
+<ProfileModal
+  {rpc}
+  bind:this={profileModal}
+  onSaved={() => sidebar?.refresh()}
+  onClosed={() => focusActivePane()}
+  {onError}
+/>
 <SerialModal {rpc} bind:this={serialModal} {onError} />
 {#if settingsOpen}
   <SettingsLayout
     {rpc}
     {buildId}
     initialSection={settingsInitialSection}
-    onClose={() => (settingsOpen = false)}
+    onClose={closeSettings}
     onSettingsChanged={() => (settingsRev += 1)}
     {onError}
   />
 {/if}
 {#if paletteOpen}
-  <CommandPalette actions={buildActions()} onClose={() => (paletteOpen = false)} />
+  <CommandPalette
+    actions={buildActions()}
+    onClose={() => {
+      paletteOpen = false;
+      requestAnimationFrame(() => focusActivePane());
+    }}
+  />
 {/if}
 {#if pickerOpen}
-  <ProfileSelector {rpc} onClose={() => (pickerOpen = false)} onOpen={onPickerItem} />
+  <ProfileSelector
+    {rpc}
+    onClose={() => {
+      pickerOpen = false;
+      requestAnimationFrame(() => focusActivePane());
+    }}
+    onOpen={onPickerItem}
+  />
 {/if}
 {#each sftpWindows as win (win.id)}
   <SftpBrowser

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
+  import { dispatchFocusPane } from '../lib/focusPane';
   import { getWindowSettings } from '../lib/windowSettings';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
@@ -57,6 +58,12 @@
     if (dragIdx != null) tabs.move(dragIdx, idx);
     dragIdx = null;
   }
+
+  function activateTab(tabId: string) {
+    tabs.activate(tabId);
+    const tab = tabs.tabs.find((candidate) => candidate.id === tabId);
+    requestAnimationFrame(() => dispatchFocusPane(tab?.activePaneId));
+  }
 </script>
 
 <div class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
@@ -72,9 +79,9 @@
       ondragstart={(e) => onDragStart(i, e)}
       ondragover={onDragOver}
       ondrop={(e) => onDrop(i, e)}
-      onclick={() => tabs.activate(tab.id)}
+      onclick={() => activateTab(tab.id)}
       onpointerenter={() => onTabHover(tab)}
-      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') tabs.activate(tab.id); }}
+      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') activateTab(tab.id); }}
       class="group flex items-center gap-2 px-3 py-1.5 rounded-t-md cursor-pointer text-[12.5px] border-t border-l border-r transition-colors
              {isActive
                ? 'bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-fg)]'
