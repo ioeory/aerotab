@@ -22,7 +22,7 @@
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.1.25-ui-20260523';
+  const buildId = '0.1.26-ui-20260523';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1086,7 +1086,7 @@
       <div class="relative flex-1 min-w-0 min-h-0">
         {#each tabs.tabs as tab (tab.id)}
           <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
-            <PaneGrid {rpc} {tab} settingsRev={settingsRev} />
+            <PaneGrid {rpc} {tab} settingsRev={settingsRev} onOpenSftp={() => { void openSftpForActivePane(); }} />
           </div>
         {/each}
         {#if tabs.tabs.length === 0}

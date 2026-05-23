@@ -4,7 +4,7 @@
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { SearchAddon } from '@xterm/addon-search';
-  import { X, ChevronUp, ChevronDown, CaseSensitive, Regex } from '@lucide/svelte';
+  import { X, ChevronUp, ChevronDown, CaseSensitive, Regex, Upload, Download, Info, FolderOpen } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode } from '../lib/rpc';
   import type { SessionMeta } from '../lib/types';
@@ -13,6 +13,7 @@
   import { applyLigatures } from '../lib/customCss';
   import { tabs } from '../lib/tabs.svelte';
   import { i18n } from '../lib/i18n.svelte';
+  import { TerminalTransferDetector, type TerminalTransferDetection } from '../lib/terminalTransfer';
 
   interface Props {
     rpc: RpcClient;
@@ -22,8 +23,10 @@
     settingsRev?: number;
     /** Invoked when the user clicks the pane's close button from inside (e.g. exited overlay). */
     onClosePane?: () => void;
+    /** Invoked when transfer detection should open the active SSH pane's SFTP browser. */
+    onOpenSftp?: () => void;
   }
-  let { rpc, session, active, settingsRev = 0, onClosePane }: Props = $props();
+  let { rpc, session, active, settingsRev = 0, onClosePane, onOpenSftp }: Props = $props();
 
   let host: HTMLDivElement | null = null;
   let term: Terminal | null = null;
@@ -59,6 +62,11 @@
   let pasteFlattenNewlines = false;
   let pasteTrimWhitespace = false;
   let bellFlashHandle: number | null = null;
+  let transferDetectionEnabled = false;
+  let transferNotice = $state<TerminalTransferDetection | null>(null);
+  let transferNoticeHandle: number | null = null;
+  const transferDetector = new TerminalTransferDetector();
+  const canOpenSftp = $derived(session.kind === 'Ssh' && !!onOpenSftp);
 
   // Liveness state. Flips to true when backend reports session ended.
   let exited = $state(false);
@@ -81,7 +89,11 @@
           id: session.id,
           max_chunks: 64,
         });
-        for (const c of r.chunks) term.write(decoder.decode(b64decode(c)));
+        for (const c of r.chunks) {
+          const text = decoder.decode(b64decode(c));
+          inspectTransferOutput(text);
+          term.write(text);
+        }
         if (r.chunks.length > 0 && !active) tabs.markActivity(session.id, 'output');
         if (!r.alive && !exited) {
           markExited();
@@ -142,6 +154,7 @@
       wordSeparator: ' ()[]{}\'",;:',
       // M4 — palette override
       colorSchemeName: '' as string,
+      experimentalTransferDetection: false,
     };
     try {
       const f = await rpc.call<{ value: unknown }>('settings.get', { key: 'font' });
@@ -167,6 +180,9 @@
         if (typeof v.pasteMultilineWarn === 'boolean') pasteMultilineWarn = v.pasteMultilineWarn;
         if (typeof v.pasteFlattenNewlines === 'boolean') pasteFlattenNewlines = v.pasteFlattenNewlines;
         if (typeof v.pasteTrimWhitespace === 'boolean') pasteTrimWhitespace = v.pasteTrimWhitespace;
+        if (typeof v.experimentalTransferDetection === 'boolean') {
+          out.experimentalTransferDetection = v.experimentalTransferDetection;
+        }
       }
       const th = await rpc.call<{ value: unknown }>('settings.get', { key: 'theme' });
       if (typeof th.value === 'string') {
@@ -214,7 +230,41 @@
     // even when the app chrome is transparent. DOM renderer keeps cell
     // backgrounds in CSS/DOM and can honor a transparent theme background.
     if (isTranslucent()) out.renderer = 'dom';
+    if (!out.experimentalTransferDetection) {
+      transferDetector.reset();
+      clearTransferNotice();
+    }
+    transferDetectionEnabled = out.experimentalTransferDetection;
     return out;
+  }
+
+  function inspectTransferOutput(text: string) {
+    if (!transferDetectionEnabled) return;
+    const detected = transferDetector.push(text);
+    if (!detected) return;
+    transferNotice = detected;
+    if (transferNoticeHandle != null) window.clearTimeout(transferNoticeHandle);
+    transferNoticeHandle = window.setTimeout(() => {
+      transferNotice = null;
+      transferNoticeHandle = null;
+    }, 12000);
+  }
+
+  function clearTransferNotice() {
+    if (transferNoticeHandle != null) window.clearTimeout(transferNoticeHandle);
+    transferNoticeHandle = null;
+    transferNotice = null;
+  }
+
+  function transferProtocolLabel(detected: TerminalTransferDetection): string {
+    return detected.protocol === 'trzsz' ? 'trzsz' : 'ZMODEM / lrzsz';
+  }
+
+  function transferTitle(detected: TerminalTransferDetection): string {
+    const protocol = transferProtocolLabel(detected);
+    if (detected.direction === 'upload') return i18n.t('terminal.transferUploadDetected', { protocol });
+    if (detected.direction === 'download') return i18n.t('terminal.transferDownloadDetected', { protocol });
+    return i18n.t('terminal.transferDetected', { protocol });
   }
 
   async function applyRenderer(renderer: 'dom' | 'canvas' | 'webgl') {
@@ -413,6 +463,7 @@
     cleanupSearchListener?.();
     cleanupSearchListener = null;
     stopPolling();
+    clearTransferNotice();
     search?.dispose();
     search = null;
     term?.dispose();
@@ -584,6 +635,41 @@
           {i18n.t('common.close')}
         </button>
       {/if}
+    </div>
+  </div>
+{/if}
+
+{#if transferNotice && active}
+  <div class="absolute bottom-3 left-3 z-20 max-w-[min(380px,calc(100%-24px))] pointer-events-none">
+    <div class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
+                rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur">
+      <div class="shrink-0 text-[var(--color-accent)]">
+        {#if transferNotice.direction === 'upload'}
+          <Upload size={15} />
+        {:else if transferNotice.direction === 'download'}
+          <Download size={15} />
+        {:else}
+          <Info size={15} />
+        {/if}
+      </div>
+      <div class="min-w-0">
+        <div class="text-[var(--color-accent)] font-semibold leading-tight truncate">{transferTitle(transferNotice)}</div>
+        <div class="text-[var(--color-fg-muted)] leading-tight">{i18n.t('terminal.transferHint')}</div>
+      </div>
+      {#if canOpenSftp}
+        <button type="button" class="btn-secondary shrink-0 text-[12px] px-2 py-1 inline-flex items-center gap-1.5" onclick={() => onOpenSftp?.()}>
+          <FolderOpen size={12} /> {i18n.t('terminal.transferOpenSftp')}
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+        title={i18n.t('terminal.transferDismiss')}
+        aria-label={i18n.t('terminal.transferDismiss')}
+        onclick={clearTransferNotice}
+      >
+        <X size={12} />
+      </button>
     </div>
   </div>
 {/if}

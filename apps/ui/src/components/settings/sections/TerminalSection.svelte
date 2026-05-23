@@ -11,6 +11,7 @@
   import { onMount, onDestroy } from 'svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
+  import { i18n } from '../../../lib/i18n.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -37,6 +38,7 @@
   let pasteMultilineWarn = $state(true);
   let pasteFlattenNewlines = $state(false);
   let pasteTrimWhitespace = $state(false);
+  let experimentalTransferDetection = $state(false);
   let autoOpenTerminal = $state(true);
   let restoreTabs = $state(true);
 
@@ -66,6 +68,7 @@
         if (typeof v.pasteMultilineWarn === 'boolean') pasteMultilineWarn = v.pasteMultilineWarn;
         if (typeof v.pasteFlattenNewlines === 'boolean') pasteFlattenNewlines = v.pasteFlattenNewlines;
         if (typeof v.pasteTrimWhitespace === 'boolean') pasteTrimWhitespace = v.pasteTrimWhitespace;
+        if (typeof v.experimentalTransferDetection === 'boolean') experimentalTransferDetection = v.experimentalTransferDetection;
         if (typeof v.autoOpenTerminal === 'boolean') autoOpenTerminal = v.autoOpenTerminal;
         if (typeof v.restoreTabs === 'boolean') restoreTabs = v.restoreTabs;
       }
@@ -94,6 +97,7 @@
         scrollback, cursorBlink, renderer, altIsMeta, scrollOnInput, bell,
         wordSeparator, linkModifier, copyWithFormatting, bracketedPaste,
         pasteMultilineWarn, pasteFlattenNewlines, pasteTrimWhitespace,
+        experimentalTransferDetection,
         autoOpenTerminal, restoreTabs,
       },
     });
@@ -232,6 +236,15 @@
       <input type="checkbox" bind:checked={pasteTrimWhitespace} onchange={markDirty} />
       Trim trailing whitespace on paste
     </label>
+  </div>
+
+  <div>
+    <div class="section-h">{i18n.t('settings.terminal.experimentalTransfers')}</div>
+    <label class="row">
+      <input type="checkbox" bind:checked={experimentalTransferDetection} onchange={markDirty} />
+      {i18n.t('settings.terminal.detectTransfers')}
+    </label>
+    <div class="help">{i18n.t('settings.terminal.detectTransfersHelp')}</div>
   </div>
 
   <div>
