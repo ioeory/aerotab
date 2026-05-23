@@ -2,6 +2,7 @@
   import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
   import { getWindowSettings } from '../lib/windowSettings';
+  import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
   interface Props {
@@ -24,7 +25,7 @@
     ev.stopPropagation();
     const ws = getWindowSettings();
     if (ws.confirmCloseWithMultipleTabs !== false && tab.panes.length > 1) {
-      if (!confirm(`Close tab with ${tab.panes.length} panes?`)) return;
+      if (!confirm(i18n.t('tabbar.closeMultiPaneConfirm', { count: tab.panes.length }))) return;
     }
     const pane_ids = tab.panes.map((p) => p.id);
     tabs.remove(tab.id);
@@ -89,15 +90,15 @@
       {#if !isActive}
         {@const act = tabs.tabActivity(tab)}
         {#if act === 'bell'}
-          <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-danger)] animate-pulse" title="Bell"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-danger)] animate-pulse" title={i18n.t('tabbar.bell')}></span>
         {:else if act === 'output'}
-          <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" title="New output"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" title={i18n.t('tabbar.newOutput')}></span>
         {/if}
       {/if}
       <button
         type="button"
-        title="Close tab"
-        aria-label="Close tab"
+        title={i18n.t('tabbar.closeTab')}
+        aria-label={i18n.t('tabbar.closeTab')}
         class="opacity-50 group-hover:opacity-100 hover:text-[var(--color-danger)] -mr-1 p-0.5"
         onclick={(e) => close(tab, e)}
       >
@@ -107,10 +108,10 @@
   {/each}
   {#if tabs.tabs.length === 0}
     <div class="text-[var(--color-fg-muted)] px-3 py-1.5 text-[12px] italic">
-      No open sessions — start one from the sidebar.
+      {i18n.t('tabbar.noOpenSessions')}
     </div>
     <div class="ml-auto flex items-center gap-1 pr-1">
-      <button type="button" title="New tab…" aria-label="New tab"
+      <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
               class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
               onclick={() => onAddTab?.()}>
         <Plus size={14} />
@@ -118,22 +119,22 @@
     </div>
   {:else}
     <div class="ml-auto flex items-center gap-1 pr-1">
-      <button type="button" title="New tab…" aria-label="New tab"
+      <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
               class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
               onclick={() => onAddTab?.()}>
         <Plus size={14} />
       </button>
-      <button type="button" title="Split right" aria-label="Split right"
+      <button type="button" title={i18n.t('tabbar.splitRight')} aria-label={i18n.t('tabbar.splitRight')}
               class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
               onclick={(e) => splitActive('row', e)}>
         <Columns2 size={14} />
       </button>
-      <button type="button" title="Split down" aria-label="Split down"
+      <button type="button" title={i18n.t('tabbar.splitDown')} aria-label={i18n.t('tabbar.splitDown')}
               class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
               onclick={(e) => splitActive('col', e)}>
         <Rows2 size={14} />
       </button>
-      <button type="button" title="Open SFTP for current SSH pane" aria-label="Open SFTP for current SSH pane"
+      <button type="button" title={i18n.t('tabbar.openSftpCurrent')} aria-label={i18n.t('tabbar.openSftpCurrent')}
               class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
               onclick={() => onOpenSftp?.()}>
         <FolderOpen size={14} />

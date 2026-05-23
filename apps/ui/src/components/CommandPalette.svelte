@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   export interface Action {
     id: string;
@@ -58,7 +59,7 @@
   });
 </script>
 
-<div role="dialog" aria-modal="true" aria-label="Command palette"
+<div role="dialog" aria-modal="true" aria-label={i18n.t('commandPalette.aria')}
   tabindex="-1"
      class="fixed inset-0 z-[60] bg-black/50 grid place-items-start pt-[12vh] px-4"
      onclick={onClose}
@@ -69,10 +70,10 @@
        role="presentation">
     <div class="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border-soft)]">
       <input bind:this={inputEl} bind:value={query}
-             type="text" placeholder="Type a command…"
+             type="text" placeholder={i18n.t('commandPalette.placeholder')}
              class="flex-1 bg-transparent text-[var(--color-fg)] outline-none text-[13.5px]" />
       <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-              onclick={onClose} aria-label="Close"><X size={13} /></button>
+              onclick={onClose} aria-label={i18n.t('common.close')}><X size={13} /></button>
     </div>
     <ul class="max-h-[50vh] overflow-y-auto py-1" role="listbox">
       {#each filtered as a, i (a.id)}
@@ -104,7 +105,7 @@
       {/each}
       {#if filtered.length === 0}
         <li class="px-3 py-4 text-center text-[var(--color-fg-muted)] text-[12px]">
-          No matches.
+          {i18n.t('common.noMatches')}
         </li>
       {/if}
     </ul>

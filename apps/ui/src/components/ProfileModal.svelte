@@ -3,6 +3,7 @@
   import type { RpcClient } from '../lib/rpc';
   import { uuidv4 } from '../lib/rpc';
   import type { StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
+  import { i18n } from '../lib/i18n.svelte';
   import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -136,7 +137,7 @@
       close();
       onSaved();
     } catch (e) {
-      onError(`save failed: ${(e as Error).message}`);
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
     }
   }
 </script>
@@ -145,58 +146,58 @@
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">
-        {editing ? 'Edit SSH profile' : 'New SSH profile'}
+        {editing ? i18n.t('profileModal.editTitle') : i18n.t('profileModal.newTitle')}
       </h2>
       <button
         type="button"
         onclick={close}
         class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-        aria-label="Close"
+        aria-label={i18n.t('common.close')}
       >
         <X size={14} />
       </button>
     </div>
 
-    <label for="pm-name" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">Name</label>
+    <label for="pm-name" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.name')}</label>
     <input id="pm-name" bind:value={name} required placeholder="prod web 01" class="input" />
 
     <div class="flex gap-3 mt-2">
       <div class="flex-1">
-        <label for="pm-group" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Group</label>
+        <label for="pm-group" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.group')}</label>
         <input id="pm-group" bind:value={group} placeholder="prod / customer-a" class="input" />
       </div>
       <label class="favorite-row">
         <input type="checkbox" bind:checked={favorite} />
-        <span>Favorite</span>
+        <span>{i18n.t('profileModal.favorite')}</span>
       </label>
     </div>
 
-    <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">Tags</label>
+    <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
     <input id="pm-tags" bind:value={tagsText} placeholder="prod, db, singapore" class="input" />
 
     <div class="flex gap-3 mt-2 items-end">
       <div>
-        <label for="pm-icon-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Icon</label>
+        <label for="pm-icon-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.icon')}</label>
         <div class="flex items-center gap-2">
           <ProfileIcon icon={{ kind: iconKind, value: iconValue }} {name} />
           <select id="pm-icon-kind" bind:value={iconKind} class="input min-w-[112px]">
-            <option value="builtin">Built-in</option>
-            <option value="emoji">Emoji</option>
-            <option value="file">File path</option>
-            <option value="data">Data URI</option>
+            <option value="builtin">{i18n.t('profileModal.builtin')}</option>
+            <option value="emoji">{i18n.t('profileModal.emoji')}</option>
+            <option value="file">{i18n.t('profileModal.filePath')}</option>
+            <option value="data">{i18n.t('profileModal.dataUri')}</option>
           </select>
         </div>
       </div>
       <div class="flex-1">
         {#if iconKind === 'builtin'}
-          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Built-in icon</label>
+          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.builtinIcon')}</label>
           <select id="pm-icon-value" bind:value={iconValue} class="input">
             {#each BUILTIN_PROFILE_ICONS as icon (icon)}
               <option value={icon}>{icon}</option>
             {/each}
           </select>
         {:else}
-          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Icon value</label>
+          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.iconValue')}</label>
           <input id="pm-icon-value" bind:value={iconValue} placeholder={iconKind === 'emoji' ? 'emoji or short text' : 'path or data URI'} class="input" />
         {/if}
       </div>
@@ -204,40 +205,40 @@
 
     <div class="flex gap-3 mt-2">
       <div class="flex-1">
-        <label for="pm-host" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Host</label>
+        <label for="pm-host" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.host')}</label>
         <input id="pm-host" bind:value={host} required placeholder="example.com" class="input" />
       </div>
       <div style="max-width:110px">
-        <label for="pm-port" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Port</label>
+        <label for="pm-port" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.port')}</label>
         <input id="pm-port" bind:value={port} type="number" min="1" max="65535" class="input" />
       </div>
     </div>
 
-    <label for="pm-user" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">User</label>
+    <label for="pm-user" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.user')}</label>
     <input id="pm-user" bind:value={user} required placeholder="root" class="input" />
 
-    <label for="pm-auth" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">Auth method</label>
+    <label for="pm-auth" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.authMethod')}</label>
     <select id="pm-auth" bind:value={authKind} class="input">
-      <option value="password">Password</option>
-      <option value="key">Public key</option>
+      <option value="password">{i18n.t('profileModal.password')}</option>
+      <option value="key">{i18n.t('profileModal.publicKey')}</option>
     </select>
 
     {#if authKind === 'password'}
       <label for="pm-pw" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-        Password (stored locally)
+        {i18n.t('profileModal.passwordStoredLocally')}
       </label>
       <input id="pm-pw" type="password" bind:value={password} class="input" />
     {:else}
-      <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">Private key path</label>
+      <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.privateKeyPath')}</label>
       <input id="pm-keypath" bind:value={keyPath} placeholder="~/.ssh/id_ed25519" class="input" />
       <label for="pm-keypass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-        Key passphrase (optional)
+        {i18n.t('profileModal.keyPassphrase')}
       </label>
       <input id="pm-keypass" type="password" bind:value={keyPassphrase} class="input" />
     {/if}
 
     <label for="pm-jumps" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-      ProxyJump chain (optional, one bastion per line as <code>user@host[:port]</code>)
+      {i18n.t('profileModal.proxyJump')}
     </label>
     <textarea
       id="pm-jumps"
@@ -248,8 +249,8 @@
     ></textarea>
 
     <div class="flex justify-end gap-2 mt-5">
-      <button type="button" onclick={close} class="btn-secondary">Cancel</button>
-      <button type="submit" class="btn-primary">Save</button>
+      <button type="button" onclick={close} class="btn-secondary">{i18n.t('common.cancel')}</button>
+      <button type="submit" class="btn-primary">{i18n.t('common.save')}</button>
     </div>
   </form>
 </dialog>

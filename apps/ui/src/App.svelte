@@ -15,13 +15,14 @@
   import { applyCustomCss, applyLigatures } from './lib/customCss';
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
   import { settingsCoord } from './lib/settingsStore.svelte';
+  import { i18n } from './lib/i18n.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
 
   const rpc = selectClient();
-  const buildId = '0.1.17-ui-20260523';
-  let status = $state('idle');
+  const buildId = '0.1.18-ui-20260523';
+  let status = $state(i18n.t('app.status.idle'));
   let coreVersion = $state<string | null>(null);
   let hostStats = $state<HostStats | null>(null);
   let hostStatsStatus = $state<'idle' | 'loading' | 'ok' | 'unavailable'>('idle');
@@ -123,12 +124,14 @@
 
 
   onMount(async () => {
+    await i18n.load(rpc);
+    status = i18n.t('app.status.idle');
     try {
       const v = await rpc.call<{ version: string }>('core.version');
       coreVersion = v.version;
-      status = `connected · core ${v.version}`;
+      status = i18n.t('app.status.connectedCore', { version: v.version });
     } catch (e) {
-      status = 'core unreachable';
+      status = i18n.t('app.status.coreUnreachable');
       console.error(e);
     }
     // Pull the persisted theme (if any) and apply before first paint of panes.
@@ -287,13 +290,13 @@
     if (typeof stats.mem_percent === 'number') parts.push(`Mem ${formatPercent(stats.mem_percent)}`);
     if (typeof stats.disk_percent === 'number') parts.push(`Disk ${formatPercent(stats.disk_percent)}`);
     if (typeof stats.uptime_seconds === 'number') parts.push(`Up ${formatUptime(stats.uptime_seconds)}`);
-    return parts.join(' · ') || stats.hostname || 'stats';
+    return parts.join(' · ') || stats.hostname || i18n.t('app.footer.statsLoading');
   }
 
   function hostStatsTitle(stats: HostStats): string {
     const bits = [stats.hostname, stats.kernel, typeof stats.load1 === 'number' ? `load ${stats.load1.toFixed(2)}` : null]
       .filter(Boolean);
-    return bits.join(' · ') || 'Host stats';
+    return bits.join(' · ') || i18n.t('app.footer.hostStatsUnavailable');
   }
 
   async function openLocal(): Promise<string | null> {
@@ -488,8 +491,12 @@
     if (typeof next === 'boolean') sidebarVisible = next;
   }
 
-  function onAppSettingsChanged() {
+  async function onAppSettingsChanged() {
     syncSidebarFromWindowSettings();
+    await i18n.load(rpc);
+    status = coreVersion
+      ? i18n.t('app.status.connectedCore', { version: coreVersion })
+      : i18n.t('app.status.idle');
     void loadHostStatsSettings();
   }
 
@@ -572,53 +579,53 @@
 
   function buildActions(): Action[] {
     const acts: Action[] = [
-      { id: 'new-tab', title: 'New local tab', shortcut: 'Ctrl+Shift+T', run: () => openLocal() },
-      { id: 'split-right', title: 'Split right', shortcut: 'Ctrl+Shift+D', run: () => splitActive('row') },
-      { id: 'split-left', title: 'Split left', shortcut: 'Ctrl+Shift+A', run: () => splitActive('row', 'before') },
-      { id: 'split-down', title: 'Split down', shortcut: 'Ctrl+Shift+E', run: () => splitActive('col') },
-      { id: 'split-up', title: 'Split up', shortcut: 'Ctrl+Shift+W', run: () => splitActive('col', 'before') },
-      { id: 'maximize-pane', title: 'Maximize / restore pane', shortcut: 'Alt+Z', run: () => toggleActivePaneMaximize() },
-      { id: 'close-pane', title: 'Close current pane', shortcut: 'Ctrl+W', run: () => closeActivePane() },
-      { id: 'next-tab', title: 'Next tab', shortcut: 'Ctrl+Tab', run: () => cycleTab(1) },
-      { id: 'prev-tab', title: 'Previous tab', shortcut: 'Ctrl+Shift+Tab', run: () => cycleTab(-1) },
-      { id: 'focus-left', title: 'Focus pane left', shortcut: 'Alt+←', run: () => focusPaneDirection('left') },
-      { id: 'focus-right', title: 'Focus pane right', shortcut: 'Alt+→', run: () => focusPaneDirection('right') },
-      { id: 'focus-up', title: 'Focus pane up', shortcut: 'Alt+↑', run: () => focusPaneDirection('up') },
-      { id: 'focus-down', title: 'Focus pane down', shortcut: 'Alt+↓', run: () => focusPaneDirection('down') },
-      { id: 'next-pane', title: 'Next pane', shortcut: 'Alt+]', run: () => cyclePane(1) },
-      { id: 'prev-pane', title: 'Previous pane', shortcut: 'Alt+[', run: () => cyclePane(-1) },
-      { id: 'settings', title: 'Open settings', shortcut: 'Ctrl+,', run: () => (settingsOpen = true) },
-      { id: 'toggle-sidebar', title: sidebarVisible ? 'Hide sidebar' : 'Show sidebar', shortcut: 'Ctrl+Alt+S', run: () => { void setSidebarVisible(!sidebarVisible); } },
-      { id: 'new-profile', title: 'New SSH profile…', run: () => profileModal?.open() },
-      { id: 'new-serial', title: 'New serial connection…', run: () => serialModal?.open() },
+      { id: 'new-tab', title: i18n.t('action.newLocalTab'), shortcut: 'Ctrl+Shift+T', run: () => openLocal() },
+      { id: 'split-right', title: i18n.t('action.splitRight'), shortcut: 'Ctrl+Shift+D', run: () => splitActive('row') },
+      { id: 'split-left', title: i18n.t('action.splitLeft'), shortcut: 'Ctrl+Shift+A', run: () => splitActive('row', 'before') },
+      { id: 'split-down', title: i18n.t('action.splitDown'), shortcut: 'Ctrl+Shift+E', run: () => splitActive('col') },
+      { id: 'split-up', title: i18n.t('action.splitUp'), shortcut: 'Ctrl+Shift+W', run: () => splitActive('col', 'before') },
+      { id: 'maximize-pane', title: i18n.t('action.maximizePane'), shortcut: 'Alt+Z', run: () => toggleActivePaneMaximize() },
+      { id: 'close-pane', title: i18n.t('action.closePane'), shortcut: 'Ctrl+W', run: () => closeActivePane() },
+      { id: 'next-tab', title: i18n.t('action.nextTab'), shortcut: 'Ctrl+Tab', run: () => cycleTab(1) },
+      { id: 'prev-tab', title: i18n.t('action.previousTab'), shortcut: 'Ctrl+Shift+Tab', run: () => cycleTab(-1) },
+      { id: 'focus-left', title: i18n.t('action.focusPaneLeft'), shortcut: 'Alt+←', run: () => focusPaneDirection('left') },
+      { id: 'focus-right', title: i18n.t('action.focusPaneRight'), shortcut: 'Alt+→', run: () => focusPaneDirection('right') },
+      { id: 'focus-up', title: i18n.t('action.focusPaneUp'), shortcut: 'Alt+↑', run: () => focusPaneDirection('up') },
+      { id: 'focus-down', title: i18n.t('action.focusPaneDown'), shortcut: 'Alt+↓', run: () => focusPaneDirection('down') },
+      { id: 'next-pane', title: i18n.t('action.nextPane'), shortcut: 'Alt+]', run: () => cyclePane(1) },
+      { id: 'prev-pane', title: i18n.t('action.previousPane'), shortcut: 'Alt+[', run: () => cyclePane(-1) },
+      { id: 'settings', title: i18n.t('action.openSettings'), shortcut: 'Ctrl+,', run: () => (settingsOpen = true) },
+      { id: 'toggle-sidebar', title: sidebarVisible ? i18n.t('action.hideSidebar') : i18n.t('action.showSidebar'), shortcut: 'Ctrl+Alt+S', run: () => { void setSidebarVisible(!sidebarVisible); } },
+      { id: 'new-profile', title: i18n.t('action.newSshProfile'), run: () => profileModal?.open() },
+      { id: 'new-serial', title: i18n.t('action.newSerialConnection'), run: () => serialModal?.open() },
     ];
     for (const p of savedProfiles) {
       acts.push({
         id: `connect-${p.id}`,
-        title: `Connect: ${p.name}`,
+        title: i18n.t('action.connectProfile', { name: p.name }),
         subtitle: p.kind === 'ssh' ? `ssh ${p.ssh.user ?? ''}@${p.ssh.host}` : p.kind,
         run: () => connectProfile(p),
       });
       acts.push({
         id: `sftp-${p.id}`,
-        title: `SFTP browser: ${p.name}`,
+        title: i18n.t('action.sftpBrowserProfile', { name: p.name }),
         run: () => openSftpDock({ name: p.name, ssh: p.ssh }),
       });
     }
     acts.push({
       id: 'open-sftp',
-      title: 'Open SFTP for current SSH pane',
+      title: i18n.t('action.openSftpCurrent'),
       shortcut: 'Ctrl+Alt+F',
       run: () => { void openSftpForActivePane(); },
     });
     acts.push({
       id: 'open-sftp-window',
-      title: 'Open SFTP window for current SSH pane',
+      title: i18n.t('action.openSftpWindowCurrent'),
       run: () => { void openSftpWindowForActivePane(); },
     });
     acts.push({
       id: 'toggle-sftp-dock',
-      title: currentSftpCollapsed ? 'Expand SFTP dock' : 'Collapse SFTP dock',
+      title: currentSftpCollapsed ? i18n.t('action.expandSftpDock') : i18n.t('action.collapseSftpDock'),
       shortcut: 'Ctrl+Alt+E',
       run: () => toggleCurrentSftpDock(),
     });
@@ -754,8 +761,8 @@
           <div class="absolute inset-0 grid place-items-center text-[var(--color-fg-muted)] text-[12.5px]">
             <div class="text-center">
               <div class="text-[var(--color-accent)] text-[20px] font-bold mb-2">›_</div>
-              <div>Welcome to Tabby v2</div>
-              <div class="opacity-70 mt-1">Open a session from the sidebar to begin.</div>
+              <div>{i18n.t('app.empty.title')}</div>
+              <div class="opacity-70 mt-1">{i18n.t('app.empty.subtitle')}</div>
             </div>
           </div>
         {/if}
@@ -766,8 +773,8 @@
             <button
               type="button"
               class="p-1.5 rounded text-[var(--color-accent)] hover:bg-[var(--color-panel-2)]"
-              title="Expand SFTP dock"
-              aria-label="Expand SFTP dock"
+              title={i18n.t('sftp.expandDock')}
+              aria-label={i18n.t('sftp.expandDock')}
               onclick={() => setCurrentSftpCollapsed(false)}
             >
               <PanelRightOpen size={15} />
@@ -776,8 +783,8 @@
             <button
               type="button"
               class="mt-auto p-1 rounded text-[var(--color-fg-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-panel-2)]"
-              title="Close SFTP dock"
-              aria-label="Close SFTP dock"
+              title={i18n.t('sftp.closeDock')}
+              aria-label={i18n.t('sftp.closeDock')}
               onclick={() => closeSftpDock()}
             >
               <X size={13} />
@@ -805,8 +812,8 @@
                    text-[11px] text-[var(--color-fg-muted)]">
       <button type="button"
               class="p-0.5 rounded hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]"
-              title={sidebarVisible ? 'Hide sidebar' : 'Show sidebar'}
-              aria-label={sidebarVisible ? 'Hide sidebar' : 'Show sidebar'}
+              title={sidebarVisible ? i18n.t('app.footer.hideSidebar') : i18n.t('app.footer.showSidebar')}
+              aria-label={sidebarVisible ? i18n.t('app.footer.hideSidebar') : i18n.t('app.footer.showSidebar')}
               onclick={() => { void setSidebarVisible(!sidebarVisible); }}>
         {#if sidebarVisible}<PanelLeftClose size={13} />{:else}<PanelLeftOpen size={13} />{/if}
       </button>
@@ -816,11 +823,11 @@
           {formatHostStats(hostStats)}
         </span>
       {:else if hostStatsEnabled && hostStatsStatus === 'loading'}
-        <span class="hidden lg:inline text-[var(--color-fg-muted)]">stats…</span>
+        <span class="hidden lg:inline text-[var(--color-fg-muted)]">{i18n.t('app.footer.statsLoading')}</span>
       {:else if hostStatsEnabled && hostStatsStatus === 'unavailable'}
-        <span class="hidden lg:inline text-[var(--color-fg-muted)]" title="Host stats unavailable">stats unavailable</span>
+        <span class="hidden lg:inline text-[var(--color-fg-muted)]" title={i18n.t('app.footer.hostStatsUnavailable')}>{i18n.t('app.footer.statsUnavailable')}</span>
       {/if}
-      <span class="ml-auto">{tabs.tabs.length} session{tabs.tabs.length === 1 ? '' : 's'}</span>
+      <span class="ml-auto">{i18n.t('app.footer.sessions', { count: tabs.tabs.length, suffix: tabs.tabs.length === 1 ? '' : 's' })}</span>
       {#if coreVersion}<span>v{coreVersion}</span>{/if}
       <span>{buildId}</span>
     </footer>

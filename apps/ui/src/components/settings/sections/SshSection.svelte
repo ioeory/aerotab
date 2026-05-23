@@ -5,6 +5,7 @@
   import { RefreshCw, Server, Trash2 } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import type { KnownHostEntry } from '../../../lib/types';
+  import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
@@ -78,7 +79,10 @@
     knownHostsBusy = true;
     try {
       knownHosts = await rpc.call<KnownHostEntry[]>('ssh.knownHosts.list', {});
-      knownHostsStatus = `${knownHosts.length} known host${knownHosts.length === 1 ? '' : 's'}`;
+      knownHostsStatus = i18n.t('ssh.knownHostsCount', {
+        count: knownHosts.length,
+        suffix: knownHosts.length === 1 ? '' : 's',
+      });
     } catch (e) {
       knownHostsStatus = '';
       onError(`known_hosts list: ${(e as Error).message}`);
@@ -92,7 +96,7 @@
     knownHostsBusy = true;
     try {
       await rpc.call('ssh.knownHosts.configure', { dir: knownHostsDir.trim() });
-      knownHostsStatus = 'known_hosts backend directory applied';
+      knownHostsStatus = i18n.t('ssh.backendDirApplied');
       settingsCoord.markDirty();
       await loadKnownHosts();
     } catch (e) {
@@ -103,11 +107,13 @@
   }
 
   async function removeKnownHost(host: string) {
-    if (!confirm(`Remove known host ${host}?`)) return;
+    if (!confirm(i18n.t('ssh.removeKnownHostConfirm', { host }))) return;
     knownHostsBusy = true;
     try {
       const r = await rpc.call<{ removed: boolean }>('ssh.knownHosts.remove', { host });
-      knownHostsStatus = r.removed ? `removed ${host}` : `${host} was not present`;
+      knownHostsStatus = r.removed
+        ? i18n.t('ssh.removedKnownHost', { host })
+        : i18n.t('ssh.knownHostNotPresent', { host });
       await loadKnownHosts();
     } catch (e) {
       onError(`known_hosts remove: ${(e as Error).message}`);
@@ -129,84 +135,84 @@
 <div class="settings-section">
   <h2 class="flex items-center gap-2"><Server size={16} /> SSH</h2>
 
-  <div class="section-h">Connection</div>
+  <div class="section-h">{i18n.t('ssh.connection')}</div>
   <label class="row">
-    <span class="row-label">SSH agent</span>
+    <span class="row-label">{i18n.t('ssh.agent')}</span>
     <select bind:value={agent} onchange={markDirty}>
-      <option value="auto">Auto (system default)</option>
-      <option value="system">System agent (ssh-agent / gpg-agent)</option>
-      <option value="pageant">Pageant (Windows)</option>
-      <option value="none">Disabled</option>
+      <option value="auto">{i18n.t('ssh.agent.auto')}</option>
+      <option value="system">{i18n.t('ssh.agent.system')}</option>
+      <option value="pageant">{i18n.t('ssh.agent.pageant')}</option>
+      <option value="none">{i18n.t('ssh.agent.none')}</option>
     </select>
   </label>
   <label class="row">
-    <span class="row-label">Preferred auth methods</span>
+    <span class="row-label">{i18n.t('ssh.preferredAuth')}</span>
     <input type="text" bind:value={preferredAuth} oninput={markDirty}
            placeholder="publickey,password,keyboard-interactive" />
   </label>
   <label class="row">
-    <span class="row-label">Jump host (ProxyJump)</span>
+    <span class="row-label">{i18n.t('ssh.jumpHost')}</span>
     <input type="text" bind:value={jumpHost} oninput={markDirty} placeholder="user@bastion:22" />
   </label>
   <label class="row">
-    <span class="row-label">Reuse multiplexed session</span>
+    <span class="row-label">{i18n.t('ssh.reuseSession')}</span>
     <input type="checkbox" bind:checked={reuseSession} onchange={markDirty} />
   </label>
 
-  <div class="section-h">Keep-alive</div>
+  <div class="section-h">{i18n.t('ssh.keepAlive')}</div>
   <label class="row">
-    <span class="row-label">Client interval (s)</span>
+    <span class="row-label">{i18n.t('ssh.clientInterval')}</span>
     <input type="number" min="0" max="3600" bind:value={keepaliveInterval} oninput={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Max missed responses</span>
+    <span class="row-label">{i18n.t('ssh.maxMissed')}</span>
     <input type="number" min="0" max="20" bind:value={keepaliveCountMax} oninput={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">ServerAliveInterval (s)</span>
+    <span class="row-label">{i18n.t('ssh.serverAliveInterval')}</span>
     <input type="number" min="0" max="3600" bind:value={serverAliveInterval} oninput={markDirty} />
   </label>
 
-  <div class="section-h">X11 forwarding</div>
+  <div class="section-h">{i18n.t('ssh.x11Forwarding')}</div>
   <label class="row">
-    <span class="row-label">Enable X11 forwarding</span>
+    <span class="row-label">{i18n.t('ssh.enableX11')}</span>
     <input type="checkbox" bind:checked={x11Forwarding} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">X11 DISPLAY</span>
+    <span class="row-label">{i18n.t('ssh.x11Display')}</span>
     <input type="text" bind:value={x11Display} oninput={markDirty} placeholder=":0.0" disabled={!x11Forwarding} />
   </label>
 
-  <div class="section-h">Files</div>
+  <div class="section-h">{i18n.t('ssh.files')}</div>
   <label class="row">
-    <span class="row-label">known_hosts path</span>
+    <span class="row-label">{i18n.t('ssh.knownHostsPath')}</span>
     <input type="text" bind:value={knownHostsPath} oninput={markDirty} placeholder="~/.ssh/known_hosts" />
   </label>
   <div class="row">
-    <span class="row-label">Backend known_hosts directory</span>
+    <span class="row-label">{i18n.t('ssh.backendKnownHostsDir')}</span>
     <div class="inline-row">
-      <input type="text" bind:value={knownHostsDir} oninput={markDirty} placeholder="(default: app data directory)" />
+      <input type="text" bind:value={knownHostsDir} oninput={markDirty} placeholder={i18n.t('ssh.defaultAppDataDir')} />
       <button type="button" class="btn-secondary" onclick={configureKnownHostsDir}
               disabled={knownHostsBusy || !knownHostsDir.trim()}>
-        Apply
+        {i18n.t('ssh.apply')}
       </button>
     </div>
   </div>
   <label class="row">
-    <span class="row-label">WinSCP path (Windows)</span>
+    <span class="row-label">{i18n.t('ssh.winscpPath')}</span>
     <input type="text" bind:value={winscpPath} oninput={markDirty} placeholder="C:\Program Files (x86)\WinSCP\WinSCP.exe" />
   </label>
 
-  <div class="section-h">Known hosts</div>
+  <div class="section-h">{i18n.t('ssh.knownHosts')}</div>
   <div class="known-hosts-toolbar">
     <button type="button" class="btn-secondary" onclick={loadKnownHosts} disabled={knownHostsBusy}>
-      <RefreshCw size={12} /> Refresh
+      <RefreshCw size={12} /> {i18n.t('common.refresh')}
     </button>
     {#if knownHostsStatus}<span>{knownHostsStatus}</span>{/if}
   </div>
   <div class="known-hosts-list">
     {#if knownHosts.length === 0}
-      <div class="known-host-empty">No backend known hosts recorded.</div>
+      <div class="known-host-empty">{i18n.t('ssh.noKnownHosts')}</div>
     {:else}
       {#each knownHosts as item (`${item.host}:${item.key_type}`)}
         <div class="known-host-row">
@@ -217,7 +223,7 @@
             </div>
           </div>
           <button type="button" class="btn-danger" onclick={() => removeKnownHost(item.host)}
-                  disabled={knownHostsBusy} title="Remove host key" aria-label="Remove host key">
+                  disabled={knownHostsBusy} title={i18n.t('ssh.removeHostKey')} aria-label={i18n.t('ssh.removeHostKey')}>
             <Trash2 size={12} />
           </button>
         </div>
@@ -225,27 +231,27 @@
     {/if}
   </div>
 
-  <div class="section-h">Reconnect</div>
+  <div class="section-h">{i18n.t('ssh.reconnect')}</div>
   <label class="row">
-    <span class="row-label">Auto-reconnect on drop</span>
+    <span class="row-label">{i18n.t('ssh.autoReconnect')}</span>
     <input type="checkbox" bind:checked={reconnectOnDrop} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Reconnect delay (s)</span>
+    <span class="row-label">{i18n.t('ssh.reconnectDelay')}</span>
     <input type="number" min="0" max="300" bind:value={reconnectDelay} oninput={markDirty} disabled={!reconnectOnDrop} />
   </label>
 
-  <div class="section-h">UI</div>
+  <div class="section-h">{i18n.t('ssh.ui')}</div>
   <label class="row">
-    <span class="row-label">Show active host stats</span>
+    <span class="row-label">{i18n.t('ssh.showHostStats')}</span>
     <input type="checkbox" bind:checked={hostStatsEnabled} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Host stats interval (s)</span>
+    <span class="row-label">{i18n.t('ssh.hostStatsInterval')}</span>
     <input type="number" min="10" max="3600" bind:value={hostStatsIntervalSec} oninput={markDirty} disabled={!hostStatsEnabled} />
   </label>
   <label class="row">
-    <span class="row-label">Warn before closing active SSH tabs</span>
+    <span class="row-label">{i18n.t('ssh.warnClose')}</span>
     <input type="checkbox" bind:checked={warnOnClose} onchange={markDirty} />
   </label>
 </div>

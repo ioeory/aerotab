@@ -5,6 +5,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { Monitor } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
+  import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import { applyWindowSettings } from '../../../lib/windowSettings';
 
@@ -91,100 +92,100 @@
 </script>
 
 <div class="settings-section">
-  <h2 class="flex items-center gap-2"><Monitor size={16} /> Window</h2>
-  <p class="hint">Most window-chrome options require an app restart to take effect.</p>
+  <h2 class="flex items-center gap-2"><Monitor size={16} /> {i18n.t('window.title')}</h2>
+  <p class="hint">{i18n.t('window.restartHint')}</p>
 
-  <div class="section-h">Frame &amp; transparency</div>
+  <div class="section-h">{i18n.t('window.frameTransparency')}</div>
   <label class="row">
-    <span class="row-label">Frame style</span>
+    <span class="row-label">{i18n.t('window.frameStyle')}</span>
     <select bind:value={frameStyle} onchange={markDirty}>
-      <option value="native">Native</option>
-      <option value="thin">Thin (custom titlebar)</option>
-      <option value="frameless">Frameless</option>
+      <option value="native">{i18n.t('window.frame.native')}</option>
+      <option value="thin">{i18n.t('window.frame.thin')}</option>
+      <option value="frameless">{i18n.t('window.frame.frameless')}</option>
     </select>
   </label>
   <label class="row">
-    <span class="row-label">Use native window controls</span>
+    <span class="row-label">{i18n.t('window.nativeControls')}</span>
     <input type="checkbox" bind:checked={useNativeWindowControls} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Background opacity ({opacity}%)</span>
+    <span class="row-label">{i18n.t('window.opacity', { value: opacity })}</span>
     <input type="range" min="40" max="100" step="1" bind:value={opacity} oninput={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Acrylic background (Windows)</span>
+    <span class="row-label">{i18n.t('window.acrylic')}</span>
     <input type="checkbox" bind:checked={acrylic} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Vibrancy (macOS)</span>
+    <span class="row-label">{i18n.t('window.vibrancy')}</span>
     <input type="checkbox" bind:checked={vibrancy} onchange={markDirty} />
   </label>
 
-  <div class="section-h">Layout</div>
+  <div class="section-h">{i18n.t('window.layout')}</div>
   <label class="row">
-    <span class="row-label">UI spaciness ({spaciness.toFixed(2)})</span>
+    <span class="row-label">{i18n.t('window.spaciness', { value: spaciness.toFixed(2) })}</span>
     <input type="range" min="0.6" max="1.4" step="0.05" bind:value={spaciness} oninput={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Tabs location</span>
+    <span class="row-label">{i18n.t('window.tabsLocation')}</span>
     <select bind:value={tabsLocation} onchange={markDirty}>
-      <option value="top">Top</option>
-      <option value="bottom">Bottom</option>
-      <option value="left">Left</option>
-      <option value="right">Right</option>
+      <option value="top">{i18n.t('window.position.top')}</option>
+      <option value="bottom">{i18n.t('window.position.bottom')}</option>
+      <option value="left">{i18n.t('window.position.left')}</option>
+      <option value="right">{i18n.t('window.position.right')}</option>
     </select>
   </label>
   <label class="row">
-    <span class="row-label">Show left sidebar</span>
+    <span class="row-label">{i18n.t('window.sidebar')}</span>
     <input type="checkbox" bind:checked={sidebarVisible} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Focus follows mouse</span>
+    <span class="row-label">{i18n.t('window.focusFollowsMouse')}</span>
     <input type="checkbox" bind:checked={focusFollowsMouse} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Confirm when closing with multiple tabs</span>
+    <span class="row-label">{i18n.t('window.confirmCloseTabs')}</span>
     <input type="checkbox" bind:checked={confirmCloseWithMultipleTabs} onchange={markDirty} />
   </label>
 
-  <div class="section-h">Dock</div>
+  <div class="section-h">{i18n.t('window.dock')}</div>
   <label class="row">
-    <span class="row-label">Dock to screen edge</span>
+    <span class="row-label">{i18n.t('window.dockToEdge')}</span>
     <select bind:value={dockSide} onchange={markDirty}>
-      <option value="off">Off</option>
-      <option value="top">Top</option>
-      <option value="bottom">Bottom</option>
-      <option value="left">Left</option>
-      <option value="right">Right</option>
+      <option value="off">{i18n.t('window.off')}</option>
+      <option value="top">{i18n.t('window.position.top')}</option>
+      <option value="bottom">{i18n.t('window.position.bottom')}</option>
+      <option value="left">{i18n.t('window.position.left')}</option>
+      <option value="right">{i18n.t('window.position.right')}</option>
     </select>
   </label>
   <label class="row">
-    <span class="row-label">Always on top while docked</span>
+    <span class="row-label">{i18n.t('window.alwaysOnTopDocked')}</span>
     <input type="checkbox" bind:checked={dockAlwaysOnTop} onchange={markDirty} disabled={dockSide === 'off'} />
   </label>
   <label class="row">
-    <span class="row-label">Hide on blur</span>
+    <span class="row-label">{i18n.t('window.hideOnBlur')}</span>
     <input type="checkbox" bind:checked={dockHideOnBlur} onchange={markDirty} disabled={dockSide === 'off'} />
   </label>
   <label class="row">
-    <span class="row-label">Show/hide hotkey</span>
+    <span class="row-label">{i18n.t('window.showHideHotkey')}</span>
     <input type="text" bind:value={dockHotkey} oninput={markDirty}
            placeholder="Ctrl+Alt+Space" disabled={dockSide === 'off'} />
   </label>
 
-  <div class="section-h">Tray</div>
+  <div class="section-h">{i18n.t('window.tray')}</div>
   <label class="row">
-    <span class="row-label">Show tray icon</span>
+    <span class="row-label">{i18n.t('window.showTrayIcon')}</span>
     <input type="checkbox" bind:checked={trayEnabled} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">Minimize to tray instead of taskbar</span>
+    <span class="row-label">{i18n.t('window.minimizeToTray')}</span>
     <input type="checkbox" bind:checked={trayMinimizeToTray} onchange={markDirty} disabled={!trayEnabled} />
   </label>
 
-  <div class="section-h">Advanced</div>
+  <div class="section-h">{i18n.t('window.advanced')}</div>
   <label class="row">
-    <span class="row-label">Disable GPU acceleration</span>
+    <span class="row-label">{i18n.t('window.disableGpu')}</span>
     <input type="checkbox" bind:checked={disableGpuAcceleration} onchange={markDirty} />
   </label>
 </div>

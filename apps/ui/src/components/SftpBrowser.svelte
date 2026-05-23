@@ -7,6 +7,7 @@
   } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode, tauriInvoke } from '../lib/rpc';
+  import { i18n } from '../lib/i18n.svelte';
   import type { SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
 
   interface SftpSource {
@@ -630,7 +631,7 @@
     : 'h-full w-full min-w-0 bg-[var(--color-panel)]'}
   role={mode === 'modal' ? 'dialog' : 'complementary'}
   aria-modal={mode === 'modal'}
-  aria-label="SFTP browser"
+  aria-label={i18n.t('sftp.aria')}
 >
   <div
     class={mode === 'modal'
@@ -640,7 +641,7 @@
     <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
       <div class="text-[var(--color-accent)] font-semibold text-[13px]">SFTP</div>
       <div class="text-[12px] text-[var(--color-fg-muted)]">·</div>
-      <div class="text-[12px] text-[var(--color-fg)] truncate">{target?.name ?? 'SSH session'}</div>
+      <div class="text-[12px] text-[var(--color-fg)] truncate">{target?.name ?? i18n.t('sftp.sshSession')}</div>
       <div class="text-[11px] text-[var(--color-fg-muted)] truncate">
         ({target?.ssh.user}@{target?.ssh.host}:{target?.ssh.port})
       </div>
@@ -648,7 +649,7 @@
         type="button"
         class="px-2 py-0.5 rounded text-[10.5px] border {sudoMode ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
         onclick={toggleSudoMode}
-        title="Toggle sudo SFTP"
+        title={i18n.t('sftp.toggleSudo')}
         aria-pressed={sudoMode}
       >sudo</button>
       <div class="ml-auto flex items-center gap-1">
@@ -657,8 +658,8 @@
             type="button"
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={() => onPopOut(sudoMode)}
-            title="Open SFTP window"
-            aria-label="Open SFTP window"
+            title={i18n.t('sftp.openWindow')}
+            aria-label={i18n.t('sftp.openWindow')}
           >
             <ExternalLink size={14} />
           </button>
@@ -668,8 +669,8 @@
             type="button"
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={onCollapse}
-            title="Collapse SFTP dock"
-            aria-label="Collapse SFTP dock"
+            title={i18n.t('sftp.collapseDock')}
+            aria-label={i18n.t('sftp.collapseDock')}
           >
             <PanelRightClose size={14} />
           </button>
@@ -678,7 +679,7 @@
           type="button"
           class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
           onclick={onClose}
-          aria-label="Close"
+          aria-label={i18n.t('common.close')}
         >
           <X size={14} />
         </button>
@@ -686,9 +687,9 @@
     </header>
 
     <div class="flex items-center gap-1 px-3 py-1.5 border-b border-[var(--color-border-soft)] text-[12px]">
-      <button type="button" class="toolbtn" onclick={goHome} title="Home"><Home size={13} /></button>
-      <button type="button" class="toolbtn" onclick={goUp} title="Up"><ArrowUp size={13} /></button>
-      <button type="button" class="toolbtn" onclick={refresh} title="Refresh"><RefreshCw size={13} /></button>
+      <button type="button" class="toolbtn" onclick={goHome} title={i18n.t('common.home')}><Home size={13} /></button>
+      <button type="button" class="toolbtn" onclick={goUp} title={i18n.t('common.up')}><ArrowUp size={13} /></button>
+      <button type="button" class="toolbtn" onclick={refresh} title={i18n.t('common.refresh')}><RefreshCw size={13} /></button>
       <div class="mx-2 flex items-center gap-0.5 flex-wrap text-[11.5px] text-[var(--color-fg-muted)] min-w-0">
         {#each breadcrumbs as bc, i (i)}
           {#if i > 0}<ChevronRight size={11} class="text-[var(--color-border)]" />{/if}
@@ -703,13 +704,13 @@
         {#if preparingTransfers}
           <Loader2 size={13} class="text-[var(--color-accent)] animate-spin mr-1" />
         {/if}
-        <button type="button" class="toolbtn" onclick={mkdirHere} title="New folder">
+        <button type="button" class="toolbtn" onclick={mkdirHere} title={i18n.t('sftp.newFolder')}>
           <FolderPlus size={13} />
         </button>
-        <button type="button" class="toolbtn" onclick={uploadFile} title="Upload">
+        <button type="button" class="toolbtn" onclick={uploadFile} title={i18n.t('common.upload')}>
           <Upload size={13} />
         </button>
-        <button type="button" class="toolbtn" onclick={uploadFolder} title="Upload folder">
+        <button type="button" class="toolbtn" onclick={uploadFolder} title={i18n.t('common.uploadFolder')}>
           <FolderUp size={13} />
         </button>
       </div>
@@ -717,16 +718,16 @@
 
     <div class="flex-1 min-h-0 overflow-y-auto">
       {#if loading && entries.length === 0}
-        <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">Loading…</div>
+        <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
       {:else if entries.length === 0}
-        <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)] italic">Empty directory.</div>
+        <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
       {:else}
         <table class="w-full text-[12px]">
           <thead class="sticky top-0 bg-[var(--color-panel)] text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
             <tr>
-              <th class="text-left px-3 py-1.5 font-normal">Name</th>
-              <th class="text-right px-3 py-1.5 font-normal w-[100px]">Size</th>
-              <th class="text-left px-3 py-1.5 font-normal w-[100px]">Mode</th>
+              <th class="text-left px-3 py-1.5 font-normal">{i18n.t('sftp.name')}</th>
+              <th class="text-right px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.size')}</th>
+              <th class="text-left px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.mode')}</th>
               <th class="w-[80px]"></th>
             </tr>
           </thead>
@@ -760,8 +761,8 @@
                       type="button"
                       class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
                       onclick={() => downloadEntry(e)}
-                      title={e.kind === 'Dir' ? 'Download folder' : 'Download'}
-                      aria-label={e.kind === 'Dir' ? 'Download folder' : 'Download'}
+                      title={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
+                      aria-label={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
                     >
                       {#if e.kind === 'Dir'}<FolderDown size={12} />{:else}<Download size={12} />{/if}
                     </button>
@@ -770,8 +771,8 @@
                     type="button"
                     class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
                     onclick={() => renameEntry(e)}
-                    title="Rename"
-                    aria-label="Rename"
+                    title={i18n.t('common.rename')}
+                    aria-label={i18n.t('common.rename')}
                   >
                     <Pencil size={12} />
                   </button>
@@ -779,8 +780,8 @@
                     type="button"
                     class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
                     onclick={() => removeEntry(e)}
-                    title="Delete"
-                    aria-label="Delete"
+                    title={i18n.t('common.delete')}
+                    aria-label={i18n.t('common.delete')}
                   >
                     <Trash2 size={12} />
                   </button>
@@ -795,13 +796,13 @@
     {#if transfers.length > 0}
       <div class="border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] max-h-[180px] overflow-y-auto">
         <div class="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-[var(--color-panel)] border-b border-[var(--color-border-soft)]">
-          <div class="text-[11px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">Transfers</div>
+          <div class="text-[11px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">{i18n.t('sftp.transfers')}</div>
           <div class="text-[11px] text-[var(--color-fg-muted)]">{transfers.length}</div>
           <button
             type="button"
             class="ml-auto text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={clearFinishedTransfers}
-          >Clear finished</button>
+          >{i18n.t('common.clearFinished')}</button>
         </div>
         <div class="divide-y divide-[var(--color-border-soft)]">
           {#each transfers as task (task.id)}
@@ -832,8 +833,8 @@
                   <button
                     type="button"
                     class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
-                    title="Cancel transfer"
-                    aria-label="Cancel transfer"
+                    title={i18n.t('sftp.cancelTransfer')}
+                    aria-label={i18n.t('sftp.cancelTransfer')}
                     onclick={() => cancelTransfer(task.id)}
                   >
                     <X size={12} />

@@ -5,6 +5,7 @@
 
   import { X, RotateCcw } from '@lucide/svelte';
   import type { RpcClient } from '../../lib/rpc';
+  import { i18n } from '../../lib/i18n.svelte';
   import { settingsCoord } from '../../lib/settingsStore.svelte';
 
   import ApplicationSection from './sections/ApplicationSection.svelte';
@@ -30,7 +31,7 @@
   }
   let { rpc, onClose, onError, onSettingsChanged }: Props = $props();
 
-  const buildId = '0.1.17-ui-20260523';
+  const buildId = '0.1.18-ui-20260523';
 
   type SectionId =
     | 'application'
@@ -50,32 +51,32 @@
 
   interface NavEntry {
     id: SectionId;
-    label: string;
+    labelKey: string;
   }
 
-  const groups: { title: string; entries: NavEntry[] }[] = [
+  const groups: { titleKey: string; entries: NavEntry[] }[] = [
     {
-      title: 'General',
+      titleKey: 'settings.group.general',
       entries: [
-        { id: 'application', label: 'Application' },
-        { id: 'appearance', label: 'Appearance' },
-        { id: 'profiles', label: 'Profiles & connections' },
-        { id: 'terminal', label: 'Terminal' },
-        { id: 'ai', label: 'AI 助手' },
-        { id: 'colorscheme', label: 'Color scheme' },
-        { id: 'configsync', label: 'Config sync' },
-        { id: 'hotkeys', label: 'Hotkeys' },
-        { id: 'plugins', label: 'Plugins' },
+        { id: 'application', labelKey: 'settings.nav.application' },
+        { id: 'appearance', labelKey: 'settings.nav.appearance' },
+        { id: 'profiles', labelKey: 'settings.nav.profiles' },
+        { id: 'terminal', labelKey: 'settings.nav.terminal' },
+        { id: 'ai', labelKey: 'settings.nav.ai' },
+        { id: 'colorscheme', labelKey: 'settings.nav.colorScheme' },
+        { id: 'configsync', labelKey: 'settings.nav.configSync' },
+        { id: 'hotkeys', labelKey: 'settings.nav.hotkeys' },
+        { id: 'plugins', labelKey: 'settings.nav.plugins' },
       ],
     },
     {
-      title: 'Advanced',
+      titleKey: 'settings.group.advanced',
       entries: [
-        { id: 'shell', label: 'Shell' },
-        { id: 'ssh', label: 'SSH' },
-        { id: 'vault', label: 'Vault' },
-        { id: 'window', label: 'Window' },
-        { id: 'configfile', label: 'Config file' },
+        { id: 'shell', labelKey: 'settings.nav.shell' },
+        { id: 'ssh', labelKey: 'settings.nav.ssh' },
+        { id: 'vault', labelKey: 'settings.nav.vault' },
+        { id: 'window', labelKey: 'settings.nav.window' },
+        { id: 'configfile', labelKey: 'settings.nav.configFile' },
       ],
     },
   ];
@@ -92,7 +93,7 @@
   }
 
   async function reset() {
-    if (!confirm('Reset all settings to defaults?')) return;
+    if (!confirm(i18n.t('settings.resetConfirm'))) return;
     try {
       await rpc.call('settings.reset');
       settingsCoord.markClean();
@@ -108,25 +109,25 @@
   class="fixed inset-0 bg-black/60 z-50 grid place-items-center p-6"
   role="dialog"
   aria-modal="true"
-  aria-label="Settings"
+  aria-label={i18n.t('settings.title')}
 >
   <div
     class="bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl
            w-full max-w-[920px] h-[80vh] flex flex-col overflow-hidden"
   >
     <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
-      <div class="text-[var(--color-accent)] font-semibold text-[13px]">Settings</div>
+      <div class="text-[var(--color-accent)] font-semibold text-[13px]">{i18n.t('settings.title')}</div>
       <div class="text-[10.5px] text-[var(--color-fg-muted)]">{buildId}</div>
       {#if settingsCoord.dirty}
         <span class="text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-accent)]">
-          unsaved
+          {i18n.t('settings.unsaved')}
         </span>
       {/if}
       <button
         type="button"
         class="ml-auto p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
         onclick={onClose}
-        aria-label="Close"
+        aria-label={i18n.t('common.close')}
       >
         <X size={14} />
       </button>
@@ -135,9 +136,9 @@
     <div class="flex-1 min-h-0 grid grid-cols-[200px_1fr]">
       <nav class="overflow-y-auto border-r border-[var(--color-border-soft)]
                   bg-[var(--color-panel-2)] py-3">
-        {#each groups as g (g.title)}
+        {#each groups as g (g.titleKey)}
           <div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-fg-muted)]">
-            {g.title}
+            {i18n.t(g.titleKey)}
           </div>
           {#each g.entries as e (e.id)}
             <button
@@ -145,7 +146,7 @@
               class="nav-btn {active === e.id ? 'active' : ''}"
               onclick={() => (active = e.id)}
             >
-              {e.label}
+              {i18n.t(e.labelKey)}
             </button>
           {/each}
         {/each}
@@ -186,17 +187,17 @@
 
     <footer class="flex items-center gap-2 px-4 py-2.5 border-t border-[var(--color-border-soft)]">
       <button type="button" onclick={reset} class="btn-secondary flex items-center gap-1.5">
-        <RotateCcw size={12} /> Reset
+        <RotateCcw size={12} /> {i18n.t('common.reset')}
       </button>
       <div class="ml-auto flex items-center gap-2">
-        <button type="button" onclick={onClose} class="btn-secondary">Close</button>
+        <button type="button" onclick={onClose} class="btn-secondary">{i18n.t('common.close')}</button>
         <button
           type="button"
           onclick={save}
           class="btn-primary"
           disabled={!settingsCoord.dirty}
         >
-          Save
+          {i18n.t('common.save')}
         </button>
       </div>
     </footer>

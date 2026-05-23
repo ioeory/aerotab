@@ -7,6 +7,7 @@
   import { Plus, Trash2, Pencil, Plug, Search, Star } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import type { StoredProfile } from '../../../lib/types';
+  import { i18n } from '../../../lib/i18n.svelte';
   import { tabs } from '../../../lib/tabs.svelte';
   import { matchesProfileQuery, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
   import ProfileModal from '../../ProfileModal.svelte';
@@ -118,34 +119,34 @@
 
 <div class="settings-section">
   <div class="flex items-center justify-between gap-2">
-    <h2 class="!mb-0">Profiles &amp; connections</h2>
+    <h2 class="!mb-0">{i18n.t('profiles.title')}</h2>
     <button type="button" class="btn-primary flex items-center gap-1.5"
             onclick={() => profileModal?.open()}>
-      <Plus size={12} /> New SSH profile
+      <Plus size={12} /> {i18n.t('profiles.newSshProfile')}
     </button>
   </div>
 
   <div class="relative">
     <Search size={12} class="absolute left-2 top-1/2 -translate-y-1/2 opacity-60" />
     <input
-      type="search" bind:value={query} placeholder="Filter profiles, tag:prod, group:work, host:10.…"
+      type="search" bind:value={query} placeholder={i18n.t('profiles.filterPlaceholder')}
       class="input pl-7"
     />
   </div>
 
   <div class="summary-strip">
-    <span>{summary().groups} groups</span>
-    <span>{summary().tags} tags</span>
-    <span>{summary().favorites} favorites</span>
+    <span>{i18n.t('profiles.groups', { count: summary().groups })}</span>
+    <span>{i18n.t('profiles.tags', { count: summary().tags })}</span>
+    <span>{i18n.t('profiles.favorites', { count: summary().favorites })}</span>
   </div>
 
   {#if loading}
-    <div class="placeholder">Loading…</div>
+    <div class="placeholder">{i18n.t('common.loading')}</div>
   {:else}
     <div>
-      <div class="section-h">Saved profiles ({saved.length})</div>
+      <div class="section-h">{i18n.t('profiles.savedProfiles', { count: saved.length })}</div>
       {#if saved.length === 0}
-        <div class="placeholder">No saved profiles yet. Use <em>New SSH profile</em> above to add one.</div>
+        <div class="placeholder">{i18n.t('profiles.empty')}</div>
       {:else}
         {#each grouped() as [groupName, items] (groupName)}
           <div class="group-block">
@@ -172,11 +173,11 @@
                   {/if}
                 </div>
                 <div class="flex items-center gap-1">
-                  <button type="button" class="icon-btn" title="Connect"
+                    <button type="button" class="icon-btn" title={i18n.t('profiles.connect')}
                           onclick={() => connect(p)}><Plug size={12} /></button>
-                  <button type="button" class="icon-btn" title="Edit"
+                    <button type="button" class="icon-btn" title={i18n.t('common.edit')}
                       onclick={() => editProfile(p)}><Pencil size={12} /></button>
-                  <button type="button" class="icon-btn" title="Delete"
+                    <button type="button" class="icon-btn" title={i18n.t('common.delete')}
                           onclick={() => remove(p)}><Trash2 size={12} /></button>
                 </div>
               </div>
@@ -197,7 +198,7 @@
                 {e.user ? `${e.user}@` : ''}{e.host}{e.port && e.port !== 22 ? `:${e.port}` : ''}
               </div>
             </div>
-            <button type="button" class="icon-btn" title="Connect"
+            <button type="button" class="icon-btn" title={i18n.t('profiles.connect')}
                     onclick={() => connectSshConfig(e)}><Plug size={12} /></button>
           </div>
         {/each}

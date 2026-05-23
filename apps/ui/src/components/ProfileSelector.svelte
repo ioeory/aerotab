@@ -14,6 +14,7 @@
   } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { StoredProfile } from '../lib/types';
+  import { i18n } from '../lib/i18n.svelte';
   import { matchesProfileQuery, profileGroupName, sortProfiles } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -189,7 +190,7 @@
 <div
   role="dialog"
   aria-modal="true"
-  aria-label="Open profile or address"
+  aria-label={i18n.t('picker.aria')}
   class="fixed inset-0 z-50 grid place-items-start pt-12"
   onclick={(e) => { if (e.target === e.currentTarget) onClose(); }}
   onkeydown={(e) => { if (e.key === 'Escape') onClose(); }}
@@ -201,13 +202,13 @@
       bind:value={query}
       onkeydown={onKey}
       type="text"
-      placeholder="Select profile or enter an address"
+      placeholder={i18n.t('picker.placeholder')}
       class="picker-search"
     />
 
     <div class="picker-scroll">
       {#if recentProfiles.length > 0}
-        <div class="picker-cat">Recent</div>
+        <div class="picker-cat">{i18n.t('picker.recent')}</div>
         {#each recentProfiles as p (p.id)}
           {@const item = { kind: 'profile' as const, profile: p }}
           <button
@@ -217,7 +218,7 @@
           >
             <ProfileIcon icon={p.icon} name={p.name} size={13} />
             <span class="picker-label">{p.name}</span>
-            {#if p.favorite}<span class="picker-pill">fav</span>{/if}
+            {#if p.favorite}<span class="picker-pill">{i18n.t('picker.favorite')}</span>{/if}
             {#each (p.tags ?? []).slice(0, 2) as tag (tag)}
               <span class="picker-pill">{tag}</span>
             {/each}
@@ -229,7 +230,7 @@
         {/each}
         <button type="button" class="picker-row text-[var(--color-fg-muted)]" onclick={clearRecent}>
           <Eraser size={13} />
-          <span class="picker-label">Clear recent profiles</span>
+          <span class="picker-label">{i18n.t('picker.clearRecent')}</span>
         </button>
       {/if}
 
@@ -244,7 +245,7 @@
           >
             <ProfileIcon icon={p.icon} name={p.name} size={13} />
             <span class="picker-label">{p.name}</span>
-            {#if p.favorite}<span class="picker-pill">fav</span>{/if}
+            {#if p.favorite}<span class="picker-pill">{i18n.t('picker.favorite')}</span>{/if}
             {#each (p.tags ?? []).slice(0, 2) as tag (tag)}
               <span class="picker-pill">{tag}</span>
             {/each}
@@ -254,7 +255,7 @@
       {/each}
 
       {#if visibleShells.length > 0}
-        <div class="picker-cat">Built-in shells</div>
+        <div class="picker-cat">{i18n.t('picker.builtInShells')}</div>
         {#each visibleShells as s (s.id)}
           {@const item = { kind: 'shell' as const, shell: s }}
           <button
@@ -270,7 +271,7 @@
       {/if}
 
       {#if visibleSshConfig.length > 0}
-        <div class="picker-cat">Imported from .ssh/config</div>
+        <div class="picker-cat">{i18n.t('picker.importedSshConfig')}</div>
         {#each visibleSshConfig as e (e.alias)}
           {@const item = { kind: 'ssh-config' as const, entry: e }}
           <button
@@ -288,7 +289,7 @@
       {#if flatList.length === 0 && query.trim()}
         <button type="button" class="picker-row active" onclick={submitAddress}>
           <Cog size={13} />
-          <span class="picker-label">Connect to {query.trim()}</span>
+          <span class="picker-label">{i18n.t('picker.connectTo', { address: query.trim() })}</span>
           <span class="picker-kbd">ENTER <ArrowRight size={10} /></span>
         </button>
       {/if}

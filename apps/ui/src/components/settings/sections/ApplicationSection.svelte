@@ -1,9 +1,11 @@
 <script lang="ts">
   // Application: updater controls + core version display.
 
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { Download, RefreshCw, Trash2 } from '@lucide/svelte';
   import { tauriInvoke, type RpcClient } from '../../../lib/rpc';
+  import { i18n, type LocaleSetting } from '../../../lib/i18n.svelte';
+  import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import type { SessionMeta } from '../../../lib/types';
 
   interface Props {
@@ -21,6 +23,9 @@
   let updateStatus = $state('');
   let updateAvailable = $state<{ version: string; current: string; notes?: string } | null>(null);
   let updateBusy = $state(false);
+  let locale = $state<LocaleSetting>('system');
+
+  const localeOptions: LocaleSetting[] = ['system', 'en', 'zh-CN'];
 
   async function loadVersion() {
     try {
@@ -38,7 +43,10 @@
     sessionsStatus = '';
     try {
       sessions = await rpc.call<SessionMeta[]>('session.list', {});
-      sessionsStatus = `${sessions.length} session${sessions.length === 1 ? '' : 's'}`;
+      sessionsStatus = i18n.t('application.sessionCount', {
+        count: sessions.length,
+        suffix: sessions.length === 1 ? '' : 's',
+      });
     } catch (e) {
       onError(`session list: ${(e as Error).message}`);
     } finally {
@@ -47,7 +55,7 @@
   }
 
   async function closeSession(id: string) {
-    if (!confirm('Close this backend session?')) return;
+    if (!confirm(i18n.t('application.closeBackendSessionConfirm'))) return;
     sessionsBusy = true;
     try {
       await rpc.call('session.close', { id });
@@ -60,23 +68,23 @@
   }
 
   async function checkForUpdates() {
-    updateStatus = 'checking…';
+    updateStatus = i18n.t('application.update.checking');
     updateAvailable = null;
     updateBusy = true;
     try {
       const p = tauriInvoke<{ available: boolean; version?: string; current?: string; notes?: string }>(
         'check_update',
       );
-      if (!p) { updateStatus = 'updater unavailable in dev build'; return; }
+      if (!p) { updateStatus = i18n.t('application.update.unavailableDev'); return; }
       const r = await p;
       if (r.available && r.version && r.current) {
         updateAvailable = { version: r.version, current: r.current, notes: r.notes };
-        updateStatus = `update ${r.version} available (current ${r.current})`;
+        updateStatus = i18n.t('application.update.available', { version: r.version, current: r.current });
       } else {
-        updateStatus = 'up to date';
+        updateStatus = i18n.t('application.update.upToDate');
       }
     } catch (e) {
-      updateStatus = `error: ${(e as Error).message ?? e}`;
+      updateStatus = i18n.t('application.update.error', { message: (e as Error).message ?? String(e) });
     } finally {
       updateBusy = false;
     }
@@ -84,40 +92,93 @@
 
   async function installUpdate() {
     if (!updateAvailable) return;
-    updateStatus = 'downloading…';
+    updateStatus = i18n.t('application.update.downloading');
     updateBusy = true;
     try {
       const p = tauriInvoke<void>('install_update');
-      if (!p) { updateStatus = 'updater unavailable in dev build'; return; }
+      if (!p) { updateStatus = i18n.t('application.update.unavailableDev'); return; }
       await p;
-      updateStatus = 'installed — restart to apply';
+      updateStatus = i18n.t('application.update.installed');
     } catch (e) {
-      updateStatus = `error: ${(e as Error).message ?? e}`;
+      updateStatus = i18n.t('application.update.error', { message: (e as Error).message ?? String(e) });
     } finally {
       updateBusy = false;
     }
   }
 
-  onMount(() => { void loadVersion(); });
+  async function loadApplicationSettings() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'application' });
+      if (r.value && typeof r.value === 'object') {
+        const configured = (r.value as Record<string, unknown>).locale;
+        if (configured === 'system' || configured === 'en' || configured === 'zh-CN') {
+          locale = configured;
+        }
+      }
+      i18n.setLocale(locale);
+    } catch {
+      locale = 'system';
+      i18n.setLocale(locale);
+    }
+  }
+
+  async function saveApplicationSettings() {
+    await rpc.call('settings.set', { key: 'application', value: { locale } });
+    i18n.setLocale(locale);
+  }
+
+  async function changeLocale(next: LocaleSetting) {
+    locale = next;
+    i18n.setLocale(locale);
+    try {
+      await saveApplicationSettings();
+      settingsCoord.bumpRev();
+    } catch (e) {
+      onError(`locale: ${(e as Error).message}`);
+    }
+  }
+
+  onMount(() => {
+    void loadVersion();
+    void loadApplicationSettings();
+    settingsCoord.registerSaver('application', saveApplicationSettings);
+  });
+  onDestroy(() => settingsCoord.unregisterSaver('application'));
 </script>
 
 <div class="settings-section">
-  <h2>Application</h2>
+  <h2>{i18n.t('application.title')}</h2>
 
   <div>
-    <div class="section-h">Version</div>
+    <div class="section-h">{i18n.t('application.version')}</div>
     <div class="text-[var(--color-fg)]">
       Tabby v2 — core {coreVersion ?? '…'}
     </div>
-    <div class="help">Protocol version {protocolVersion ?? '…'}</div>
+    <div class="help">{i18n.t('application.protocolVersion', { version: protocolVersion ?? '…' })}</div>
   </div>
 
   <div>
-    <div class="section-h">Runtime sessions</div>
+    <div class="section-h">{i18n.t('application.language')}</div>
+    <label for="app-locale" class="lbl">{i18n.t('application.language')}</label>
+    <select
+      id="app-locale"
+      bind:value={locale}
+      onchange={(event) => void changeLocale((event.currentTarget as HTMLSelectElement).value as LocaleSetting)}
+      class="select"
+    >
+      {#each localeOptions as option (option)}
+        <option value={option}>{i18n.t(`application.locale.${option}`)}</option>
+      {/each}
+    </select>
+    <div class="help">{i18n.t('application.languageHelp')}</div>
+  </div>
+
+  <div>
+    <div class="section-h">{i18n.t('application.runtimeSessions')}</div>
     <div class="row">
       <button type="button" class="btn-secondary flex items-center gap-1.5"
               onclick={refreshSessions} disabled={sessionsBusy}>
-        <RefreshCw size={12} /> Refresh sessions
+        <RefreshCw size={12} /> {i18n.t('application.refreshSessions')}
       </button>
       {#if sessionsStatus}<span class="help">{sessionsStatus}</span>{/if}
     </div>
@@ -133,7 +194,8 @@
             </div>
             <button type="button" class="btn-secondary !px-2 !py-1"
                     onclick={() => closeSession(s.id)} disabled={sessionsBusy}
-                    title="Close backend session" aria-label="Close backend session">
+                  title={i18n.t('application.closeBackendSession')}
+                  aria-label={i18n.t('application.closeBackendSession')}>
               <Trash2 size={12} />
             </button>
           </div>
@@ -143,10 +205,10 @@
   </div>
 
   <div>
-    <div class="section-h">Updates</div>
+    <div class="section-h">{i18n.t('application.updates')}</div>
     <div class="row">
       <button type="button" class="btn-secondary" onclick={checkForUpdates} disabled={updateBusy}>
-        Check for updates
+        {i18n.t('application.checkForUpdates')}
       </button>
       {#if updateAvailable}
         <button
@@ -155,7 +217,7 @@
           onclick={installUpdate}
           disabled={updateBusy}
         >
-          <Download size={12} /> Install {updateAvailable.version}
+          <Download size={12} /> {i18n.t('application.installVersion', { version: updateAvailable.version })}
         </button>
       {/if}
     </div>

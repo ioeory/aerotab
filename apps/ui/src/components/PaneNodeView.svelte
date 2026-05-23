@@ -3,6 +3,7 @@
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import { tabs, type PaneNode, type Tab } from '../lib/tabs.svelte';
+  import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
   interface Props {
@@ -86,8 +87,8 @@
     {#if tab.panes.length > 1}
       <button
         type="button"
-        title={tab.maximizedPaneId === node.pane.id ? 'Restore pane' : 'Maximize pane'}
-        aria-label={tab.maximizedPaneId === node.pane.id ? 'Restore pane' : 'Maximize pane'}
+        title={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
+        aria-label={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
         class="absolute top-1 right-7 z-10 p-1 rounded bg-[var(--color-panel)]/85 backdrop-blur
                text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-panel)]
                border border-[var(--color-border-soft)]"
@@ -98,8 +99,8 @@
       </button>
       <button
         type="button"
-        title="Close pane (Ctrl+W)"
-        aria-label="Close pane"
+        title={i18n.t('pane.closePaneShortcut')}
+        aria-label={i18n.t('pane.closePane')}
         class="absolute top-1 right-1 z-10 p-1 rounded bg-[var(--color-panel)]/85 backdrop-blur
                text-[var(--color-fg-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-panel)]
                border border-[var(--color-border-soft)]"
@@ -131,7 +132,7 @@
       {#if idx < node.children.length - 1 && !maximized}
         <button
           type="button"
-          aria-label="Resize pane"
+          aria-label={i18n.t('pane.resizePane')}
           onpointerdown={(e) => onResize(idx, e)}
           class="bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] transition-colors
                  {node.direction === 'col' ? 'h-[3px] w-full cursor-row-resize' : 'w-[3px] h-full cursor-col-resize'}"

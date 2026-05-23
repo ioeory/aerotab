@@ -12,6 +12,7 @@
   import { colorSchemeByName, toXtermTheme } from '../lib/colorSchemes';
   import { applyLigatures } from '../lib/customCss';
   import { tabs } from '../lib/tabs.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -492,7 +493,7 @@
     if (pasteTrimWhitespace) text = text.replace(/[ \t]+$/gm, '');
     if (pasteFlattenNewlines) text = text.replace(/\r?\n/g, ' ');
     if (pasteMultilineWarn && text.includes('\n') && text.length > 200) {
-      if (!confirm(`Paste ${text.length} characters with newlines?`)) return;
+      if (!confirm(i18n.t('terminal.pasteConfirm', { count: text.length }))) return;
     }
     if (bracketedPaste) {
       term?.paste(text);
@@ -575,12 +576,12 @@
     <div class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
                 rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur">
       <div class="min-w-0">
-        <div class="text-[var(--color-danger)] font-semibold leading-tight">Session ended</div>
-        <div class="text-[var(--color-fg-muted)] leading-tight truncate">History stays visible in the terminal.</div>
+        <div class="text-[var(--color-danger)] font-semibold leading-tight">{i18n.t('terminal.sessionEnded')}</div>
+        <div class="text-[var(--color-fg-muted)] leading-tight truncate">{i18n.t('terminal.historyVisible')}</div>
       </div>
       {#if onClosePane}
         <button type="button" class="btn-secondary shrink-0 text-[12px] px-2 py-1" onclick={() => onClosePane?.()}>
-          Close
+          {i18n.t('common.close')}
         </button>
       {/if}
     </div>
@@ -592,30 +593,30 @@
               border border-[var(--color-border)] rounded shadow-lg backdrop-blur p-1"
        style="display: {active ? 'flex' : 'none'};">
     <input id="search-input-{session.id}"
-           type="search" placeholder="Search…" bind:value={searchQuery}
+           type="search" placeholder={i18n.t('common.search')} bind:value={searchQuery}
            onkeydown={(e) => {
              if (e.key === 'Enter') { runSearch(e.shiftKey ? 'prev' : 'next'); }
              else if (e.key === 'Escape') { closeSearch(); }
            }}
            class="bg-[var(--color-bg)] text-[var(--color-fg)] text-[12px] px-2 py-1 rounded
                   border border-[var(--color-border)] outline-none w-[200px]" />
-    <button type="button" title="Case sensitive"
+    <button type="button" title={i18n.t('terminal.searchCaseSensitive')}
             class="p-1 rounded {searchCase ? 'text-[var(--color-accent)] bg-[var(--color-bg)]' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
             onclick={() => (searchCase = !searchCase)}>
       <CaseSensitive size={13} />
     </button>
-    <button type="button" title="Regex"
+    <button type="button" title={i18n.t('terminal.searchRegex')}
             class="p-1 rounded {searchRegex ? 'text-[var(--color-accent)] bg-[var(--color-bg)]' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
             onclick={() => (searchRegex = !searchRegex)}>
       <Regex size={13} />
     </button>
-    <button type="button" title="Previous"
+    <button type="button" title={i18n.t('common.previous')}
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={() => runSearch('prev')}><ChevronUp size={13} /></button>
-    <button type="button" title="Next"
+    <button type="button" title={i18n.t('common.next')}
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={() => runSearch('next')}><ChevronDown size={13} /></button>
-    <button type="button" title="Close" aria-label="Close search"
+    <button type="button" title={i18n.t('common.close')} aria-label={i18n.t('terminal.closeSearch')}
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={closeSearch}><X size={12} /></button>
   </div>
@@ -630,12 +631,12 @@
          style="left:{menuX}px; top:{menuY}px;"
           onkeydown={(e) => e.stopPropagation()}
          onclick={(e) => e.stopPropagation()}>
-      <button type="button" class="menu-item" onclick={doCopy}>Copy</button>
-      <button type="button" class="menu-item" onclick={doPaste}>Paste</button>
-      <button type="button" class="menu-item" onclick={doSelectAll}>Select all</button>
+      <button type="button" class="menu-item" onclick={doCopy}>{i18n.t('common.copy')}</button>
+      <button type="button" class="menu-item" onclick={doPaste}>{i18n.t('common.paste')}</button>
+      <button type="button" class="menu-item" onclick={doSelectAll}>{i18n.t('common.selectAll')}</button>
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item" onclick={doSearchAction}>Search… (Ctrl+F)</button>
-      <button type="button" class="menu-item" onclick={doClear}>Clear screen</button>
+      <button type="button" class="menu-item" onclick={doSearchAction}>{i18n.t('terminal.searchAction')}</button>
+      <button type="button" class="menu-item" onclick={doClear}>{i18n.t('common.clearScreen')}</button>
     </div>
   </div>
 {/if}
