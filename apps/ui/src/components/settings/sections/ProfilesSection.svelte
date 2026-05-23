@@ -9,7 +9,7 @@
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { tabs } from '../../../lib/tabs.svelte';
-  import { matchesProfileQuery, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
+  import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
   import ProfileModal from '../../ProfileModal.svelte';
   import ProfileIcon from '../../ProfileIcon.svelte';
 
@@ -83,10 +83,14 @@
 
   async function connect(p: StoredProfile) {
     try {
+      if (p.kind === 'rdp' || p.kind === 'vnc') {
+        await rpc.call('remote.openProfile', { profile_id: p.id });
+        return;
+      }
       const meta = await rpc.call<{ id: string; kind: string; title: string }>(
         'session.openSshProfile', { profile_id: p.id },
       );
-      tabs.add({ id: meta.id, kind: meta.kind, title: meta.title });
+      tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, profileId: p.id, sshProfile: p.ssh });
     } catch (e) { onError(`connect: ${(e as Error).message}`); }
   }
 
@@ -227,7 +231,7 @@
                     {/if}
                   </div>
                   <div class="text-[11px] text-[var(--color-fg-muted)] truncate font-mono">
-                    {p.ssh.user ? `${p.ssh.user}@` : ''}{p.ssh.host}{p.ssh.port && p.ssh.port !== 22 ? `:${p.ssh.port}` : ''}
+                    {profileEndpointLabel(p)}
                   </div>
                   {#if (p.tags ?? []).length > 0}
                     <div class="tag-row">

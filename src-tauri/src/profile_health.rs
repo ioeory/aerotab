@@ -57,6 +57,20 @@ async fn check_profile(
                 run_connection_check(ssh, known_hosts.clone(), &mut checks).await;
             }
         }
+        ProfileKind::Rdp { rdp } | ProfileKind::Vnc { spec: rdp } => {
+            checks.push(ProfileHealthCheck {
+                name: "Remote desktop".into(),
+                status: HealthStatus::Ok,
+                message: format!("{}:{} (use remote.openProfile)", rdp.host, rdp.port),
+            });
+            if rdp.ssh_profile_id.is_some() {
+                checks.push(ProfileHealthCheck {
+                    name: "SSH tunnel".into(),
+                    status: HealthStatus::Ok,
+                    message: "Will forward via linked SSH profile".into(),
+                });
+            }
+        }
     }
     let status = checks
         .iter()

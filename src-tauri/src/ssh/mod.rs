@@ -18,7 +18,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use russh::client;
 use russh::keys::{key, load_secret_key, PublicKeyBase64};
-use russh::{ChannelMsg, Disconnect};
+use russh::{Channel, ChannelMsg, Disconnect};
+use rand::Rng;
 use russh_keys::agent::client::AgentClient;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -85,6 +86,11 @@ impl From<KnownHostsError> for SshError {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct X11ForwardOptions {
+    pub enabled: bool,
+}
+
 /// Persistent host-key handler.
 pub struct TrustingClient {
     host_port: String,
@@ -92,6 +98,8 @@ pub struct TrustingClient {
     /// Fallback pin for ephemeral connections (no known_hosts configured):
     /// behaves as the original strict-TOFU did.
     pinned_host_key_b64: Option<String>,
+    /// When true, accept inbound X11 channels and bridge to the local display.
+    x11_forward: bool,
 }
 
 #[async_trait]
@@ -120,6 +128,53 @@ impl client::Handler for TrustingClient {
             }
         }
     }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if !self.x11_forward {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            if let Some(path) = local_x11_socket_path() {
+                tokio::spawn(async move {
+                    match tokio::net::UnixStream::connect(path).await {
+                        Ok(mut unix) => {
+                            let mut stream = channel.into_stream();
+                            let _ = tokio::io::copy_bidirectional(&mut unix, &mut stream).await;
+                        }
+                        Err(e) => tracing::warn!("x11 local socket: {e}"),
+                    }
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = channel;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn local_x11_socket_path() -> Option<String> {
+    let display = std::env::var("DISPLAY").ok()?;
+    let trimmed = display.trim();
+    let num_part = trimmed.strip_prefix(':')?;
+    let num: u32 = num_part.split('.').next()?.parse().ok()?;
+    Some(format!("/tmp/.X11-unix/X{num}"))
+}
+
+fn random_x11_cookie() -> String {
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| format!("{:02x}", rng.gen::<u8>()))
+        .collect()
 }
 
 /// Operations the writer side can send into the forwarder task.
@@ -173,7 +228,7 @@ pub async fn connect_shell(
     cols: u32,
     rows: u32,
 ) -> Result<SshShell, SshError> {
-    connect_shell_with_known_hosts(profile, cols, rows, None).await
+    connect_shell_with_known_hosts(profile, cols, rows, None, None).await
 }
 
 fn ssh_config() -> Arc<client::Config> {
@@ -348,6 +403,7 @@ pub async fn connect_authenticated(
         host_port: format!("{}:{}", hop.host, hop.port),
         known_hosts: kh.clone(),
         pinned_host_key_b64: None,
+        x11_forward: false,
     })
     .await
 }
@@ -358,8 +414,19 @@ pub async fn connect_shell_with_known_hosts(
     cols: u32,
     rows: u32,
     known_hosts: Option<KnownHosts>,
+    x11: Option<X11ForwardOptions>,
 ) -> Result<SshShell, SshError> {
-    let handle = connect_authenticated(profile, known_hosts).await?;
+    let x11_enabled = x11.as_ref().is_some_and(|o| o.enabled);
+    let kh = known_hosts.clone();
+    let handle = connect_authenticated_custom(profile, known_hosts, move |hop, is_final| {
+        TrustingClient {
+            host_port: format!("{}:{}", hop.host, hop.port),
+            known_hosts: kh.clone(),
+            pinned_host_key_b64: None,
+            x11_forward: is_final && x11_enabled,
+        }
+    })
+    .await?;
 
     let mut channel = handle
         .channel_open_session()
@@ -369,6 +436,13 @@ pub async fn connect_shell_with_known_hosts(
         .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
         .await
         .map_err(|e| SshError::Channel(e.to_string()))?;
+    if x11_enabled {
+        let cookie = random_x11_cookie();
+        channel
+            .request_x11(true, false, "MIT-MAGIC-COOKIE-1", &cookie, 0)
+            .await
+            .map_err(|e| SshError::Channel(format!("x11 forward: {e}")))?;
+    }
     channel
         .request_shell(true)
         .await

@@ -9,9 +9,11 @@
     tab: Tab;
     settingsRev: number;
     onOpenSftp?: () => void;
+    broadcastEnabled?: boolean;
+    broadcastTargetIds?: string[];
   }
 
-  let { rpc, tab, settingsRev, onOpenSftp }: Props = $props();
+  let { rpc, tab, settingsRev, onOpenSftp, broadcastEnabled = false, broadcastTargetIds = [] }: Props = $props();
 
   const maximizedPaneId = $derived(tab.maximizedPaneId ?? null);
   const maximizedLeaf = $derived(
@@ -30,8 +32,8 @@
 
 <div class="absolute inset-0 min-w-0 min-h-0">
   {#if maximizedLeaf}
-    <PaneNodeView {rpc} {tab} node={maximizedLeaf} {settingsRev} {onOpenSftp} />
+    <PaneNodeView {rpc} {tab} node={maximizedLeaf} {settingsRev} {onOpenSftp} {broadcastEnabled} {broadcastTargetIds} />
   {:else}
-    <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {onOpenSftp} />
+    <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {onOpenSftp} {broadcastEnabled} {broadcastTargetIds} />
   {/if}
 </div>

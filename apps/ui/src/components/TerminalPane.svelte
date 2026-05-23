@@ -31,8 +31,20 @@
     onClosePane?: () => void;
     /** Invoked when transfer detection should open the active SSH pane's SFTP browser. */
     onOpenSftp?: () => void;
+    /** When true, keystrokes are sent to every SSH pane in the tab. */
+    broadcastEnabled?: boolean;
+    broadcastTargetIds?: string[];
   }
-  let { rpc, session, active, settingsRev = 0, onClosePane, onOpenSftp }: Props = $props();
+  let {
+    rpc,
+    session,
+    active,
+    settingsRev = 0,
+    onClosePane,
+    onOpenSftp,
+    broadcastEnabled = false,
+    broadcastTargetIds = [],
+  }: Props = $props();
 
   let host: HTMLDivElement | null = null;
   let term: Terminal | null = null;
@@ -348,10 +360,18 @@
 
   function sendSessionInput(input: TrzszTerminalInput): void {
     void terminalInputBytes(input)
-      .then((bytes) => rpc.call('session.write', {
-        id: session.id,
-        data: b64encode(bytes),
-      }))
+      .then(async (bytes) => {
+        const data = b64encode(bytes);
+        const targets =
+          broadcastEnabled && broadcastTargetIds.length > 1
+            ? broadcastTargetIds
+            : [session.id];
+        if (targets.length > 1) {
+          await rpc.call('session.writeMany', { ids: targets, data });
+        } else {
+          await rpc.call('session.write', { id: session.id, data });
+        }
+      })
       .catch((err: unknown) => console.warn('terminal write failed', err));
   }
 

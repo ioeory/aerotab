@@ -48,12 +48,33 @@ impl From<serde_json::Error> for ProfileError {
     }
 }
 
-/// Connection profile. Currently only SSH; future variants (Telnet, RDP)
-/// can be added without breaking the wire format thanks to `#[serde(tag)]`.
+/// Remote desktop target (RDP or VNC), optionally reached via SSH tunnel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDesktopSpec {
+    pub host: String,
+    #[serde(default = "default_rdp_port")]
+    pub port: u16,
+    /// When set, a local `-L` forward is opened through this SSH profile id.
+    #[serde(default)]
+    pub ssh_profile_id: Option<Uuid>,
+    #[serde(default)]
+    pub local_bind_port: u16,
+}
+
+fn default_rdp_port() -> u16 {
+    3389
+}
+
+/// Connection profile variants (`#[serde(tag)]` wire format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ProfileKind {
     Ssh { ssh: SshProfile },
+    Rdp { rdp: RemoteDesktopSpec },
+    Vnc {
+        #[serde(rename = "vnc")]
+        spec: RemoteDesktopSpec,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

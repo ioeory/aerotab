@@ -4,7 +4,7 @@
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
-  import { sortProfiles } from '../lib/profileMeta';
+  import { profileEndpointLabel, sortProfiles } from '../lib/profileMeta';
   import { i18n } from '../lib/i18n.svelte';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -42,6 +42,14 @@
   }
 
   async function openProfile(p: StoredProfile, mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab') {
+    if (p.kind === 'rdp' || p.kind === 'vnc') {
+      try {
+        await rpc.call('remote.openProfile', { profile_id: p.id });
+      } catch (e) {
+        onError(`remote: ${(e as Error).message}`);
+      }
+      return;
+    }
     try {
       const meta = await rpc.call<SessionMeta>('session.openSsh', {
         title: p.name,
@@ -185,7 +193,7 @@
           type="button"
           onclick={() => openProfile(p)}
           class="flex-1 min-w-0 text-left px-3 py-1.5 text-[12px]"
-          title={i18n.t('sidebar.profileTooltip', { user: p.ssh.user, host: p.ssh.host, port: p.ssh.port })}
+          title={profileEndpointLabel(p)}
         >
           <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
             <span class="truncate">{p.name}</span>
@@ -194,7 +202,7 @@
             {/if}
           </div>
           <div class="truncate text-[10.5px] text-[var(--color-fg-muted)]">
-            {p.ssh.user}@{p.ssh.host}:{p.ssh.port}
+            {profileEndpointLabel(p)}
           </div>
           {#if (p.tags ?? []).length > 0}
             <div class="mt-1 flex gap-1 overflow-hidden">
@@ -204,15 +212,17 @@
             </div>
           {/if}
         </button>
-        <button
-          type="button"
-          class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-          onclick={(e) => { e.stopPropagation(); openSftp(p); }}
-          title={i18n.t('sidebar.openSftpBrowser')}
-          aria-label={i18n.t('sidebar.openSftpBrowser')}
-        >
-          <FolderOpen size={12} />
-        </button>
+        {#if p.kind === 'ssh'}
+          <button
+            type="button"
+            class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+            onclick={(e) => { e.stopPropagation(); openSftp(p); }}
+            title={i18n.t('sidebar.openSftpBrowser')}
+            aria-label={i18n.t('sidebar.openSftpBrowser')}
+          >
+            <FolderOpen size={12} />
+          </button>
+        {/if}
         <button
           type="button"
           class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
@@ -259,10 +269,12 @@
       <button type="button" class="menu-item" onclick={() => menuSplitDown(mp)}>
         {i18n.t('sidebar.splitDownCurrent')}
       </button>
-      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item" onclick={() => menuOpenSftp(mp)}>
-        {i18n.t('sidebar.openSftpBrowser')}
-      </button>
+      {#if mp.kind === 'ssh'}
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        <button type="button" class="menu-item" onclick={() => menuOpenSftp(mp)}>
+          {i18n.t('sidebar.openSftpBrowser')}
+        </button>
+      {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       <button type="button" class="menu-item" onclick={() => menuEdit(mp)}>
         {i18n.t('sidebar.editProfile')}...

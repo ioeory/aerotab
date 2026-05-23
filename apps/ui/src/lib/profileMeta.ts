@@ -43,13 +43,29 @@ export function sortProfiles(profiles: StoredProfile[]): StoredProfile[] {
   });
 }
 
+export function profileEndpointLabel(profile: StoredProfile): string {
+  if (profile.kind === 'ssh') {
+    const port = profile.ssh.port === 22 ? '' : `:${profile.ssh.port}`;
+    return `${profile.ssh.user}@${profile.ssh.host}${port}`;
+  }
+  if (profile.kind === 'rdp') {
+    return `RDP · ${profile.rdp.host}:${profile.rdp.port}`;
+  }
+  return `VNC · ${profile.vnc.host}:${profile.vnc.port}`;
+}
+
 function profileText(profile: StoredProfile): string {
+  const endpoint =
+    profile.kind === 'ssh'
+      ? [profile.ssh.host, profile.ssh.user, String(profile.ssh.port)]
+      : profile.kind === 'rdp'
+        ? ['rdp', profile.rdp.host, String(profile.rdp.port)]
+        : ['vnc', profile.vnc.host, String(profile.vnc.port)];
   return [
     profile.name,
+    profile.kind,
     profile.group ?? '',
-    profile.ssh.host,
-    profile.ssh.user,
-    String(profile.ssh.port),
+    ...endpoint,
     ...(profile.tags ?? []),
     profile.icon?.value ?? '',
     profile.favorite ? 'favorite starred pinned' : '',
@@ -63,8 +79,17 @@ function matchField(profile: StoredProfile, key: string, value: string): boolean
     return (profile.tags ?? []).some((tag) => tag.toLowerCase().includes(needle));
   }
   if (key === 'group') return (profile.group ?? '').toLowerCase().includes(needle);
-  if (key === 'host') return profile.ssh.host.toLowerCase().includes(needle);
-  if (key === 'user') return profile.ssh.user.toLowerCase().includes(needle);
+  if (key === 'host') {
+    const host =
+      profile.kind === 'ssh' ? profile.ssh.host
+        : profile.kind === 'rdp' ? profile.rdp.host
+          : profile.vnc.host;
+    return host.toLowerCase().includes(needle);
+  }
+  if (key === 'user') {
+    return profile.kind === 'ssh' && profile.ssh.user.toLowerCase().includes(needle);
+  }
+  if (key === 'kind') return profile.kind.includes(needle);
   if (key === 'icon') return (profile.icon?.value ?? '').toLowerCase().includes(needle);
   if (key === 'fav' || key === 'favorite') return !!profile.favorite && !['0', 'false', 'no'].includes(needle);
   return profileText(profile).includes(`${key}:${needle}`);

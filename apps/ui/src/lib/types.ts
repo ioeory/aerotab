@@ -98,7 +98,15 @@ export interface SftpEntry {
   mtime: number | null;
 }
 
-export interface StoredProfile {
+export interface RemoteDesktopSpec {
+  host: string;
+  port: number;
+  /** Optional SSH profile used for `-L` tunnel before launching the viewer. */
+  ssh_profile_id?: string | null;
+  local_bind_port?: number;
+}
+
+interface StoredProfileBase {
   schemaVersion?: number;
   id: string;
   name: string;
@@ -106,9 +114,12 @@ export interface StoredProfile {
   tags?: string[];
   icon?: ProfileIcon | null;
   favorite?: boolean;
-  kind: 'ssh';
-  ssh: SshProfileSpec;
 }
+
+export type StoredProfile =
+  | (StoredProfileBase & { kind: 'ssh'; ssh: SshProfileSpec })
+  | (StoredProfileBase & { kind: 'rdp'; rdp: RemoteDesktopSpec })
+  | (StoredProfileBase & { kind: 'vnc'; vnc: RemoteDesktopSpec });
 
 export type ProfileHealthStatus = 'ok' | 'warning' | 'error';
 

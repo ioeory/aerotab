@@ -234,6 +234,7 @@ async fn spawn_local_tunnel(
         host_port: format!("{}:{}", hop.host, hop.port),
         known_hosts: kh.clone(),
         pinned_host_key_b64: None,
+        x11_forward: false,
     })
     .await?;
     let handle = Arc::new(Mutex::new(handle));
@@ -293,6 +294,7 @@ async fn spawn_remote_tunnel(
             host_port: format!("{}:{}", hop.host, hop.port),
             known_hosts: kh.clone(),
             pinned_host_key_b64: None,
+            x11_forward: false,
         };
         ForwardingClient {
             trusting,
@@ -339,6 +341,7 @@ async fn spawn_dynamic_tunnel(
         host_port: format!("{}:{}", hop.host, hop.port),
         known_hosts: kh.clone(),
         pinned_host_key_b64: None,
+        x11_forward: false,
     })
     .await?;
     let handle = Arc::new(Mutex::new(handle));

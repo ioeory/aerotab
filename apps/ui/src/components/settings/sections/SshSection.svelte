@@ -78,7 +78,7 @@
 
   async function openTunnel() {
     const profile = sshProfiles.find((p) => p.id === tunnelProfileId);
-    if (!profile) {
+    if (!profile || profile.kind !== 'ssh') {
       onError('tunnel: no SSH profile selected');
       return;
     }

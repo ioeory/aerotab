@@ -57,14 +57,16 @@ use uuid::Uuid;
 use crate::core::session_manager::{SessionId, SessionKind, SessionManager, SessionMeta};
 use crate::ipc::{Dispatcher, ErrorCode, RpcError};
 use crate::plugins::wasm_host::WasmHost;
-use crate::profile::{Profile, ProfileKind, ProfileStore};
+use crate::profile::{Profile, ProfileKind, ProfileStore, RemoteDesktopSpec};
 use crate::secret;
 use crate::serial::{SerialChannel, SerialProfile};
 use crate::settings::SettingsStore;
 use crate::ssh::known_hosts::KnownHosts;
 use crate::ssh::sftp::{Sftp, SftpOpenOptions};
+use crate::remote;
 use crate::ssh::tunnel::{TunnelKind, TunnelManager, TunnelOpenRequest};
-use crate::ssh::{self, SshProfile, SshShell};
+use crate::ssh::{self, SshProfile, SshShell, X11ForwardOptions};
+use crate::sync::oauth::{self, OAuthProvider};
 use crate::sync::backends::git::GitBackend;
 use crate::sync::backends::webdav::WebDavBackend;
 use crate::sync::crypto::KdfParams;
@@ -118,6 +120,12 @@ struct IdParam {
 struct WriteParams {
     id: Uuid,
     /// Base64-encoded bytes (so binary data survives the JSON pipe).
+    data: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteManyParams {
+    ids: Vec<Uuid>,
     data: String,
 }
 
@@ -297,10 +305,16 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let rows = p.rows.unwrap_or(24);
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
-                let mut shell =
-                    ssh::connect_shell_with_known_hosts(&p.profile, cols as u32, rows as u32, kh)
-                        .await
-                        .map_err(|e| internal(e.to_string()))?;
+                let x11 = load_ssh_x11_options(&st).await;
+                let mut shell = ssh::connect_shell_with_known_hosts(
+                    &p.profile,
+                    cols as u32,
+                    rows as u32,
+                    kh,
+                    Some(x11),
+                )
+                .await
+                .map_err(|e| internal(e.to_string()))?;
                 let rx = shell
                     .take_output()
                     .ok_or_else(|| internal("no output rx"))?;
@@ -338,14 +352,28 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     .ok_or_else(|| {
                         invalid_params(format!("profile not found: {}", p.profile_id))
                     })?;
-                let ProfileKind::Ssh { ssh } = profile.spec;
                 let rows = p.rows.unwrap_or(24);
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
-                let mut shell =
-                    ssh::connect_shell_with_known_hosts(&ssh, cols as u32, rows as u32, kh)
+                let x11 = load_ssh_x11_options(&st).await;
+                let mut shell = match profile.spec {
+                    ProfileKind::Ssh { ssh } => {
+                        ssh::connect_shell_with_known_hosts(
+                            &ssh,
+                            cols as u32,
+                            rows as u32,
+                            kh,
+                            Some(x11),
+                        )
                         .await
-                        .map_err(|e| internal(e.to_string()))?;
+                    }
+                    ProfileKind::Rdp { rdp } | ProfileKind::Vnc { spec: rdp } => {
+                        return Err(invalid_params(
+                            "profile is remote desktop; use remote.openProfile",
+                        ));
+                    }
+                }
+                .map_err(|e| internal(e.to_string()))?;
                 let rx = shell
                     .take_output()
                     .ok_or_else(|| internal("no output rx"))?;
@@ -393,6 +421,46 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         .map_err(|e| internal(e.to_string()))?,
                 }
                 Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("session.writeMany", move |params| {
+            let st = st.clone();
+            async move {
+                let p: WriteManyParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                if p.ids.is_empty() {
+                    return Ok(json!({ "written": 0 }));
+                }
+                let bytes = BASE64
+                    .decode(p.data.as_bytes())
+                    .map_err(|e| invalid_params(format!("bad base64: {e}")))?;
+                let mut joins = Vec::new();
+                for raw_id in p.ids {
+                    let stc = st.clone();
+                    let data = bytes.clone();
+                    joins.push(tokio::spawn(async move {
+                        let id = SessionId(raw_id);
+                        let chans = stc.channels.lock().await;
+                        let Some(chan) = chans.get(&id) else {
+                            return false;
+                        };
+                        match chan {
+                            SessionChannel::Local(pty) => pty.channel.write(&data).is_ok(),
+                            SessionChannel::Ssh(s) => s.shell.write(&data).await.is_ok(),
+                            SessionChannel::Serial(s) => s.channel.write(&data).is_ok(),
+                        }
+                    }));
+                }
+                let mut written = 0usize;
+                for join in joins {
+                    if join.await.ok() == Some(true) {
+                        written += 1;
+                    }
+                }
+                Ok(json!({ "written": written }))
             }
         });
     }
@@ -574,6 +642,8 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
     register_ssh_stats(dispatcher, state.clone());
     register_sftp(dispatcher, state.clone());
     register_tunnel(dispatcher, state.clone());
+    register_oauth(dispatcher, state.clone());
+    register_remote(dispatcher, state.clone());
     register_settings(dispatcher, state.clone());
     register_vault(dispatcher, state.clone());
     register_plugins(dispatcher, state.clone());
@@ -630,6 +700,11 @@ struct ConfigureGitParams {
     remote_ssh_key: Option<String>,
     #[serde(default)]
     remote_ssh_passphrase: Option<String>,
+    /// `github` or `gitlab` — load access token from OS keyring.
+    #[serde(default)]
+    oauth_provider: Option<String>,
+    #[serde(default)]
+    gitlab_base_url: Option<String>,
 }
 
 fn default_remote_name() -> String {
@@ -1239,6 +1314,107 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
 }
 
+async fn load_ssh_x11_options(st: &AppState) -> X11ForwardOptions {
+    let Ok(store) = require_settings(st).await else {
+        return X11ForwardOptions::default();
+    };
+    let Ok(entry) = store.get("ssh") else {
+        return X11ForwardOptions::default();
+    };
+    let Some(value) = entry else {
+        return X11ForwardOptions::default();
+    };
+    let Ok(v) = serde_json::from_value::<serde_json::Value>(value) else {
+        return X11ForwardOptions::default();
+    };
+    X11ForwardOptions {
+        enabled: v
+            .get("x11Forwarding")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+fn parse_oauth_provider(raw: &str) -> Result<OAuthProvider, RpcError> {
+    match raw.to_ascii_lowercase().as_str() {
+        "github" => Ok(OAuthProvider::Github),
+        "gitlab" => Ok(OAuthProvider::Gitlab),
+        other => Err(invalid_params(format!("unknown oauth provider: {other}"))),
+    }
+}
+
+fn oauth_https_credentials(provider: OAuthProvider, token: String) -> (String, String) {
+    match provider {
+        OAuthProvider::Github => ("x-access-token".into(), token),
+        OAuthProvider::Gitlab => ("oauth2".into(), token),
+    }
+}
+
+async fn resolve_ssh_profile(st: &AppState, profile_id: Uuid) -> Result<SshProfile, RpcError> {
+    let store = require_profiles(st).await?;
+    let profile = store
+        .get(profile_id)
+        .await
+        .map_err(|e| internal(e.to_string()))?
+        .ok_or_else(|| invalid_params(format!("profile not found: {profile_id}")))?;
+    match profile.spec {
+        ProfileKind::Ssh { ssh } => Ok(ssh),
+        _ => Err(invalid_params("profile is not SSH")),
+    }
+}
+
+async fn open_remote_desktop(
+    st: &AppState,
+    kind: &str,
+    spec: RemoteDesktopSpec,
+) -> Result<Value, RpcError> {
+    let kind_lc = kind.to_ascii_lowercase();
+    let mut local_port = if spec.local_bind_port > 0 {
+        spec.local_bind_port
+    } else {
+        0
+    };
+    let mut tunnel_id = None;
+    if let Some(pid) = spec.ssh_profile_id {
+        let ssh = resolve_ssh_profile(st, pid).await?;
+        let kh = st.known_hosts.lock().await.clone();
+        let bind_port = if local_port > 0 {
+            local_port
+        } else {
+            0
+        };
+        let meta = st
+            .tunnels
+            .open(
+                TunnelOpenRequest {
+                    profile: ssh,
+                    kind: TunnelKind::Local,
+                    bind_host: "127.0.0.1".into(),
+                    bind_port,
+                    target_host: spec.host.clone(),
+                    target_port: spec.port,
+                },
+                kh,
+            )
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        local_port = meta.bind_port;
+        tunnel_id = Some(meta.id);
+    } else if local_port == 0 {
+        local_port = spec.port;
+    }
+    let address = if tunnel_id.is_some() {
+        format!("127.0.0.1:{local_port}")
+    } else {
+        format!("{}:{}", spec.host, spec.port)
+    };
+    remote::launch_viewer(&kind_lc, &address).map_err(|e| internal(e.to_string()))?;
+    Ok(json!({
+        "local_address": address,
+        "tunnel_id": tunnel_id,
+    }))
+}
+
 // --- tunnel.* ------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -1301,6 +1477,145 @@ fn register_tunnel(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let list = st.tunnels.list().await;
                 serde_json::to_value(list).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+}
+
+// --- sync.oauth.* --------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct OAuthDeviceStartParams {
+    provider: String,
+    client_id: String,
+    #[serde(default)]
+    gitlab_base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthDevicePollParams {
+    provider: String,
+    client_id: String,
+    device_code: String,
+    #[serde(default)]
+    gitlab_base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthProviderParams {
+    provider: String,
+}
+
+fn register_oauth(dispatcher: &Dispatcher, _state: Arc<AppState>) {
+    dispatcher.register("sync.oauthDeviceStart", move |params| async move {
+        let p: OAuthDeviceStartParams =
+            serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+        let prov = parse_oauth_provider(&p.provider)?;
+        let start = oauth::device_start(prov, &p.client_id, p.gitlab_base_url.as_deref())
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        serde_json::to_value(start).map_err(|e| internal(e.to_string()))
+    });
+    dispatcher.register("sync.oauthDevicePoll", move |params| async move {
+        let p: OAuthDevicePollParams =
+            serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+        let prov = parse_oauth_provider(&p.provider)?;
+        match oauth::device_poll(
+            prov,
+            &p.client_id,
+            &p.device_code,
+            p.gitlab_base_url.as_deref(),
+        )
+        .await
+        {
+            Ok(token) => Ok(json!({ "status": "ok", "token_len": token.len() })),
+            Err(oauth::OAuthError::Pending) => Ok(json!({ "status": "pending" })),
+            Err(oauth::OAuthError::SlowDown) => Ok(json!({ "status": "slow_down" })),
+            Err(e) => Err(internal(e.to_string())),
+        }
+    });
+    dispatcher.register("sync.oauthStatus", move |params| async move {
+        let p: OAuthProviderParams =
+            serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+        let prov = parse_oauth_provider(&p.provider)?;
+        let connected = oauth::load_token(prov)
+            .map_err(|e| internal(e.to_string()))?
+            .is_some();
+        serde_json::to_value(oauth::OAuthStatus { provider: prov, connected })
+            .map_err(|e| internal(e.to_string()))
+    });
+    dispatcher.register("sync.oauthClear", move |params| async move {
+        let p: OAuthProviderParams =
+            serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+        let prov = parse_oauth_provider(&p.provider)?;
+        oauth::clear_token(prov)
+            .map_err(|e| internal(e.to_string()))?;
+        Ok(json!({ "cleared": true }))
+    });
+}
+
+// --- remote.* ------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RemoteOpenParams {
+    kind: String,
+    host: String,
+    port: u16,
+    #[serde(default)]
+    ssh_profile_id: Option<Uuid>,
+    #[serde(default)]
+    local_bind_port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteOpenProfileParams {
+    profile_id: Uuid,
+}
+
+fn register_remote(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    {
+        let st = state.clone();
+        dispatcher.register("remote.open", move |params| {
+            let st = st.clone();
+            async move {
+                let p: RemoteOpenParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                open_remote_desktop(
+                    &st,
+                    &p.kind,
+                    RemoteDesktopSpec {
+                        host: p.host,
+                        port: p.port,
+                        ssh_profile_id: p.ssh_profile_id,
+                        local_bind_port: p.local_bind_port,
+                    },
+                )
+                .await
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("remote.openProfile", move |params| {
+            let st = st.clone();
+            async move {
+                let p: RemoteOpenProfileParams = serde_json::from_value(params)
+                    .map_err(|e| invalid_params(e.to_string()))?;
+                let store = require_profiles(&st).await?;
+                let profile = store
+                    .get(p.profile_id)
+                    .await
+                    .map_err(|e| internal(e.to_string()))?
+                    .ok_or_else(|| {
+                        invalid_params(format!("profile not found: {}", p.profile_id))
+                    })?;
+                match profile.spec {
+                    ProfileKind::Rdp { rdp } => open_remote_desktop(&st, "rdp", rdp).await,
+                    ProfileKind::Vnc { spec } => open_remote_desktop(&st, "vnc", spec).await,
+                    ProfileKind::Ssh { .. } => {
+                        Err(invalid_params("profile is SSH; use session.openSshProfile"))
+                    }
+                }
             }
         });
     }
@@ -1624,7 +1939,19 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     backend = backend
                         .with_remote(&p.remote_name, url, &p.remote_branch)
                         .map_err(|e| internal(e.to_string()))?;
-                    if let (Some(u), Some(pw)) = (p.remote_user, p.remote_password) {
+                    if let Some(ref provider) = p.oauth_provider {
+                        let prov = parse_oauth_provider(provider)?;
+                        if let Some(token) = oauth::load_token(prov)
+                            .map_err(|e| internal(e.to_string()))?
+                        {
+                            let (user, pass) = oauth_https_credentials(prov, token);
+                            backend = backend.with_https_auth(user, pass);
+                        } else {
+                            return Err(invalid_params(
+                                "OAuth token missing; complete device sign-in first",
+                            ));
+                        }
+                    } else if let (Some(u), Some(pw)) = (p.remote_user, p.remote_password) {
                         backend = backend.with_https_auth(u, pw);
                     }
                     if let Some(key) = p.remote_ssh_key {

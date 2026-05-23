@@ -20,11 +20,12 @@
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
   import { dispatchFocusPane } from './lib/focusPane';
+  import { broadcastTargetIds } from './lib/broadcast';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.1.32-ui-20260524';
+  const buildId = '0.1.33-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -86,10 +87,14 @@
   let sftpWindowSeq = 0;
   let paneSftpTarget = $state<SftpDockTarget | null>(null);
   let paneSftpTargetSeq = 0;
+  /** Per-tab broadcast mode: one keystroke → all SSH panes in the tab. */
+  let broadcastByTab = $state<Record<string, boolean>>({});
 
   const activeSftpKey = $derived(tabs.activeId ?? GLOBAL_SFTP_KEY);
   const activeTab = $derived(tabs.tabs.find((t) => t.id === tabs.activeId));
   const activePane = $derived(activeTab ? tabs.activePane(activeTab) : undefined);
+  const broadcastOn = $derived(!!(tabs.activeId && broadcastByTab[tabs.activeId]));
+  const broadcastTargets = $derived(broadcastTargetIds(activeTab));
 
   $effect(() => {
     void tabs.revision;
@@ -108,6 +113,10 @@
     void rpc.call<StoredProfile>('profile.get', { id: pane.profileId })
       .then((profile) => {
         if (seq !== paneSftpTargetSeq) return;
+        if (profile.kind !== 'ssh') {
+          paneSftpTarget = null;
+          return;
+        }
         paneSftpTarget = { name: profile.name, ssh: profile.ssh };
       })
       .catch(() => {
@@ -555,7 +564,15 @@
     requestAnimationFrame(() => focusActivePane());
   }
 
+  function toggleBroadcast() {
+    const tabId = tabs.activeId;
+    if (!tabId) return;
+    broadcastByTab = { ...broadcastByTab, [tabId]: !broadcastByTab[tabId] };
+  }
+
   function profileCommandSubtitle(p: StoredProfile): string {
+    if (p.kind === 'rdp') return `${p.rdp.host}:${p.rdp.port} RDP`;
+    if (p.kind === 'vnc') return `${p.vnc.host}:${p.vnc.port} VNC`;
     const pieces = [p.ssh.user ? `${p.ssh.user}@${p.ssh.host}` : p.ssh.host];
     if (p.group) pieces.push(`group:${p.group}`);
     if (p.tags?.length) pieces.push(p.tags.map((tag) => `tag:${tag}`).join(' '));
@@ -564,12 +581,16 @@
   }
 
   function profileCommandKeywords(p: StoredProfile): string[] {
+    const host =
+      p.kind === 'ssh' ? p.ssh.host : p.kind === 'rdp' ? p.rdp.host : p.vnc.host;
+    const user = p.kind === 'ssh' ? p.ssh.user ?? '' : '';
     return [
       p.name,
       p.group ?? '',
       ...(p.tags ?? []),
-      p.ssh.host,
-      p.ssh.user ?? '',
+      host,
+      user,
+      p.kind,
       p.favorite ? 'favorite starred pinned' : '',
     ].filter(Boolean);
   }
@@ -609,7 +630,7 @@
     if (pane.sshProfile) return pane.sshProfile;
     if (pane.profileId) {
       const profile = await rpc.call<StoredProfile>('profile.get', { id: pane.profileId });
-      return profile.ssh;
+      return profile.kind === 'ssh' ? profile.ssh : null;
     }
     return null;
   }
@@ -972,6 +993,10 @@
     if (pane.profileId) {
       try {
         const profile = await rpc.call<StoredProfile>('profile.get', { id: pane.profileId });
+        if (profile.kind !== 'ssh') {
+          onError('sftp: profile is not SSH');
+          return null;
+        }
         return { target: { name: profile.name, ssh: profile.ssh }, tabId: tab.id };
       } catch (e) {
         onError(`sftp profile: ${(e as Error).message}`);
@@ -1021,6 +1046,10 @@
 
   async function connectProfile(p: StoredProfile) {
     try {
+      if (p.kind === 'rdp' || p.kind === 'vnc') {
+        await rpc.call('remote.openProfile', { profile_id: p.id });
+        return;
+      }
       const meta = await rpc.call<{ id: string; kind: string; title: string }>(
         'session.openSshProfile', { profile_id: p.id },
       );
@@ -1139,6 +1168,14 @@
         run: () => deleteSessionWorkspace(workspace),
       });
     }
+    acts.push({
+      id: 'toggle-broadcast',
+      title: broadcastOn ? i18n.t('action.broadcastOff') : i18n.t('action.broadcastOn'),
+      subtitle: i18n.t('action.broadcastHint'),
+      keywords: ['broadcast', 'multiplex', 'fanout'],
+      shortcut: 'Ctrl+Shift+B',
+      run: () => toggleBroadcast(),
+    });
     for (const p of savedProfiles) {
       acts.push({
         id: `connect-${p.id}`,
@@ -1147,13 +1184,15 @@
         keywords: profileCommandKeywords(p),
         run: () => connectProfile(p),
       });
-      acts.push({
-        id: `sftp-${p.id}`,
-        title: i18n.t('action.sftpBrowserProfile', { name: p.name }),
-        subtitle: profileCommandSubtitle(p),
-        keywords: ['sftp', 'transfer', ...profileCommandKeywords(p)],
-        run: () => openSftpDock({ name: p.name, ssh: p.ssh }),
-      });
+      if (p.kind === 'ssh') {
+        acts.push({
+          id: `sftp-${p.id}`,
+          title: i18n.t('action.sftpBrowserProfile', { name: p.name }),
+          subtitle: profileCommandSubtitle(p),
+          keywords: ['sftp', 'transfer', ...profileCommandKeywords(p)],
+          run: () => openSftpDock({ name: p.name, ssh: p.ssh }),
+        });
+      }
     }
     acts.push({
       id: 'open-sftp',
@@ -1191,6 +1230,7 @@
     hotkeys.registerHandler('maximize-pane', () => toggleActivePaneMaximize());
     hotkeys.registerHandler('open-sftp', () => { void openSftpForActivePane(); });
     hotkeys.registerHandler('toggle-sftp-dock', () => toggleCurrentSftpDock());
+    hotkeys.registerHandler('toggle-broadcast', () => toggleBroadcast());
     hotkeys.registerHandler('focus-left',  () => focusPaneDirection('left'));
     hotkeys.registerHandler('focus-right', () => focusPaneDirection('right'));
     hotkeys.registerHandler('focus-up',    () => focusPaneDirection('up'));
@@ -1302,7 +1342,7 @@
       bind:this={sidebar}
       openProfileModal={(p) => profileModal?.open(p)}
       openSerialModal={() => serialModal?.open()}
-      openSftp={(p) => openSftpDock({ name: p.name, ssh: p.ssh })}
+      openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
       openSettings={() => openSettings()}
       {onError}
     />
@@ -1324,7 +1364,14 @@
       <div class="relative flex-1 min-w-0 min-h-0">
         {#each tabs.tabs as tab (tab.id)}
           <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
-            <PaneGrid {rpc} {tab} settingsRev={settingsRev} onOpenSftp={() => { void openSftpForActivePane(); }} />
+            <PaneGrid
+              {rpc}
+              {tab}
+              settingsRev={settingsRev}
+              broadcastEnabled={broadcastOn}
+              broadcastTargetIds={broadcastTargets}
+              onOpenSftp={() => { void openSftpForActivePane(); }}
+            />
           </div>
         {/each}
         {#if tabs.tabs.length === 0}

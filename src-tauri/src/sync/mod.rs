@@ -9,6 +9,7 @@
 pub mod backends;
 pub mod crypto;
 pub mod engine;
+pub mod oauth;
 pub mod persistence;
 pub mod version_vector;
 

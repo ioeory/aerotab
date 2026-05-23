@@ -13,7 +13,7 @@ export function parseJumpLine(
     const byId = profiles.find((p) => p.id === ref);
     const byName = profiles.find((p) => p.name === ref);
     const hit = byId ?? byName;
-    if (!hit) throw new Error(`jump profile "${ref}" not found`);
+    if (!hit || hit.kind !== 'ssh') throw new Error(`jump profile "${ref}" not found`);
     return {
       host: hit.ssh.host,
       port: hit.ssh.port,
@@ -46,7 +46,8 @@ export function parseJumpLines(
 
 export async function loadProfilesForJumps(rpc: RpcClient): Promise<StoredProfile[]> {
   try {
-    return await rpc.call<StoredProfile[]>('profile.list');
+    const list = await rpc.call<StoredProfile[]>('profile.list');
+    return list.filter((p) => p.kind === 'ssh');
   } catch {
     return [];
   }

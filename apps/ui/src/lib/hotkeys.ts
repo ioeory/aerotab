@@ -28,6 +28,7 @@ export const ACTIONS: ActionDef[] = [
   { id: 'maximize-pane', label: 'Maximize / restore pane', category: 'Panes', defaultBindings: ['Alt+Z'] },
   { id: 'open-sftp', label: 'Open SFTP for current SSH pane', category: 'Panes', defaultBindings: ['Ctrl+Alt+F'] },
   { id: 'toggle-sftp-dock', label: 'Collapse / expand SFTP dock', category: 'Panes', defaultBindings: ['Ctrl+Alt+E'] },
+  { id: 'toggle-broadcast', label: 'Toggle broadcast input to SSH panes', category: 'Panes', defaultBindings: ['Ctrl+Shift+B'] },
   { id: 'focus-left',  label: 'Focus pane left',       category: 'Panes',    defaultBindings: ['Alt+ArrowLeft'] },
   { id: 'focus-right', label: 'Focus pane right',      category: 'Panes',    defaultBindings: ['Alt+ArrowRight'] },
   { id: 'focus-up',    label: 'Focus pane up',         category: 'Panes',    defaultBindings: ['Alt+ArrowUp'] },

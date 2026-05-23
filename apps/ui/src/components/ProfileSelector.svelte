@@ -15,7 +15,7 @@
   import type { RpcClient } from '../lib/rpc';
   import type { StoredProfile } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
-  import { matchesProfileQuery, profileGroupName, sortProfiles } from '../lib/profileMeta';
+  import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
 
   // Backend-supplied discovery payload.
@@ -223,7 +223,7 @@
             {#each (p.tags ?? []).slice(0, 2) as tag (tag)}
               <span class="picker-pill">{tag}</span>
             {/each}
-            <span class="picker-sub">{p.ssh.user}@{p.ssh.host}</span>
+            <span class="picker-sub">{profileEndpointLabel(p)}</span>
             {#if isHovered(item)}
               <span class="picker-kbd">ENTER <ArrowRight size={10} /></span>
             {/if}
@@ -250,7 +250,7 @@
             {#each (p.tags ?? []).slice(0, 2) as tag (tag)}
               <span class="picker-pill">{tag}</span>
             {/each}
-            <span class="picker-sub">{p.ssh.user}@{p.ssh.host}</span>
+            <span class="picker-sub">{profileEndpointLabel(p)}</span>
           </button>
         {/each}
       {/each}

@@ -64,7 +64,28 @@ pub fn has_master(account: Option<&str>) -> bool {
 
 /// Forgets the secret. Idempotent: returns `Ok(())` when nothing was stored.
 pub fn clear_master(account: Option<&str>) -> Result<(), SecretError> {
-    match entry(account.unwrap_or(DEFAULT_ACCOUNT))?.delete_password() {
+    clear_secret(account)
+}
+
+/// Stores an arbitrary named secret (OAuth tokens, etc.).
+pub fn set_secret(account: &str, secret: &str) -> Result<(), SecretError> {
+    if secret.is_empty() {
+        return Err(SecretError::Keyring("empty secret".into()));
+    }
+    entry(account)?.set_password(secret).map_err(SecretError::from)
+}
+
+pub fn get_secret(account: &str) -> Result<String, SecretError> {
+    entry(account)?.get_password().map_err(SecretError::from)
+}
+
+pub fn has_secret(account: &str) -> bool {
+    matches!(get_secret(account), Ok(s) if !s.is_empty())
+}
+
+pub fn clear_secret(account: Option<&str>) -> Result<(), SecretError> {
+    let account = account.unwrap_or(DEFAULT_ACCOUNT);
+    match entry(account)?.delete_password() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(SecretError::from(e)),

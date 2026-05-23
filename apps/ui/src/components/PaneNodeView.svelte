@@ -12,9 +12,11 @@
     node: PaneNode;
     settingsRev: number;
     onOpenSftp?: () => void;
+    broadcastEnabled?: boolean;
+    broadcastTargetIds?: string[];
   }
 
-  let { rpc, tab, node, settingsRev, onOpenSftp }: Props = $props();
+  let { rpc, tab, node, settingsRev, onOpenSftp, broadcastEnabled = false, broadcastTargetIds = [] }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
   let dropSide = $state<PaneDropSide | null>(null);
@@ -163,6 +165,8 @@
       {settingsRev}
       onClosePane={() => closePane(node.pane.id, new Event('close'))}
       {onOpenSftp}
+      {broadcastEnabled}
+      {broadcastTargetIds}
     />
     {#if tab.panes.length > 1}
       <button
@@ -224,7 +228,7 @@
         style="display: {childHidden ? 'none' : 'block'}; flex: {node.ratios[idx] ?? 1} {node.ratios[idx] ?? 1} 0; min-width: 60px; min-height: 60px;"
         class="relative min-w-0 min-h-0"
       >
-        <PaneNodeView {rpc} {tab} node={child} {settingsRev} {onOpenSftp} />
+        <PaneNodeView {rpc} {tab} node={child} {settingsRev} {onOpenSftp} {broadcastEnabled} {broadcastTargetIds} />
       </div>
       {#if idx < node.children.length - 1 && !maximized}
         <button

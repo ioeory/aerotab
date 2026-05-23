@@ -2,7 +2,7 @@
   import { X } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { uuidv4 } from '../lib/rpc';
-  import type { StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
+  import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
   import { loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
   import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput } from '../lib/profileMeta';
@@ -18,6 +18,10 @@
 
   let dialog: HTMLDialogElement | null = null;
   let editing = $state<StoredProfile | null>(null);
+  let profileKind = $state<'ssh' | 'rdp' | 'vnc'>('ssh');
+  let remoteSshProfileId = $state('');
+  let localBindPort = $state<number | ''>('');
+  let tunnelProfiles = $state<StoredProfile[]>([]);
   let name = $state('');
   let group = $state('');
   let tagsText = $state('');
@@ -41,36 +45,60 @@
       .join('\n');
   }
 
+  function loadRemoteFields(spec: RemoteDesktopSpec) {
+    host = spec.host;
+    port = spec.port;
+    remoteSshProfileId = spec.ssh_profile_id ?? '';
+    localBindPort = spec.local_bind_port ?? '';
+    user = '';
+    password = '';
+    keyPath = '';
+    keyPassphrase = '';
+    jumpsText = '';
+  }
+
   export function open(existing?: StoredProfile) {
     editing = existing ?? null;
+    void rpc.call<StoredProfile[]>('profile.list')
+      .then((list) => { tunnelProfiles = list.filter((p) => p.kind === 'ssh'); })
+      .catch(() => { tunnelProfiles = []; });
     if (existing) {
+      profileKind = existing.kind;
       name = existing.name;
       group = existing.group ?? '';
       tagsText = formatTags(existing.tags);
       favorite = !!existing.favorite;
       iconKind = (existing.icon?.kind as typeof iconKind) ?? 'builtin';
       iconValue = existing.icon?.value ?? 'server';
-      host = existing.ssh.host;
-      port = existing.ssh.port;
-      user = existing.ssh.user;
-      jumpsText = formatJumps(existing.ssh.jump_via ?? []);
-      if (typeof existing.ssh.auth === 'object' && 'Password' in existing.ssh.auth) {
-        authKind = 'password';
-        password = existing.ssh.auth.Password.secret;
-        keyPath = '';
-        keyPassphrase = '';
-      } else if (typeof existing.ssh.auth === 'object' && 'PublicKey' in existing.ssh.auth) {
-        authKind = 'key';
-        keyPath = existing.ssh.auth.PublicKey.key_path;
-        keyPassphrase = existing.ssh.auth.PublicKey.passphrase ?? '';
-        password = '';
+      if (existing.kind === 'ssh') {
+        host = existing.ssh.host;
+        port = existing.ssh.port;
+        user = existing.ssh.user;
+        jumpsText = formatJumps(existing.ssh.jump_via ?? []);
+        remoteSshProfileId = '';
+        localBindPort = '';
+        if (typeof existing.ssh.auth === 'object' && 'Password' in existing.ssh.auth) {
+          authKind = 'password';
+          password = existing.ssh.auth.Password.secret;
+          keyPath = '';
+          keyPassphrase = '';
+        } else if (typeof existing.ssh.auth === 'object' && 'PublicKey' in existing.ssh.auth) {
+          authKind = 'key';
+          keyPath = existing.ssh.auth.PublicKey.key_path;
+          keyPassphrase = existing.ssh.auth.PublicKey.passphrase ?? '';
+          password = '';
+        } else {
+          authKind = 'key';
+          keyPath = '';
+          keyPassphrase = '';
+          password = '';
+        }
       } else {
-        authKind = 'key';
-        keyPath = '';
-        keyPassphrase = '';
-        password = '';
+        loadRemoteFields(existing.kind === 'rdp' ? existing.rdp : existing.vnc);
+        authKind = 'password';
       }
     } else {
+      profileKind = 'ssh';
       name = '';
       group = '';
       tagsText = '';
@@ -85,6 +113,8 @@
       keyPath = '';
       keyPassphrase = '';
       jumpsText = '';
+      remoteSshProfileId = '';
+      localBindPort = '';
     }
     dialog?.showModal();
   }
@@ -95,19 +125,7 @@
 
   async function submit(ev: Event) {
     ev.preventDefault();
-    const auth: SshAuth =
-      authKind === 'key'
-        ? { PublicKey: { key_path: keyPath, passphrase: keyPassphrase || undefined } }
-        : { Password: { secret: password } };
-    let jump_via: SshProfileSpec[];
-    try {
-      const profiles = await loadProfilesForJumps(rpc);
-      jump_via = parseJumpLines(jumpsText, auth, profiles);
-    } catch (e) {
-      onError((e as Error).message);
-      return;
-    }
-    const profile: StoredProfile = {
+    const base = {
       schemaVersion: 1,
       id: editing?.id ?? uuidv4(),
       name: name || 'profile',
@@ -115,9 +133,37 @@
       tags: parseTagsInput(tagsText),
       favorite,
       icon: iconValue.trim() ? { kind: iconKind, value: iconValue.trim() } : null,
-      kind: 'ssh',
-      ssh: { host, port: Number(port) || 22, user, auth, jump_via },
-    };
+    } as const;
+    let profile: StoredProfile;
+    if (profileKind === 'ssh') {
+      const auth: SshAuth =
+        authKind === 'key'
+          ? { PublicKey: { key_path: keyPath, passphrase: keyPassphrase || undefined } }
+          : { Password: { secret: password } };
+      let jump_via: SshProfileSpec[];
+      try {
+        const profiles = await loadProfilesForJumps(rpc);
+        jump_via = parseJumpLines(jumpsText, auth, profiles);
+      } catch (e) {
+        onError((e as Error).message);
+        return;
+      }
+      profile = {
+        ...base,
+        kind: 'ssh',
+        ssh: { host, port: Number(port) || 22, user, auth, jump_via },
+      };
+    } else {
+      const remote: RemoteDesktopSpec = {
+        host,
+        port: Number(port) || (profileKind === 'rdp' ? 3389 : 5900),
+        ssh_profile_id: remoteSshProfileId.trim() || null,
+        local_bind_port: localBindPort === '' ? undefined : Number(localBindPort) || undefined,
+      };
+      profile = profileKind === 'rdp'
+        ? { ...base, kind: 'rdp', rdp: remote }
+        : { ...base, kind: 'vnc', vnc: remote };
+    }
     try {
       await rpc.call('profile.upsert', profile);
       close();
@@ -143,6 +189,13 @@
         <X size={14} />
       </button>
     </div>
+
+    <label for="pm-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.kind')}</label>
+    <select id="pm-kind" bind:value={profileKind} class="input">
+      <option value="ssh">{i18n.t('profileModal.kindSsh')}</option>
+      <option value="rdp">{i18n.t('profileModal.kindRdp')}</option>
+      <option value="vnc">{i18n.t('profileModal.kindVnc')}</option>
+    </select>
 
     <label for="pm-name" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.name')}</label>
     <input id="pm-name" bind:value={name} required placeholder="prod web 01" class="input" />
@@ -200,40 +253,52 @@
       </div>
     </div>
 
-    <label for="pm-user" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.user')}</label>
-    <input id="pm-user" bind:value={user} required placeholder="root" class="input" />
+    {#if profileKind === 'ssh'}
+      <label for="pm-user" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.user')}</label>
+      <input id="pm-user" bind:value={user} required placeholder="root" class="input" />
 
-    <label for="pm-auth" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.authMethod')}</label>
-    <select id="pm-auth" bind:value={authKind} class="input">
-      <option value="password">{i18n.t('profileModal.password')}</option>
-      <option value="key">{i18n.t('profileModal.publicKey')}</option>
-    </select>
+      <label for="pm-auth" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.authMethod')}</label>
+      <select id="pm-auth" bind:value={authKind} class="input">
+        <option value="password">{i18n.t('profileModal.password')}</option>
+        <option value="key">{i18n.t('profileModal.publicKey')}</option>
+      </select>
 
-    {#if authKind === 'password'}
-      <label for="pm-pw" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-        {i18n.t('profileModal.passwordStoredLocally')}
+      {#if authKind === 'password'}
+        <label for="pm-pw" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+          {i18n.t('profileModal.passwordStoredLocally')}
+        </label>
+        <input id="pm-pw" type="password" bind:value={password} class="input" />
+      {:else}
+        <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.privateKeyPath')}</label>
+        <input id="pm-keypath" bind:value={keyPath} placeholder="~/.ssh/id_ed25519" class="input" />
+        <label for="pm-keypass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+          {i18n.t('profileModal.keyPassphrase')}
+        </label>
+        <input id="pm-keypass" type="password" bind:value={keyPassphrase} class="input" />
+      {/if}
+
+      <label for="pm-jumps" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+        {i18n.t('profileModal.proxyJump')}
       </label>
-      <input id="pm-pw" type="password" bind:value={password} class="input" />
+      <textarea
+        id="pm-jumps"
+        bind:value={jumpsText}
+        rows="2"
+        placeholder="jumpuser@bastion.example.com&#10;@prod-bastion"
+        class="input font-mono text-[11.5px]"
+      ></textarea>
+      <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">{i18n.t('profileModal.proxyJumpProfileRef')}</p>
     {:else}
-      <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.privateKeyPath')}</label>
-      <input id="pm-keypath" bind:value={keyPath} placeholder="~/.ssh/id_ed25519" class="input" />
-      <label for="pm-keypass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-        {i18n.t('profileModal.keyPassphrase')}
-      </label>
-      <input id="pm-keypass" type="password" bind:value={keyPassphrase} class="input" />
+      <label for="pm-tunnel" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.sshTunnel')}</label>
+      <select id="pm-tunnel" bind:value={remoteSshProfileId} class="input">
+        <option value="">(direct)</option>
+        {#each tunnelProfiles as tp (tp.id)}
+          <option value={tp.id}>{tp.name}</option>
+        {/each}
+      </select>
+      <label for="pm-lport" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.localBindPort')}</label>
+      <input id="pm-lport" bind:value={localBindPort} type="number" min="1" max="65535" class="input" placeholder="auto" />
     {/if}
-
-    <label for="pm-jumps" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-      {i18n.t('profileModal.proxyJump')}
-    </label>
-    <textarea
-      id="pm-jumps"
-      bind:value={jumpsText}
-      rows="2"
-      placeholder="jumpuser@bastion.example.com&#10;@prod-bastion"
-      class="input font-mono text-[11.5px]"
-    ></textarea>
-    <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">{i18n.t('profileModal.proxyJumpProfileRef')}</p>
 
     <div class="flex justify-end gap-2 mt-5">
       <button type="button" onclick={close} class="btn-secondary">{i18n.t('common.cancel')}</button>

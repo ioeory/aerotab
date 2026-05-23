@@ -48,7 +48,18 @@
   let gitRemotePassword = $state('');
   let gitSshKeyPath = $state('');
   let gitSshPassphrase = $state('');
-  let gitAuthMode = $state<'none' | 'https' | 'ssh'>('none');
+  let gitAuthMode = $state<'none' | 'https' | 'ssh' | 'oauth_github' | 'oauth_gitlab'>('none');
+  let githubOAuthClientId = $state('');
+  let gitlabOAuthClientId = $state('');
+  let gitlabOAuthBaseUrl = $state('https://gitlab.com');
+  let oauthDevice = $state<{
+    provider: string;
+    userCode: string;
+    verificationUri: string;
+    deviceCode: string;
+    interval: number;
+  } | null>(null);
+  let oauthPollTimer: ReturnType<typeof setInterval> | null = null;
   // Common
   let masterPassword = $state('');
   let keyringAccount = $state('');
@@ -126,9 +137,15 @@
       if (typeof v.gitRemotePassword === 'string') gitRemotePassword = v.gitRemotePassword;
       if (typeof v.gitSshKeyPath === 'string') gitSshKeyPath = v.gitSshKeyPath;
       if (typeof v.gitSshPassphrase === 'string') gitSshPassphrase = v.gitSshPassphrase;
-      if (v.gitAuthMode === 'none' || v.gitAuthMode === 'https' || v.gitAuthMode === 'ssh') {
+      if (
+        v.gitAuthMode === 'none' || v.gitAuthMode === 'https' || v.gitAuthMode === 'ssh'
+        || v.gitAuthMode === 'oauth_github' || v.gitAuthMode === 'oauth_gitlab'
+      ) {
         gitAuthMode = v.gitAuthMode;
       }
+      if (typeof v.githubOAuthClientId === 'string') githubOAuthClientId = v.githubOAuthClientId;
+      if (typeof v.gitlabOAuthClientId === 'string') gitlabOAuthClientId = v.gitlabOAuthClientId;
+      if (typeof v.gitlabOAuthBaseUrl === 'string') gitlabOAuthBaseUrl = v.gitlabOAuthBaseUrl;
       if (typeof v.stateDir === 'string') stateDir = v.stateDir;
       if (typeof v.autoSyncEnabled === 'boolean') autoSyncEnabled = v.autoSyncEnabled;
       if (typeof v.autoSyncMinutes === 'number') autoSyncMinutes = v.autoSyncMinutes;
@@ -158,7 +175,7 @@
         gitRepoPath, gitRemoteUrl, gitRemoteName, gitRemoteBranch,
         gitAuthorName, gitAuthorEmail,
         gitRemoteUser, gitRemotePassword, gitSshKeyPath, gitSshPassphrase,
-        gitAuthMode,
+        gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
       },
     });
@@ -270,6 +287,11 @@
         } else if (gitAuthMode === 'ssh') {
           args.remote_ssh_key = gitSshKeyPath;
           if (gitSshPassphrase) args.remote_ssh_passphrase = gitSshPassphrase;
+        } else if (gitAuthMode === 'oauth_github') {
+          args.oauth_provider = 'github';
+        } else if (gitAuthMode === 'oauth_gitlab') {
+          args.oauth_provider = 'gitlab';
+          args.gitlab_base_url = gitlabOAuthBaseUrl || undefined;
         }
         await rpc.call('sync.configureGit', args);
       }
@@ -370,6 +392,95 @@
     }
   }
 
+  function stopOAuthPoll() {
+    if (oauthPollTimer) {
+      clearInterval(oauthPollTimer);
+      oauthPollTimer = null;
+    }
+  }
+
+  function oauthClientId(provider: 'github' | 'gitlab'): string {
+    return (provider === 'github' ? githubOAuthClientId : gitlabOAuthClientId).trim();
+  }
+
+  async function startOAuthDevice(provider: 'github' | 'gitlab') {
+    const clientId = oauthClientId(provider);
+    if (!clientId) {
+      info = provider === 'github' ? 'GitHub client id required' : 'GitLab application id required';
+      return;
+    }
+    stopOAuthPoll();
+    busy = true;
+    info = 'Starting device flow…';
+    try {
+      const start = await rpc.call<{
+        deviceCode: string;
+        userCode: string;
+        verificationUri: string;
+        interval: number;
+      }>('sync.oauthDeviceStart', {
+        provider,
+        client_id: clientId,
+        gitlab_base_url: provider === 'gitlab' ? gitlabOAuthBaseUrl : undefined,
+      });
+      oauthDevice = {
+        provider,
+        userCode: start.userCode,
+        verificationUri: start.verificationUri,
+        deviceCode: start.deviceCode,
+        interval: start.interval || 5,
+      };
+      info = 'Waiting for authorization…';
+      const tickMs = Math.max(3, oauthDevice.interval) * 1000;
+      oauthPollTimer = setInterval(() => { void pollOAuthDevice(provider); }, tickMs);
+      void pollOAuthDevice(provider);
+    } catch (e) {
+      oauthDevice = null;
+      info = '';
+      onError(`oauth start: ${(e as Error).message}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function pollOAuthDevice(provider: 'github' | 'gitlab') {
+    if (!oauthDevice || oauthDevice.provider !== provider) return;
+    const clientId = oauthClientId(provider);
+    if (!clientId) return;
+    try {
+      const r = await rpc.call<{ status: string }>('sync.oauthDevicePoll', {
+        provider,
+        client_id: clientId,
+        device_code: oauthDevice.deviceCode,
+        gitlab_base_url: provider === 'gitlab' ? gitlabOAuthBaseUrl : undefined,
+      });
+      if (r.status === 'ok') {
+        stopOAuthPoll();
+        oauthDevice = null;
+        info = `${provider} OAuth connected`;
+      } else if (r.status === 'slow_down' && oauthPollTimer) {
+        stopOAuthPoll();
+        const slower = Math.max(10, (oauthDevice?.interval ?? 5) + 5);
+        oauthPollTimer = setInterval(() => { void pollOAuthDevice(provider); }, slower * 1000);
+      }
+    } catch (e) {
+      stopOAuthPoll();
+      oauthDevice = null;
+      onError(`oauth poll: ${(e as Error).message}`);
+    }
+  }
+
+  async function clearOAuth(provider: 'github' | 'gitlab') {
+    stopOAuthPoll();
+    oauthDevice = null;
+    try {
+      await rpc.call('sync.oauthClear', { provider });
+      info = `${provider} token cleared`;
+    } catch (e) {
+      onError(`oauth clear: ${(e as Error).message}`);
+    }
+  }
+
   async function deleteSyncRecord(id = inspectorId) {
     if (!id) return;
     if (!confirm(`Delete local sync record ${id}?`)) return;
@@ -396,6 +507,7 @@
   onDestroy(() => {
     settingsCoord.unregisterSaver('configsync');
     if (statusTimer) clearInterval(statusTimer);
+    stopOAuthPoll();
   });
 </script>
 
@@ -496,8 +608,37 @@
         <option value="none">None / system credential helper</option>
         <option value="https">HTTPS user/password</option>
         <option value="ssh">SSH key</option>
+        <option value="oauth_github">GitHub OAuth (device)</option>
+        <option value="oauth_gitlab">GitLab OAuth (device)</option>
       </select>
-      {#if gitAuthMode === 'https'}
+      {#if gitAuthMode === 'oauth_github' || gitAuthMode === 'oauth_gitlab'}
+        {#if gitAuthMode === 'oauth_github'}
+          <label class="lbl" for="cs-github-client">GitHub OAuth client id</label>
+          <input id="cs-github-client" bind:value={githubOAuthClientId} oninput={markDirty} class="input"
+                 placeholder="GitHub OAuth App client id" />
+        {:else}
+          <label class="lbl" for="cs-gitlab-client">GitLab OAuth application id</label>
+          <input id="cs-gitlab-client" bind:value={gitlabOAuthClientId} oninput={markDirty} class="input" />
+          <label class="lbl" for="cs-gitlab-base">GitLab base URL</label>
+          <input id="cs-gitlab-base" bind:value={gitlabOAuthBaseUrl} oninput={markDirty} class="input" />
+        {/if}
+        <div class="oauth-row">
+          <button type="button" class="btn-secondary" disabled={busy}
+                  onclick={() => { void startOAuthDevice(gitAuthMode === 'oauth_github' ? 'github' : 'gitlab'); }}>
+            Sign in (device flow)
+          </button>
+          <button type="button" class="btn-secondary" disabled={busy}
+                  onclick={() => { void clearOAuth(gitAuthMode === 'oauth_github' ? 'github' : 'gitlab'); }}>
+            Clear token
+          </button>
+        </div>
+        {#if oauthDevice}
+          <div class="oauth-hint">
+            Open <a href={oauthDevice.verificationUri} target="_blank" rel="noreferrer">{oauthDevice.verificationUri}</a>
+            and enter code <strong>{oauthDevice.userCode}</strong>
+          </div>
+        {/if}
+      {:else if gitAuthMode === 'https'}
         <label for="cs-r-user" class="lbl">Remote username</label>
         <input id="cs-r-user" bind:value={gitRemoteUser} oninput={markDirty} class="input" />
         <label for="cs-r-pass" class="lbl">Remote password / token</label>
@@ -689,5 +830,17 @@
     font-size: 11px;
     color: var(--color-fg-muted);
     line-height: 1.25;
+  }
+  .oauth-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .oauth-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--color-fg-muted);
+    line-height: 1.35;
   }
 </style>

@@ -38,7 +38,11 @@
     onError: (msg: string) => void;
   }
   let { rpc, profile, source, mode = 'modal', onClose, onCollapse, onPopOut, onError }: Props = $props();
-  const target = $derived(source ?? profile);
+  const target = $derived.by((): SftpSource | null => {
+    if (source) return source;
+    if (profile?.kind === 'ssh') return { name: profile.name, ssh: profile.ssh };
+    return null;
+  });
 
   function initialSudoMode(): boolean {
     return Boolean(source?.sudo);
