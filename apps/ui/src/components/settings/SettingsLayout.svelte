@@ -30,7 +30,7 @@
   }
   let { rpc, onClose, onError, onSettingsChanged }: Props = $props();
 
-  const buildId = '0.1.16-ui-20260523';
+  const buildId = '0.1.17-ui-20260523';
 
   type SectionId =
     | 'application'

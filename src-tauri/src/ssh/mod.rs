@@ -8,6 +8,7 @@
 
 pub mod known_hosts;
 pub mod sftp;
+pub mod stats;
 
 use std::path::PathBuf;
 use std::sync::Arc;

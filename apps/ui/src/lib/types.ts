@@ -51,6 +51,20 @@ export interface SshProfileSpec {
   jump_via: SshProfileSpec[];
 }
 
+export interface HostStats {
+  hostname?: string | null;
+  kernel?: string | null;
+  uptime_seconds?: number | null;
+  load1?: number | null;
+  cpu_percent?: number | null;
+  mem_total_kb?: number | null;
+  mem_used_kb?: number | null;
+  mem_percent?: number | null;
+  disk_total_kb?: number | null;
+  disk_used_kb?: number | null;
+  disk_percent?: number | null;
+}
+
 export type SftpKind = 'File' | 'Dir' | 'Symlink' | 'Other';
 
 export interface SftpEntry {

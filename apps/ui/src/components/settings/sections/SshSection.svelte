@@ -27,6 +27,8 @@
   let preferredAuth = $state('publickey,password,keyboard-interactive');
   let reconnectOnDrop = $state(false);
   let reconnectDelay = $state(3);
+  let hostStatsEnabled = $state(true);
+  let hostStatsIntervalSec = $state(30);
   let knownHosts = $state<KnownHostEntry[]>([]);
   let knownHostsBusy = $state(false);
   let knownHostsStatus = $state('');
@@ -53,6 +55,8 @@
         if (typeof v.preferredAuth === 'string') preferredAuth = v.preferredAuth;
         if (typeof v.reconnectOnDrop === 'boolean') reconnectOnDrop = v.reconnectOnDrop;
         if (typeof v.reconnectDelay === 'number') reconnectDelay = v.reconnectDelay;
+        if (typeof v.hostStatsEnabled === 'boolean') hostStatsEnabled = v.hostStatsEnabled;
+        if (typeof v.hostStatsIntervalSec === 'number') hostStatsIntervalSec = v.hostStatsIntervalSec;
       }
     } catch (e) { onError(`ssh load: ${(e as Error).message}`); }
   }
@@ -65,6 +69,7 @@
         knownHostsDir,
         keepaliveInterval, keepaliveCountMax, reuseSession, jumpHost,
         serverAliveInterval, preferredAuth, reconnectOnDrop, reconnectDelay,
+        hostStatsEnabled, hostStatsIntervalSec,
       },
     });
   }
@@ -231,6 +236,14 @@
   </label>
 
   <div class="section-h">UI</div>
+  <label class="row">
+    <span class="row-label">Show active host stats</span>
+    <input type="checkbox" bind:checked={hostStatsEnabled} onchange={markDirty} />
+  </label>
+  <label class="row">
+    <span class="row-label">Host stats interval (s)</span>
+    <input type="number" min="10" max="3600" bind:value={hostStatsIntervalSec} oninput={markDirty} disabled={!hostStatsEnabled} />
+  </label>
   <label class="row">
     <span class="row-label">Warn before closing active SSH tabs</span>
     <input type="checkbox" bind:checked={warnOnClose} onchange={markDirty} />

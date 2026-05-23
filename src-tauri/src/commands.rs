@@ -15,6 +15,7 @@
 //! | `session.pollOutput`    | `{ id, max_chunks? }`               | `[base64 chunk]`  |
 //! | `session.openSerial`    | `{ title?, profile }`               | `SessionMeta`     |
 //! | `serial.listPorts`      | none                                | `[string]`        |
+//! | `ssh.hostStats`         | `{ profile }`                       | `HostStats`       |
 //! | `sftp.open`             | `{ profile, sudo? }`                | `{ id }`          |
 //! | `sftp.close`            | `{ id }`                            | `null`            |
 //! | `sftp.list`             | `{ id, path }`                      | `[SftpEntry]`     |
@@ -563,6 +564,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
     register_secret(dispatcher, state.clone());
     register_profiles(dispatcher, state.clone());
     register_known_hosts(dispatcher, state.clone());
+    register_ssh_stats(dispatcher, state.clone());
     register_sftp(dispatcher, state.clone());
     register_settings(dispatcher, state.clone());
     register_vault(dispatcher, state.clone());
@@ -894,6 +896,29 @@ fn register_known_hosts(dispatcher: &Dispatcher, state: Arc<AppState>) {
             }
         });
     }
+}
+
+// --- ssh.hostStats -------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct HostStatsParams {
+    profile: SshProfile,
+}
+
+fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    let st = state.clone();
+    dispatcher.register("ssh.hostStats", move |params| {
+        let st = st.clone();
+        async move {
+            let p: HostStatsParams =
+                serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+            let kh = st.known_hosts.lock().await.clone();
+            let stats = ssh::stats::probe_host_stats(&p.profile, kh)
+                .await
+                .map_err(|e| internal(e.to_string()))?;
+            serde_json::to_value(stats).map_err(|e| internal(e.to_string()))
+        }
+    });
 }
 
 // --- sftp.* ---------------------------------------------------------------

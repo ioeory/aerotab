@@ -15,14 +15,20 @@
   import { applyCustomCss, applyLigatures } from './lib/customCss';
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
   import { settingsCoord } from './lib/settingsStore.svelte';
-  import type { SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
+  import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, X } from '@lucide/svelte';
 
   const rpc = selectClient();
-  const buildId = '0.1.16-ui-20260523';
+  const buildId = '0.1.17-ui-20260523';
   let status = $state('idle');
   let coreVersion = $state<string | null>(null);
+  let hostStats = $state<HostStats | null>(null);
+  let hostStatsStatus = $state<'idle' | 'loading' | 'ok' | 'unavailable'>('idle');
+  let hostStatsEnabled = $state(true);
+  let hostStatsIntervalSec = $state(30);
+  let hostStatsPollHandle: number | null = null;
+  let hostStatsSeq = 0;
 
   let profileModal: { open: (existing?: StoredProfile) => void } | null = $state(null);
   let serialModal: { open: () => Promise<void> } | null = $state(null);
@@ -155,6 +161,7 @@
         applyWindowSettings(value);
       }
     } catch { /* not configured yet */ }
+    await loadHostStatsSettings();
     // Startup behaviour: restore previously-open tabs (M9) and/or auto-open
     // a fresh local terminal. Both default to ON when not configured so a
     // fresh install gives the user a working terminal on launch and remembers
@@ -188,6 +195,105 @@
 
   function onError(msg: string) {
     status = msg;
+  }
+
+  async function loadHostStatsSettings() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'ssh' });
+      if (r.value && typeof r.value === 'object') {
+        const v = r.value as Record<string, unknown>;
+        hostStatsEnabled = typeof v.hostStatsEnabled === 'boolean' ? v.hostStatsEnabled : true;
+        if (typeof v.hostStatsIntervalSec === 'number') {
+          hostStatsIntervalSec = Math.max(10, Math.min(3600, v.hostStatsIntervalSec));
+        }
+      }
+    } catch {
+      hostStatsEnabled = true;
+      hostStatsIntervalSec = 30;
+    }
+  }
+
+  function currentActivePane(): SessionMeta | undefined {
+    const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
+    return tab ? tabs.activePane(tab) : undefined;
+  }
+
+  function activeHostStatsKey(): string | null {
+    const pane = currentActivePane();
+    if (!pane) return null;
+    if (pane.sshProfile) return `ssh:${pane.sshProfile.user}@${pane.sshProfile.host}:${pane.sshProfile.port}`;
+    if (pane.profileId) return `profile:${pane.profileId}`;
+    return null;
+  }
+
+  async function resolveHostStatsTarget(): Promise<SshProfileSpec | null> {
+    const pane = currentActivePane();
+    if (!pane) return null;
+    if (pane.sshProfile) return pane.sshProfile;
+    if (pane.profileId) {
+      const profile = await rpc.call<StoredProfile>('profile.get', { id: pane.profileId });
+      return profile.ssh;
+    }
+    return null;
+  }
+
+  function clearHostStatsPoll() {
+    if (hostStatsPollHandle != null) {
+      window.clearInterval(hostStatsPollHandle);
+      hostStatsPollHandle = null;
+    }
+  }
+
+  async function refreshHostStats() {
+    const seq = ++hostStatsSeq;
+    if (!hostStatsEnabled) return;
+    try {
+      const profile = await resolveHostStatsTarget();
+      if (seq !== hostStatsSeq) return;
+      if (!profile) {
+        hostStats = null;
+        hostStatsStatus = 'idle';
+        return;
+      }
+      if (!hostStats) hostStatsStatus = 'loading';
+      const stats = await rpc.call<HostStats>('ssh.hostStats', { profile });
+      if (seq !== hostStatsSeq) return;
+      hostStats = stats;
+      hostStatsStatus = 'ok';
+    } catch {
+      if (seq !== hostStatsSeq) return;
+      hostStats = null;
+      hostStatsStatus = 'unavailable';
+    }
+  }
+
+  function formatPercent(value: number | null | undefined): string {
+    return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(0)}%` : '—';
+  }
+
+  function formatUptime(seconds: number | null | undefined): string {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '—';
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+  }
+
+  function formatHostStats(stats: HostStats): string {
+    const parts: string[] = [];
+    if (typeof stats.cpu_percent === 'number') parts.push(`CPU ${formatPercent(stats.cpu_percent)}`);
+    if (typeof stats.mem_percent === 'number') parts.push(`Mem ${formatPercent(stats.mem_percent)}`);
+    if (typeof stats.disk_percent === 'number') parts.push(`Disk ${formatPercent(stats.disk_percent)}`);
+    if (typeof stats.uptime_seconds === 'number') parts.push(`Up ${formatUptime(stats.uptime_seconds)}`);
+    return parts.join(' · ') || stats.hostname || 'stats';
+  }
+
+  function hostStatsTitle(stats: HostStats): string {
+    const bits = [stats.hostname, stats.kernel, typeof stats.load1 === 'number' ? `load ${stats.load1.toFixed(2)}` : null]
+      .filter(Boolean);
+    return bits.join(' · ') || 'Host stats';
   }
 
   async function openLocal(): Promise<string | null> {
@@ -382,6 +488,11 @@
     if (typeof next === 'boolean') sidebarVisible = next;
   }
 
+  function onAppSettingsChanged() {
+    syncSidebarFromWindowSettings();
+    void loadHostStatsSettings();
+  }
+
   async function connectProfile(p: StoredProfile) {
     try {
       const meta = await rpc.call<{ id: string; kind: string; title: string }>(
@@ -557,11 +668,12 @@
 
     kbdHandler = (e: KeyboardEvent) => { hotkeys.dispatch(e); };
     window.addEventListener('keydown', kbdHandler);
-    document.addEventListener('tabby:settings-changed', syncSidebarFromWindowSettings);
+    document.addEventListener('tabby:settings-changed', onAppSettingsChanged);
   });
   onDestroy(() => {
     if (kbdHandler) window.removeEventListener('keydown', kbdHandler);
-    document.removeEventListener('tabby:settings-changed', syncSidebarFromWindowSettings);
+    document.removeEventListener('tabby:settings-changed', onAppSettingsChanged);
+    clearHostStatsPoll();
   });
 
   async function refreshProfileList() {
@@ -586,6 +698,27 @@
   // an effect reacting to it.
   $effect(() => {
     settingsRev = settingsCoord.rev;
+  });
+
+  $effect(() => {
+    void tabs.revision;
+    void tabs.activeId;
+    void hostStatsEnabled;
+    void hostStatsIntervalSec;
+    const key = activeHostStatsKey();
+    hostStatsSeq += 1;
+    clearHostStatsPoll();
+    hostStats = null;
+    if (!hostStatsEnabled || !key) {
+      hostStatsStatus = 'idle';
+      return;
+    }
+    hostStatsStatus = 'loading';
+    void refreshHostStats();
+    hostStatsPollHandle = window.setInterval(() => {
+      void refreshHostStats();
+    }, Math.max(10, hostStatsIntervalSec) * 1000);
+    return () => clearHostStatsPoll();
   });
 </script>
 
@@ -678,6 +811,15 @@
         {#if sidebarVisible}<PanelLeftClose size={13} />{:else}<PanelLeftOpen size={13} />{/if}
       </button>
       <span>{status}</span>
+      {#if hostStatsEnabled && hostStatsStatus === 'ok' && hostStats}
+        <span class="hidden lg:inline-flex truncate max-w-[520px]" title={hostStatsTitle(hostStats)}>
+          {formatHostStats(hostStats)}
+        </span>
+      {:else if hostStatsEnabled && hostStatsStatus === 'loading'}
+        <span class="hidden lg:inline text-[var(--color-fg-muted)]">stats…</span>
+      {:else if hostStatsEnabled && hostStatsStatus === 'unavailable'}
+        <span class="hidden lg:inline text-[var(--color-fg-muted)]" title="Host stats unavailable">stats unavailable</span>
+      {/if}
       <span class="ml-auto">{tabs.tabs.length} session{tabs.tabs.length === 1 ? '' : 's'}</span>
       {#if coreVersion}<span>v{coreVersion}</span>{/if}
       <span>{buildId}</span>
