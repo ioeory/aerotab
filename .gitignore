@@ -1,0 +1,36 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.cache/
+.parcel-cache/
+.vite/
+.turbo/
+
+# Tauri build outputs
+src-tauri/target/
+src-tauri/gen/
+.tauri/dev-updater.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.keystore
+
+# Logs
+*.log
+logs/

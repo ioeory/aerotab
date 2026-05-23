@@ -1,0 +1,71 @@
+[package]
+name = "tabby-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+default-run = "tabby-app"
+
+[lib]
+name = "tabby_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tabby"
+path = "src/main.rs"
+
+[[bin]]
+name = "tabby-app"
+path = "src/bin/tabby-app.rs"
+required-features = ["desktop"]
+
+[dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+
+reqwest = { workspace = true }
+russh = { workspace = true }
+russh-keys = { workspace = true }
+russh-sftp = { workspace = true }
+portable-pty = { workspace = true }
+serialport = { workspace = true }
+sled = { workspace = true }
+git2 = { workspace = true }
+keyring = { workspace = true }
+
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = { workspace = true }
+wasmi = { workspace = true }
+
+tauri = { version = "2", optional = true , features = ["tray-icon"] }
+tauri-plugin-updater = { version = "2", optional = true }
+rfd = { version = "0.15", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true , features = [] }
+
+[dev-dependencies]
+wat = "1"
+
+[features]
+default = ["desktop"]
+# Enables the Tauri 2 desktop runtime + the `tabby-app` binary.
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-updater", "dep:rfd"]
+# Feature flags for incremental wiring; toggled on as modules land.
+ssh = []
+serial = []
+sync = []
+plugins = []

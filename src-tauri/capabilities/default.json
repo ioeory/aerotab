@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability — exposes only the custom `rpc` command. No filesystem, shell, or other plugin APIs are granted; everything goes through the JSON-RPC dispatcher.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

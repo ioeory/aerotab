@@ -1,0 +1,143 @@
+<script lang="ts">
+  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen } from '@lucide/svelte';
+  import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
+  import { getWindowSettings } from '../lib/windowSettings';
+  import type { RpcClient } from '../lib/rpc';
+
+  interface Props {
+    rpc: RpcClient;
+    onAddTab?: () => void;
+    onSplit?: (direction: SplitDir) => void;
+    onOpenSftp?: () => void;
+  }
+  let { rpc, onAddTab, onSplit, onOpenSftp }: Props = $props();
+
+  let dragIdx: number | null = $state(null);
+
+  function iconFor(kind: string) {
+    if (kind === 'Ssh') return Server;
+    if (kind === 'Serial') return Usb;
+    return TerminalIcon;
+  }
+
+  async function close(tab: Tab, ev: Event) {
+    ev.stopPropagation();
+    const ws = getWindowSettings();
+    if (ws.confirmCloseWithMultipleTabs !== false && tab.panes.length > 1) {
+      if (!confirm(`Close tab with ${tab.panes.length} panes?`)) return;
+    }
+    const pane_ids = tab.panes.map((p) => p.id);
+    tabs.remove(tab.id);
+    for (const id of pane_ids) {
+      try { await rpc.call('session.close', { id }); } catch (e) { console.warn(e); }
+    }
+  }
+
+  function onTabHover(tab: Tab) {
+    // focus-follows-mouse: activating on hover when enabled in Window section.
+    if (getWindowSettings().focusFollowsMouse) tabs.activate(tab.id);
+  }
+
+  async function splitActive(direction: 'row' | 'col', ev: Event) {
+    ev.stopPropagation();
+    onSplit?.(direction);
+  }
+
+  function onDragStart(idx: number, ev: DragEvent) {
+    dragIdx = idx;
+    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+  }
+  function onDragOver(ev: DragEvent) {
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+  }
+  function onDrop(idx: number, ev: DragEvent) {
+    ev.preventDefault();
+    if (dragIdx != null) tabs.move(dragIdx, idx);
+    dragIdx = null;
+  }
+</script>
+
+<div class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
+  {#each tabs.tabs as tab, i (tab.id)}
+    {@const first = tabs.firstPane(tab)}
+    {@const Icon = iconFor(first ? first.kind : 'Local')}
+    {@const isActive = tabs.activeId === tab.id}
+    <div
+      role="tab"
+      aria-selected={isActive}
+      tabindex="0"
+      draggable="true"
+      ondragstart={(e) => onDragStart(i, e)}
+      ondragover={onDragOver}
+      ondrop={(e) => onDrop(i, e)}
+      onclick={() => tabs.activate(tab.id)}
+      onpointerenter={() => onTabHover(tab)}
+      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') tabs.activate(tab.id); }}
+      class="group flex items-center gap-2 px-3 py-1.5 rounded-t-md cursor-pointer text-[12.5px] border-t border-l border-r transition-colors
+             {isActive
+               ? 'bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-fg)]'
+               : 'bg-[var(--color-panel)] border-transparent text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]'}"
+    >
+      <Icon size={13} class={isActive ? 'text-[var(--color-accent)]' : ''} />
+      <span class="truncate max-w-[180px]">{tab.title}</span>
+      {#if tab.panes.length > 1}
+        <span class="text-[10px] px-1 rounded bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]">
+          {tab.panes.length}
+        </span>
+      {/if}
+      {#if !isActive}
+        {@const act = tabs.tabActivity(tab)}
+        {#if act === 'bell'}
+          <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-danger)] animate-pulse" title="Bell"></span>
+        {:else if act === 'output'}
+          <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" title="New output"></span>
+        {/if}
+      {/if}
+      <button
+        type="button"
+        title="Close tab"
+        aria-label="Close tab"
+        class="opacity-50 group-hover:opacity-100 hover:text-[var(--color-danger)] -mr-1 p-0.5"
+        onclick={(e) => close(tab, e)}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  {/each}
+  {#if tabs.tabs.length === 0}
+    <div class="text-[var(--color-fg-muted)] px-3 py-1.5 text-[12px] italic">
+      No open sessions — start one from the sidebar.
+    </div>
+    <div class="ml-auto flex items-center gap-1 pr-1">
+      <button type="button" title="New tab…" aria-label="New tab"
+              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+              onclick={() => onAddTab?.()}>
+        <Plus size={14} />
+      </button>
+    </div>
+  {:else}
+    <div class="ml-auto flex items-center gap-1 pr-1">
+      <button type="button" title="New tab…" aria-label="New tab"
+              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+              onclick={() => onAddTab?.()}>
+        <Plus size={14} />
+      </button>
+      <button type="button" title="Split right" aria-label="Split right"
+              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+              onclick={(e) => splitActive('row', e)}>
+        <Columns2 size={14} />
+      </button>
+      <button type="button" title="Split down" aria-label="Split down"
+              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+              onclick={(e) => splitActive('col', e)}>
+        <Rows2 size={14} />
+      </button>
+      <button type="button" title="Open SFTP for current SSH pane" aria-label="Open SFTP for current SSH pane"
+              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+              onclick={() => onOpenSftp?.()}>
+        <FolderOpen size={14} />
+      </button>
+    </div>
+  {/if}
+</div>

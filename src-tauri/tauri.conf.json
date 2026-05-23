@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tabby v2",
+  "version": "0.1.16",
+  "identifier": "org.tabby.v2",
+  "build": {
+    "beforeDevCommand": "cd apps/ui && npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../apps/ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Tabby v2 0.1.16",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 400,
+        "transparent": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "nsis", "msi"],
+    "category": "DeveloperTool",
+    "shortDescription": "A terminal for the modern age.",
+    "longDescription": "Tabby v2 — a Rust + Tauri rewrite of the Tabby terminal.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDczQ0VEOTE3NEREREZGN0UKUldSKy85MU5GOW5PYzJXNG5qKy8yVHlxMndFWktRd3FjaWlDanljWFI0ckZvaHRRR05FTjErQVoK",
+      "endpoints": [
+        "https://example.invalid/tabby/{{target}}/{{current_version}}"
+      ]
+    }
+  }
+}

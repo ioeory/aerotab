@@ -1,0 +1,657 @@
+<script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
+  import { Terminal } from '@xterm/xterm';
+  import { FitAddon } from '@xterm/addon-fit';
+  import { WebLinksAddon } from '@xterm/addon-web-links';
+  import { SearchAddon } from '@xterm/addon-search';
+  import { X, ChevronUp, ChevronDown, CaseSensitive, Regex } from '@lucide/svelte';
+  import type { RpcClient } from '../lib/rpc';
+  import { b64decode, b64encode } from '../lib/rpc';
+  import type { SessionMeta } from '../lib/types';
+  import { BUILTIN_THEMES, TOKYO_NIGHT, xtermPalette } from '../lib/theme';
+  import { colorSchemeByName, toXtermTheme } from '../lib/colorSchemes';
+  import { applyLigatures } from '../lib/customCss';
+  import { tabs } from '../lib/tabs.svelte';
+
+  interface Props {
+    rpc: RpcClient;
+    session: SessionMeta;
+    active: boolean;
+    /** Bumped by parent whenever persisted settings change. */
+    settingsRev?: number;
+    /** Invoked when the user clicks the pane's close button from inside (e.g. exited overlay). */
+    onClosePane?: () => void;
+  }
+  let { rpc, session, active, settingsRev = 0, onClosePane }: Props = $props();
+
+  let host: HTMLDivElement | null = null;
+  let term: Terminal | null = null;
+  let fit: FitAddon | null = null;
+  let search: SearchAddon | null = null;
+  let rendererAddon: { dispose: () => void } | null = null;
+  let activeRenderer: 'dom' | 'canvas' | 'webgl' = 'dom';
+  let pollHandle: number | null = null;
+  const decoder = new TextDecoder('utf-8');
+
+  // Search overlay state.
+  let searchOpen = $state(false);
+  let searchQuery = $state('');
+  let searchCase = $state(false);
+  let searchRegex = $state(false);
+
+  // Context menu state.
+  let menuOpen = $state(false);
+  let menuX = $state(0);
+  let menuY = $state(0);
+
+  // Behavior toggles loaded from settings.
+  let copyOnSelect = false;
+  let rmbPaste = false;
+  let rightClickAction: 'menu' | 'paste' | 'select-word' = 'menu';
+  let middleClickPaste = false;
+  // Terminal-section behaviour toggles (M3).
+  let bellMode: 'off' | 'visual' | 'audible' = 'off';
+  let linkModifier: 'none' | 'ctrl' | 'alt' | 'meta' = 'none';
+  let copyWithFormatting = false;
+  let bracketedPaste = true;
+  let pasteMultilineWarn = true;
+  let pasteFlattenNewlines = false;
+  let pasteTrimWhitespace = false;
+  let bellFlashHandle: number | null = null;
+
+  // Liveness state. Flips to true when backend reports session ended.
+  let exited = $state(false);
+
+  interface PollResult { chunks: string[]; alive: boolean }
+
+  function markExited() {
+    if (exited) return;
+    exited = true;
+    term?.write('\r\n\x1b[31m[session ended]\x1b[0m The process exited or the connection was closed.\r\n');
+    tabs.markActivity(session.id, 'bell');
+  }
+
+  function startPolling() {
+    if (pollHandle != null) return;
+    pollHandle = window.setInterval(async () => {
+      if (!term) return;
+      try {
+        const r = await rpc.call<PollResult>('session.poll', {
+          id: session.id,
+          max_chunks: 64,
+        });
+        for (const c of r.chunks) term.write(decoder.decode(b64decode(c)));
+        if (r.chunks.length > 0 && !active) tabs.markActivity(session.id, 'output');
+        if (!r.alive && !exited) {
+          markExited();
+          stopPolling();
+        }
+      } catch (e) {
+        // The session vanished from the backend — treat as exited.
+        const msg = (e as Error).message ?? String(e);
+        if (msg.toLowerCase().includes('not found')) {
+          if (!exited) { markExited(); stopPolling(); }
+        } else {
+          console.warn('poll', session.id, e);
+        }
+      }
+    }, 30);
+  }
+  function stopPolling() {
+    if (pollHandle != null) {
+      window.clearInterval(pollHandle);
+      pollHandle = null;
+    }
+  }
+
+  // If the user selected a terminal color scheme (M4), use it as the final
+  // xterm palette; otherwise fall back to the appearance theme.
+  function isTranslucent(): boolean {
+    return typeof document !== 'undefined' && document.body.dataset.translucent === 'true';
+  }
+
+  function paletteFromCfg(cfg: { theme: typeof TOKYO_NIGHT; colorSchemeName: string }) {
+    const cs = colorSchemeByName(cfg.colorSchemeName);
+    const theme = cs ? toXtermTheme(cs) : xtermPalette(cfg.theme);
+    if (isTranslucent()) {
+      return { ...theme, background: 'transparent' };
+    }
+    return theme;
+  }
+
+  async function loadTermSettings() {
+    const out = {
+      fontFamily: 'JetBrains Mono, Menlo, monospace',
+      fontSize: 13,
+      scrollback: 2000,
+      cursorBlink: true,
+      theme: TOKYO_NIGHT,
+      // appearance group
+      ligatures: false,
+      fontWeight: 400 as number,
+      fontWeightBold: 700 as number,
+      fallbackFont: '',
+      cursorStyle: 'block' as 'block' | 'bar' | 'underline',
+      minContrastRatio: 1,
+      linePadding: 0,
+      // terminal group (M3)
+      renderer: 'canvas' as 'dom' | 'canvas' | 'webgl',
+      altIsMeta: false,
+      scrollOnInput: true,
+      wordSeparator: ' ()[]{}\'",;:',
+      // M4 — palette override
+      colorSchemeName: '' as string,
+    };
+    try {
+      const f = await rpc.call<{ value: unknown }>('settings.get', { key: 'font' });
+      if (f.value && typeof f.value === 'object') {
+        const v = f.value as Record<string, unknown>;
+        if (typeof v.family === 'string') out.fontFamily = v.family;
+        if (typeof v.size === 'number') out.fontSize = v.size;
+      }
+      const t = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminal' });
+      if (t.value && typeof t.value === 'object') {
+        const v = t.value as Record<string, unknown>;
+        if (typeof v.scrollback === 'number') out.scrollback = v.scrollback;
+        if (typeof v.cursorBlink === 'boolean') out.cursorBlink = v.cursorBlink;
+        if (v.renderer === 'dom' || v.renderer === 'canvas' || v.renderer === 'webgl') out.renderer = v.renderer;
+        if (typeof v.altIsMeta === 'boolean') out.altIsMeta = v.altIsMeta;
+        if (typeof v.scrollOnInput === 'boolean') out.scrollOnInput = v.scrollOnInput;
+        if (typeof v.wordSeparator === 'string') out.wordSeparator = v.wordSeparator;
+        if (v.bell === 'off' || v.bell === 'visual' || v.bell === 'audible') bellMode = v.bell;
+        if (v.linkModifier === 'none' || v.linkModifier === 'ctrl'
+            || v.linkModifier === 'alt' || v.linkModifier === 'meta') linkModifier = v.linkModifier;
+        if (typeof v.copyWithFormatting === 'boolean') copyWithFormatting = v.copyWithFormatting;
+        if (typeof v.bracketedPaste === 'boolean') bracketedPaste = v.bracketedPaste;
+        if (typeof v.pasteMultilineWarn === 'boolean') pasteMultilineWarn = v.pasteMultilineWarn;
+        if (typeof v.pasteFlattenNewlines === 'boolean') pasteFlattenNewlines = v.pasteFlattenNewlines;
+        if (typeof v.pasteTrimWhitespace === 'boolean') pasteTrimWhitespace = v.pasteTrimWhitespace;
+      }
+      const th = await rpc.call<{ value: unknown }>('settings.get', { key: 'theme' });
+      if (typeof th.value === 'string') {
+        const found = BUILTIN_THEMES.find((x) => x.name === th.value);
+        if (found) out.theme = found;
+      }
+      const cs = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminalColorScheme' });
+      if (typeof cs.value === 'string') out.colorSchemeName = cs.value;
+      const beh = await rpc.call<{ value: unknown }>('settings.get', { key: 'behavior' });
+      if (beh.value && typeof beh.value === 'object') {
+        const v = beh.value as Record<string, unknown>;
+        if (typeof v.copyOnSelect === 'boolean') copyOnSelect = v.copyOnSelect;
+        if (v.rightClickAction === 'menu' || v.rightClickAction === 'paste'
+            || v.rightClickAction === 'select-word') {
+          rightClickAction = v.rightClickAction;
+          rmbPaste = rightClickAction === 'paste';
+        } else if (typeof v.rmbPaste === 'boolean') {
+          rmbPaste = v.rmbPaste;
+          rightClickAction = v.rmbPaste ? 'paste' : 'menu';
+        }
+        if (typeof v.middleClickPaste === 'boolean') middleClickPaste = v.middleClickPaste;
+      }
+      const ap = await rpc.call<{ value: unknown }>('settings.get', { key: 'appearance' });
+      if (ap.value && typeof ap.value === 'object') {
+        const v = ap.value as Record<string, unknown>;
+        if (typeof v.ligatures === 'boolean') out.ligatures = v.ligatures;
+        if (typeof v.fontWeight === 'number') out.fontWeight = v.fontWeight;
+        if (typeof v.fontWeightBold === 'number') out.fontWeightBold = v.fontWeightBold;
+        if (typeof v.fallbackFont === 'string') out.fallbackFont = v.fallbackFont;
+        if (v.cursorStyle === 'block' || v.cursorStyle === 'bar' || v.cursorStyle === 'underline') {
+          out.cursorStyle = v.cursorStyle;
+        }
+        if (typeof v.minContrastRatio === 'number') out.minContrastRatio = v.minContrastRatio;
+        if (typeof v.linePadding === 'number') out.linePadding = v.linePadding;
+      }
+    } catch {
+      /* settings store may be unconfigured — fall back to defaults. */
+    }
+    // Compose final family string with fallback appended.
+    if (out.fallbackFont && !out.fontFamily.includes(out.fallbackFont)) {
+      out.fontFamily = `${out.fontFamily}, ${out.fallbackFont}`;
+    }
+    // Canvas/WebGL renderers clear the glyph surface with an opaque xterm
+    // background. In translucent windows that creates a black terminal slab
+    // even when the app chrome is transparent. DOM renderer keeps cell
+    // backgrounds in CSS/DOM and can honor a transparent theme background.
+    if (isTranslucent()) out.renderer = 'dom';
+    return out;
+  }
+
+  async function applyRenderer(renderer: 'dom' | 'canvas' | 'webgl') {
+    if (!term) return;
+    const target = isTranslucent() ? 'dom' : renderer;
+    if (target === activeRenderer) return;
+    try { rendererAddon?.dispose(); } catch { /* ignore renderer teardown */ }
+    rendererAddon = null;
+    activeRenderer = 'dom';
+    if (target === 'dom') return;
+
+    const loadCanvas = async () => {
+      if (!term || isTranslucent()) return;
+      try {
+        const { CanvasAddon } = await import('@xterm/addon-canvas');
+        const addon = new CanvasAddon();
+        term.loadAddon(addon);
+        rendererAddon = addon;
+        activeRenderer = 'canvas';
+      } catch (err) {
+        console.warn('canvas renderer failed; using DOM renderer:', err);
+      }
+    };
+
+    if (target === 'canvas') {
+      await loadCanvas();
+      return;
+    }
+
+    try {
+      const { WebglAddon } = await import('@xterm/addon-webgl');
+      const addon = new WebglAddon();
+      addon.onContextLoss(() => {
+        console.warn('WebGL context lost — falling back to canvas renderer');
+        try { addon.dispose(); } catch { /* ignore */ }
+        if (rendererAddon === addon) rendererAddon = null;
+        activeRenderer = 'dom';
+        void loadCanvas();
+      });
+      term.loadAddon(addon);
+      rendererAddon = addon;
+      activeRenderer = 'webgl';
+    } catch (err) {
+      console.warn('webgl renderer failed; falling back to canvas:', err);
+      await loadCanvas();
+    }
+  }
+
+  onMount(async () => {
+    if (!host) return;
+    const cfg = await loadTermSettings();
+    term = new Terminal({
+      fontFamily: cfg.fontFamily,
+      fontSize: cfg.fontSize,
+      fontWeight: cfg.fontWeight,
+      fontWeightBold: cfg.fontWeightBold,
+      theme: paletteFromCfg(cfg),
+      cursorBlink: cfg.cursorBlink,
+      cursorStyle: cfg.cursorStyle,
+      scrollback: cfg.scrollback,
+      lineHeight: 1 + cfg.linePadding / Math.max(cfg.fontSize, 1),
+      minimumContrastRatio: cfg.minContrastRatio,
+      macOptionIsMeta: cfg.altIsMeta,
+      scrollOnUserInput: cfg.scrollOnInput,
+      wordSeparator: cfg.wordSeparator,
+      allowProposedApi: true,
+      allowTransparency: isTranslucent(),
+    });
+    applyLigatures(cfg.ligatures);
+    fit = new FitAddon();
+    search = new SearchAddon();
+    term.loadAddon(fit);
+    term.loadAddon(search);
+    // Link modifier: if a modifier is required, intercept and only follow
+    // when the matching key is held; otherwise default web-links behaviour.
+    const linkHandler = linkModifier === 'none'
+      ? undefined
+      : (ev: MouseEvent, uri: string) => {
+          const ok = (linkModifier === 'ctrl' && ev.ctrlKey)
+            || (linkModifier === 'alt' && ev.altKey)
+            || (linkModifier === 'meta' && ev.metaKey);
+          if (ok) window.open(uri, '_blank', 'noopener,noreferrer');
+        };
+    term.loadAddon(new WebLinksAddon(linkHandler));
+    term.open(host);
+    await applyRenderer(cfg.renderer);
+    requestAnimationFrame(() => fit?.fit());
+
+    // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true;
+      if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === 'f' || ev.key === 'F')) {
+        openSearch();
+        return false;
+      }
+      return true;
+    });
+
+    // App-level Ctrl+F also routes here when this pane is active.
+    const searchListener = () => { if (active) openSearch(); };
+    document.addEventListener('tabby:search', searchListener);
+    // Settings-changed fallback (in addition to the settingsRev prop) — fires
+    // when any settings section calls settingsCoord.bumpRev(). Forces a
+    // palette/font reload directly so live-apply works even if the prop
+    // chain is somehow stale.
+    const settingsListener = () => { void reloadSettingsLive(); };
+    document.addEventListener('tabby:settings-changed', settingsListener);
+    cleanupSearchListener = () => {
+      document.removeEventListener('tabby:search', searchListener);
+      document.removeEventListener('tabby:settings-changed', settingsListener);
+    };
+
+    term.onData((data) => {
+      void rpc.call('session.write', {
+        id: session.id,
+        data: b64encode(new TextEncoder().encode(data)),
+      });
+    });
+    term.onResize(({ cols, rows }) => {
+      void rpc.call('session.resize', { id: session.id, cols, rows });
+    });
+    term.onSelectionChange(() => {
+      if (!copyOnSelect || !term) return;
+      const sel = term.getSelection();
+      if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+    });
+    term.onBell(() => {
+      tabs.markActivity(session.id, 'bell');
+      triggerBell();
+    });
+
+    const ro = new ResizeObserver(() => fit?.fit());
+    if (host) ro.observe(host);
+
+    startPolling();
+
+    cleanupHost = () => ro.disconnect();
+  });
+
+  let cleanupHost: (() => void) | null = null;
+  let cleanupSearchListener: (() => void) | null = null;
+
+  // Pause polling when tab not visible, resume when active.
+  $effect(() => {
+    if (active) {
+      startPolling();
+      tabs.clearActivity(session.id);
+      requestAnimationFrame(() => {
+        fit?.fit();
+        term?.focus();
+      });
+    } else {
+      // keep polling running to drain buffers; xterm will not render hidden.
+    }
+  });
+
+  // Live-apply settings changes (font / theme / scrollback) without re-mounting
+  // the terminal. xterm's options object accepts partial updates.
+  async function reloadSettingsLive() {
+    if (!term) return;
+    const cfg = await loadTermSettings();
+    if (!term) return;
+    term.options.fontFamily = cfg.fontFamily;
+    term.options.fontSize = cfg.fontSize;
+    term.options.fontWeight = cfg.fontWeight;
+    term.options.fontWeightBold = cfg.fontWeightBold;
+    term.options.theme = paletteFromCfg(cfg);
+    term.options.cursorBlink = cfg.cursorBlink;
+    term.options.cursorStyle = cfg.cursorStyle;
+    term.options.scrollback = cfg.scrollback;
+    term.options.lineHeight = 1 + cfg.linePadding / Math.max(cfg.fontSize, 1);
+    term.options.minimumContrastRatio = cfg.minContrastRatio;
+    term.options.macOptionIsMeta = cfg.altIsMeta;
+    term.options.scrollOnUserInput = cfg.scrollOnInput;
+    term.options.wordSeparator = cfg.wordSeparator;
+    term.options.allowTransparency = isTranslucent();
+    await applyRenderer(cfg.renderer);
+    applyLigatures(cfg.ligatures);
+    // Force a full redraw so canvas/webgl renderers invalidate their glyph
+    // atlas and pick up the new palette / font metrics. xterm only repaints
+    // changed cells otherwise, which leaves stale colors on screen.
+    try { term.refresh(0, term.rows - 1); } catch { /* renderer not ready */ }
+    requestAnimationFrame(() => fit?.fit());
+  }
+
+  $effect(() => {
+    // touch settingsRev so this effect re-runs when the parent bumps it.
+    void settingsRev;
+    if (!term) return;
+    void reloadSettingsLive();
+  });
+
+  onDestroy(() => {
+    cleanupHost?.();
+    cleanupHost = null;
+    cleanupSearchListener?.();
+    cleanupSearchListener = null;
+    stopPolling();
+    search?.dispose();
+    search = null;
+    term?.dispose();
+    term = null;
+  });
+
+  // --- search ---
+  export function openSearch() {
+    searchOpen = true;
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`search-input-${session.id}`);
+      (el as HTMLInputElement | null)?.focus();
+    });
+  }
+  function runSearch(direction: 'next' | 'prev') {
+    if (!search || !searchQuery) return;
+    const opts = { caseSensitive: searchCase, regex: searchRegex };
+    if (direction === 'next') search.findNext(searchQuery, opts);
+    else search.findPrevious(searchQuery, opts);
+  }
+  function closeSearch() {
+    searchOpen = false;
+    search?.clearDecorations();
+    requestAnimationFrame(() => term?.focus());
+  }
+
+  // --- context menu ---
+  function onContextMenu(ev: MouseEvent) {
+    if (rightClickAction === 'paste') { void doPasteFromClipboard(); ev.preventDefault(); return; }
+    if (rightClickAction === 'select-word') {
+      // xterm doesn't expose select-word; trigger a synthetic double-click.
+      const cell = host?.querySelector('.xterm-rows');
+      cell?.dispatchEvent(new MouseEvent('dblclick', {
+        bubbles: true,
+        clientX: ev.clientX,
+        clientY: ev.clientY,
+      }));
+      ev.preventDefault();
+      return;
+    }
+    ev.preventDefault();
+    menuX = ev.clientX;
+    menuY = ev.clientY;
+    menuOpen = true;
+  }
+  async function doCopy() {
+    menuOpen = false;
+    const sel = term?.getSelection();
+    if (!sel) return;
+    if (copyWithFormatting && navigator.clipboard && 'write' in navigator.clipboard) {
+      try {
+        const html = `<pre style="font-family: ${term?.options.fontFamily ?? 'monospace'}">${escapeHtml(sel)}</pre>`;
+        const item = new ClipboardItem({
+          'text/plain': new Blob([sel], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type: 'text/html' }),
+        });
+        await navigator.clipboard.write([item]);
+        return;
+      } catch {
+        // fall through to plain text
+      }
+    }
+    await navigator.clipboard.writeText(sel).catch(() => {});
+  }
+  function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    } as Record<string, string>)[c]!);
+  }
+  async function doPasteFromClipboard() {
+    menuOpen = false;
+    const text = await navigator.clipboard.readText().catch(() => '');
+    if (!text) return;
+    await pasteText(text);
+  }
+  async function pasteText(raw: string) {
+    let text = raw;
+    if (pasteTrimWhitespace) text = text.replace(/[ \t]+$/gm, '');
+    if (pasteFlattenNewlines) text = text.replace(/\r?\n/g, ' ');
+    if (pasteMultilineWarn && text.includes('\n') && text.length > 200) {
+      if (!confirm(`Paste ${text.length} characters with newlines?`)) return;
+    }
+    if (bracketedPaste) {
+      term?.paste(text);
+    } else {
+      // Bypass bracketed-paste wrapping by writing through onData path.
+      void rpc.call('session.write', {
+        id: session.id,
+        data: b64encode(new TextEncoder().encode(text)),
+      });
+    }
+  }
+  async function doPaste() { await doPasteFromClipboard(); }
+  function triggerBell() {
+    if (bellMode === 'off' || !host) return;
+    if (bellMode === 'visual') {
+      host.classList.add('bell-flash');
+      if (bellFlashHandle != null) window.clearTimeout(bellFlashHandle);
+      bellFlashHandle = window.setTimeout(() => {
+        host?.classList.remove('bell-flash');
+        bellFlashHandle = null;
+      }, 180);
+    } else if (bellMode === 'audible') {
+      try {
+        const AC = (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext);
+        const ctx = new AC();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 880;
+        gain.gain.value = 0.05;
+        osc.connect(gain).connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.12);
+        osc.onended = () => ctx.close();
+      } catch { /* audio context may be unavailable */ }
+    }
+  }
+  function doClear() {
+    menuOpen = false;
+    term?.clear();
+  }
+  function doSearchAction() {
+    menuOpen = false;
+    openSearch();
+  }
+  function doSelectAll() {
+    menuOpen = false;
+    term?.selectAll();
+  }
+
+  async function onPointerUp(ev: PointerEvent) {
+    // Middle-click paste.
+    if (middleClickPaste && ev.button === 1) {
+      ev.preventDefault();
+      const text = await navigator.clipboard.readText().catch(() => '');
+      if (text) await pasteText(text);
+      return;
+    }
+    // Legacy right-click paste path (when rightClickAction='paste' the
+    // contextmenu handler already pastes; this is a no-op safeguard).
+    if (rmbPaste && ev.button === 2) {
+      ev.preventDefault();
+      const text = await navigator.clipboard.readText().catch(() => '');
+      if (text) await pasteText(text);
+    }
+  }
+</script>
+
+<div
+  bind:this={host}
+  role="application"
+  class="h-full w-full p-1 relative"
+  style="display: {active ? 'block' : 'none'};"
+  oncontextmenu={onContextMenu}
+  onpointerup={onPointerUp}
+></div>
+
+{#if exited && active}
+  <div class="absolute bottom-3 right-3 z-20 max-w-[min(320px,calc(100%-24px))] pointer-events-none">
+    <div class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
+                rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur">
+      <div class="min-w-0">
+        <div class="text-[var(--color-danger)] font-semibold leading-tight">Session ended</div>
+        <div class="text-[var(--color-fg-muted)] leading-tight truncate">History stays visible in the terminal.</div>
+      </div>
+      {#if onClosePane}
+        <button type="button" class="btn-secondary shrink-0 text-[12px] px-2 py-1" onclick={() => onClosePane?.()}>
+          Close
+        </button>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+{#if searchOpen}
+  <div class="absolute top-2 right-2 z-30 flex items-center gap-1 bg-[var(--color-panel)]/95
+              border border-[var(--color-border)] rounded shadow-lg backdrop-blur p-1"
+       style="display: {active ? 'flex' : 'none'};">
+    <input id="search-input-{session.id}"
+           type="search" placeholder="Search…" bind:value={searchQuery}
+           onkeydown={(e) => {
+             if (e.key === 'Enter') { runSearch(e.shiftKey ? 'prev' : 'next'); }
+             else if (e.key === 'Escape') { closeSearch(); }
+           }}
+           class="bg-[var(--color-bg)] text-[var(--color-fg)] text-[12px] px-2 py-1 rounded
+                  border border-[var(--color-border)] outline-none w-[200px]" />
+    <button type="button" title="Case sensitive"
+            class="p-1 rounded {searchCase ? 'text-[var(--color-accent)] bg-[var(--color-bg)]' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
+            onclick={() => (searchCase = !searchCase)}>
+      <CaseSensitive size={13} />
+    </button>
+    <button type="button" title="Regex"
+            class="p-1 rounded {searchRegex ? 'text-[var(--color-accent)] bg-[var(--color-bg)]' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
+            onclick={() => (searchRegex = !searchRegex)}>
+      <Regex size={13} />
+    </button>
+    <button type="button" title="Previous"
+            class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            onclick={() => runSearch('prev')}><ChevronUp size={13} /></button>
+    <button type="button" title="Next"
+            class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            onclick={() => runSearch('next')}><ChevronDown size={13} /></button>
+    <button type="button" title="Close" aria-label="Close search"
+            class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            onclick={closeSearch}><X size={12} /></button>
+  </div>
+{/if}
+
+{#if menuOpen && active}
+  <div role="presentation" class="fixed inset-0 z-40" onclick={() => (menuOpen = false)}
+       oncontextmenu={(e) => { e.preventDefault(); menuOpen = false; }}>
+    <div role="menu" tabindex="-1"
+         class="absolute min-w-[160px] bg-[var(--color-panel)] border border-[var(--color-border)]
+                rounded shadow-xl py-1 text-[12.5px] text-[var(--color-fg)]"
+         style="left:{menuX}px; top:{menuY}px;"
+          onkeydown={(e) => e.stopPropagation()}
+         onclick={(e) => e.stopPropagation()}>
+      <button type="button" class="menu-item" onclick={doCopy}>Copy</button>
+      <button type="button" class="menu-item" onclick={doPaste}>Paste</button>
+      <button type="button" class="menu-item" onclick={doSelectAll}>Select all</button>
+      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      <button type="button" class="menu-item" onclick={doSearchAction}>Search… (Ctrl+F)</button>
+      <button type="button" class="menu-item" onclick={doClear}>Clear screen</button>
+    </div>
+  </div>
+{/if}
+
+<style>
+  :global(.menu-item) {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 6px 12px;
+    background: transparent;
+    color: inherit;
+    border: none;
+    cursor: pointer;
+  }
+  :global(.menu-item:hover) {
+    background: var(--color-panel-2);
+  }
+</style>
