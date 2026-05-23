@@ -16,11 +16,35 @@ const HOST_STATS_COMMAND: &str = r#"LC_ALL=C; export LC_ALL;
 host=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo ""); [ -n "$host" ] && printf 'hostname=%s\n' "$host";
 kernel=$(uname -srmo 2>/dev/null || uname -a 2>/dev/null || echo ""); [ -n "$kernel" ] && printf 'kernel=%s\n' "$kernel";
 awk '{ printf "uptime_seconds=%d\n", $1 }' /proc/uptime 2>/dev/null;
+if [ ! -r /proc/uptime ]; then
+    boot_sec=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9][0-9]*\).*/\1/p');
+    now_sec=$(date +%s 2>/dev/null || echo "");
+    if [ -n "$boot_sec" ] && [ -n "$now_sec" ]; then awk -v boot="$boot_sec" -v now="$now_sec" 'BEGIN { if (now > boot) printf "uptime_seconds=%d\n", now - boot }'; fi;
+fi;
 awk '{ printf "load1=%.2f\n", $1 }' /proc/loadavg 2>/dev/null;
+if [ ! -r /proc/loadavg ]; then
+    sysctl -n vm.loadavg 2>/dev/null | awk '{ for (i=1; i<=NF; i++) { gsub(/[{}]/, "", $i); if ($i ~ /^[0-9.]+$/) { printf "load1=%.2f\n", $i; exit } } }';
+fi;
 read_cpu() { awk '/^cpu / { idle=$5+$6; total=0; for (i=2; i<=NF; i++) total += $i; printf "%s %s\n", idle, total; exit }' /proc/stat 2>/dev/null; }
 set -- $(read_cpu); idle1=$1; total1=$2; sleep 0.2; set -- $(read_cpu); idle2=$1; total2=$2;
 if [ -n "$total1" ] && [ -n "$total2" ]; then awk -v i1="$idle1" -v t1="$total1" -v i2="$idle2" -v t2="$total2" 'BEGIN { dt=t2-t1; di=i2-i1; if (dt > 0) printf "cpu_percent=%.1f\n", (1 - di / dt) * 100 }'; fi;
 awk '/^MemTotal:/ { t=$2 } /^MemAvailable:/ { a=$2 } END { if (t > 0) { used=t-a; printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_percent=%.1f\n", t, used, used * 100 / t } }' /proc/meminfo 2>/dev/null;
+if [ ! -r /proc/meminfo ]; then
+    page_size=$(pagesize 2>/dev/null || getconf PAGESIZE 2>/dev/null || echo "");
+    mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem 2>/dev/null || echo "");
+    if [ -n "$page_size" ] && [ -n "$mem_bytes" ]; then
+        vm_text=$(vm_stat 2>/dev/null || true);
+        vm_free=$(printf '%s\n' "$vm_text" | awk '/Pages free/ { gsub(/\./, "", $3); print $3; exit }');
+        vm_spec=$(printf '%s\n' "$vm_text" | awk '/Pages speculative/ { gsub(/\./, "", $3); print $3; exit }');
+        if [ -n "$vm_free" ]; then
+            awk -v total="$mem_bytes" -v page="$page_size" -v free="$vm_free" -v spec="${vm_spec:-0}" 'BEGIN { free_bytes=(free+spec)*page; used=total-free_bytes; if (total > 0 && used >= 0) printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_percent=%.1f\n", total/1024, used/1024, used*100/total }';
+        else
+            free_count=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || echo "");
+            inactive_count=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null || echo "0");
+            if [ -n "$free_count" ]; then awk -v total="$mem_bytes" -v page="$page_size" -v free="$free_count" -v inactive="${inactive_count:-0}" 'BEGIN { free_bytes=(free+inactive)*page; used=total-free_bytes; if (total > 0 && used >= 0) printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_percent=%.1f\n", total/1024, used/1024, used*100/total }'; fi;
+        fi;
+    fi;
+fi;
 df -Pk / 2>/dev/null | awk 'NR==2 { pct=$5; sub(/%$/, "", pct); printf "disk_total_kb=%s\ndisk_used_kb=%s\ndisk_percent=%s\n", $2, $3, pct }'
 "#;
 
@@ -167,5 +191,28 @@ mod tests {
         assert_eq!(stats.hostname, None);
         assert_eq!(stats.cpu_percent, None);
         assert_eq!(stats.mem_total_kb, None);
+    }
+
+    #[test]
+    fn parses_non_linux_fallback_output() {
+        let stats = parse_host_stats(
+            "hostname=mac-build-01\n\
+             kernel=Darwin 23.5.0 arm64\n\
+             uptime_seconds=6789\n\
+             load1=1.25\n\
+             mem_total_kb=16777216\n\
+             mem_used_kb=8388608\n\
+             mem_percent=50.0\n\
+             disk_total_kb=488000000\n\
+             disk_used_kb=244000000\n\
+             disk_percent=50\n",
+        );
+        assert_eq!(stats.hostname.as_deref(), Some("mac-build-01"));
+        assert_eq!(stats.kernel.as_deref(), Some("Darwin 23.5.0 arm64"));
+        assert_eq!(stats.uptime_seconds, Some(6789));
+        assert_eq!(stats.load1, Some(1.25));
+        assert_eq!(stats.mem_total_kb, Some(16_777_216));
+        assert_eq!(stats.mem_used_kb, Some(8_388_608));
+        assert_eq!(stats.disk_percent, Some(50.0));
     }
 }
