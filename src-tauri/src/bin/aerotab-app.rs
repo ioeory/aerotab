@@ -6,7 +6,10 @@
 //! tests, bench harness, and the live UI, going through the same code path.
 
 // Release Windows: GUI subsystem only (no extra console window with stderr logs).
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 use std::{
     io::SeekFrom,

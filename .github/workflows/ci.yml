@@ -109,7 +109,11 @@ jobs:
         if: matrix.rust_target != ''
         run: rustup target add ${{ matrix.rust_target }}
       - name: Install tauri-cli
-        run: command -v cargo-tauri >/dev/null || cargo install tauri-cli --locked
+        shell: bash
+        run: |
+          if ! command -v cargo-tauri >/dev/null 2>&1; then
+            cargo install tauri-cli --locked
+          fi
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
