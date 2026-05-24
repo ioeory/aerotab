@@ -1,6 +1,6 @@
 //! Legacy plugin compatibility bridge.
 //!
-//! v1 Tabby plugins run as Node child processes; we communicate over stdio
+//! v1 legacy plugins run as Node child processes; we communicate over stdio
 //! using the same JSON-RPC envelope as the frontend IPC, with a translation
 //! layer that maps v1 lifecycle hooks to v2 typed events.
 //!

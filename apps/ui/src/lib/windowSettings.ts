@@ -69,6 +69,6 @@ export function applyWindowSettings(v: Record<string, unknown>): void {
   }
   cached = { ...cached, ...out };
   if (typeof document !== 'undefined') {
-    document.dispatchEvent(new CustomEvent('tabby:settings-changed', { detail: 'window' }));
+    document.dispatchEvent(new CustomEvent('aerotab:settings-changed', { detail: 'window' }));
   }
 }

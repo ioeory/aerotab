@@ -1,7 +1,7 @@
 import type { LocalEntry } from './types';
 
-export const SFTP_DRAG_LOCAL = 'application/x-tabby-sftp-local';
-export const SFTP_DRAG_REMOTE = 'application/x-tabby-sftp-remote';
+export const SFTP_DRAG_LOCAL = 'application/x-aerotab-sftp-local';
+export const SFTP_DRAG_REMOTE = 'application/x-aerotab-sftp-remote';
 
 export interface LocalDragPayload {
   path: string;

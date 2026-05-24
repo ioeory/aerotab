@@ -217,7 +217,7 @@ process.stdin.on('data', (chunk) => {
 "#;
 
     fn write_plugin() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tabby-plugin-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("aerotab-plugin-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plugin.js");
         std::fs::write(&path, ECHO_PLUGIN_JS).unwrap();

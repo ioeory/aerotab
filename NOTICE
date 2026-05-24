@@ -1,0 +1,29 @@
+AeroTab — Third-Party Notices
+=============================
+
+This application bundles or depends on open-source software. The following
+is a non-exhaustive list of major components. See each package for full
+license text.
+
+Rust (workspace)
+----------------
+- Tauri 2 — Apache-2.0 OR MIT
+- tokio — MIT
+- russh / russh-keys / russh-sftp — Apache-2.0
+- serde / serde_json — MIT OR Apache-2.0
+- reqwest — MIT OR Apache-2.0
+- git2 (libgit2) — MIT OR Apache-2.0
+- sled — Apache-2.0
+- keyring — MIT OR Apache-2.0
+- portable-pty — MIT
+- serialport — MIT
+
+Frontend (apps/ui)
+------------------
+- Svelte 5 — MIT
+- Vite — MIT
+- @xterm/xterm — MIT
+- trzsz — MIT
+
+Run `cargo license` (cargo-install cargo-license) for a full Rust dependency
+report. Run `npm ls` in apps/ui for npm dependency trees.

@@ -1,7 +1,7 @@
 # Release & Code-Signing Playbook
 
 This document captures the exact commands used to produce signed installers
-for Tabby v2. It is meant for the project release engineer; nothing here
+for AeroTab. It is meant for the project release engineer; nothing here
 runs automatically during day-to-day development.
 
 ## 0. Versioning
@@ -17,20 +17,20 @@ regenerated for every tagged release — see §4.
 
 ## 1. Updater signing key
 
-Tabby v2 ships with a Minisign keypair embedded in `tauri.conf.json`
+AeroTab ships with a Minisign keypair embedded in `tauri.conf.json`
 (`plugins.updater.pubkey`). The matching **private** key is required to sign
 bundles so existing installs trust the update.
 
 ```bash
 # One-time, kept offline (e.g. hardware token / 1Password):
-cargo tauri signer generate -w ~/.secrets/tabby-updater.key
+cargo tauri signer generate -w ~/.secrets/aerotab-updater.key
 # Set a password when prompted; you'll need it for every release.
 ```
 
 For every release:
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.secrets/tabby-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.secrets/aerotab-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='...'   # or use `gpg --decrypt`
 ```
 
@@ -63,12 +63,12 @@ For an authentic Windows release you have two paths:
 ### 3a. Build + sign on a Windows host
 
 ```powershell
-$Env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .\.secrets\tabby-updater.key -Raw
+$Env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .\.secrets\aerotab-updater.key -Raw
 $Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '...'
 cargo tauri build --bundles nsis msi
 
 # Sign with the EV certificate stored on a hardware token (e.g. SafeNet):
-$installer = 'target\release\bundle\nsis\Tabby v2_*_x64-setup.exe'
+$installer = 'target\release\bundle\nsis\AeroTab_*_x64-setup.exe'
 signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
   /n "<EV Subject CN>" $installer
 signtool verify /pa /v $installer
@@ -102,12 +102,12 @@ format:
   "pub_date": "2025-05-22T02:30:00Z",
   "platforms": {
     "linux-x86_64": {
-      "signature": "<contents of Tabby v2_0.2.0_amd64.deb.sig>",
-      "url": "https://releases.tabby.app/v0.2.0/Tabby%20v2_0.2.0_amd64.deb"
+      "signature": "<contents of AeroTab_0.2.0_amd64.deb.sig>",
+      "url": "https://releases.aerotab.example/v0.2.0/Tabby%20v2_0.2.0_amd64.deb"
     },
     "windows-x86_64": {
-      "signature": "<contents of Tabby v2_0.2.0_x64-setup.exe.sig>",
-      "url": "https://releases.tabby.app/v0.2.0/Tabby%20v2_0.2.0_x64-setup.exe"
+      "signature": "<contents of AeroTab_0.2.0_x64-setup.exe.sig>",
+      "url": "https://releases.aerotab.example/v0.2.0/Tabby%20v2_0.2.0_x64-setup.exe"
     }
   }
 }
@@ -134,11 +134,11 @@ Apple's notarization path:
 cargo tauri build --bundles app dmg
 codesign --deep --force --options runtime --timestamp \
   --sign "Developer ID Application: <Name> (<TEAMID>)" \
-  "target/release/bundle/macos/Tabby v2.app"
+  "target/release/bundle/macos/AeroTab.app"
 xcrun notarytool submit \
-  "target/release/bundle/dmg/Tabby v2_0.2.0_x64.dmg" \
+  "target/release/bundle/dmg/AeroTab_0.2.0_x64.dmg" \
   --apple-id <id> --team-id <TEAMID> --keychain-profile tabby-notary --wait
-xcrun stapler staple "target/release/bundle/dmg/Tabby v2_0.2.0_x64.dmg"
+xcrun stapler staple "target/release/bundle/dmg/AeroTab_0.2.0_x64.dmg"
 ```
 
 ## 6. Release checklist

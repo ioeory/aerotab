@@ -1,4 +1,4 @@
-//! Tabby v2 host binary.
+//! AeroTab host binary.
 //!
 //! Until the Tauri shell lands (W2), this binary speaks the v1 JSON-RPC
 //! protocol over stdin/stdout — one frame per line. That makes the entire
@@ -10,9 +10,9 @@
 
 use std::sync::Arc;
 
-use tabby_core::commands::{register_all, AppState};
-use tabby_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
-use tabby_core::CORE_VERSION;
+use aerotab_core::commands::{register_all, AppState};
+use aerotab_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
+use aerotab_core::CORE_VERSION;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing_subscriber::EnvFilter;
 
@@ -29,16 +29,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         version = CORE_VERSION,
-        "tabby-core starting JSON-RPC server on stdio"
+        "aerotab-core starting JSON-RPC server on stdio"
     );
 
-    tabby_core::core::init().await?;
-    tabby_core::ipc::init().await?;
-    tabby_core::ssh::init().await?;
-    tabby_core::terminal::init().await?;
-    tabby_core::serial::init().await?;
-    tabby_core::sync::init().await?;
-    tabby_core::plugins::init().await?;
+    aerotab_core::core::init().await?;
+    aerotab_core::ipc::init().await?;
+    aerotab_core::ssh::init().await?;
+    aerotab_core::terminal::init().await?;
+    aerotab_core::serial::init().await?;
+    aerotab_core::sync::init().await?;
+    aerotab_core::plugins::init().await?;
 
     let dispatcher = Dispatcher::new();
     let state = AppState::new();

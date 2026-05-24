@@ -1,10 +1,10 @@
-//! Tabby v2 micro-benchmark harness.
+//! AeroTab micro-benchmark harness.
 //!
 //! Sub-commands:
 //!
-//! - `cold-start`   : spawns `tabby` N times, records time from process spawn
+//! - `cold-start`   : spawns `aerotab` N times, records time from process spawn
 //!   to first byte of the `core.version` response on stdout.
-//! - `rpc-loopback` : spawns `tabby` once, fires N `core.version` calls back
+//! - `rpc-loopback` : spawns `aerotab` once, fires N `core.version` calls back
 //!   to back, reports median + p95 latency.
 //! - `local-shell`  : opens N local-shell sessions sequentially, measures
 //!   `session.openLocal` latency.
@@ -21,11 +21,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 #[derive(Parser)]
-#[command(version, about = "Tabby v2 benchmark harness")]
+#[command(version, about = "AeroTab benchmark harness")]
 struct Cli {
-    /// Path to the tabby binary.
-    #[arg(long, default_value = "target/release/tabby")]
-    tabby: String,
+    /// Path to the aerotab binary.
+    #[arg(long, default_value = "target/release/aerotab")]
+    aerotab: String,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -77,18 +77,18 @@ fn stats(name: &'static str, mut samples: Vec<Duration>) -> Stats {
     }
 }
 
-async fn cold_start(tabby: &str, iters: usize) -> Result<Stats> {
+async fn cold_start(aerotab: &str, iters: usize) -> Result<Stats> {
     let mut samples = Vec::with_capacity(iters);
     for _ in 0..iters {
         let started = Instant::now();
-        let mut child = Command::new(tabby)
+        let mut child = Command::new(aerotab)
             .env("RUST_LOG", "off")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .context("spawn tabby")?;
+            .context("spawn aerotab")?;
         {
             let stdin = child.stdin.as_mut().unwrap();
             stdin
@@ -105,8 +105,8 @@ async fn cold_start(tabby: &str, iters: usize) -> Result<Stats> {
     Ok(stats("cold_start_first_response", samples))
 }
 
-async fn rpc_loopback(tabby: &str, iters: usize) -> Result<Stats> {
-    let mut child = Command::new(tabby)
+async fn rpc_loopback(aerotab: &str, iters: usize) -> Result<Stats> {
+    let mut child = Command::new(aerotab)
         .env("RUST_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -131,8 +131,8 @@ async fn rpc_loopback(tabby: &str, iters: usize) -> Result<Stats> {
     Ok(stats("rpc_loopback", samples))
 }
 
-async fn local_shell(tabby: &str, iters: usize) -> Result<Stats> {
-    let mut child = Command::new(tabby)
+async fn local_shell(aerotab: &str, iters: usize) -> Result<Stats> {
+    let mut child = Command::new(aerotab)
         .env("RUST_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -163,9 +163,9 @@ async fn local_shell(tabby: &str, iters: usize) -> Result<Stats> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let s = match cli.cmd {
-        Cmd::ColdStart { iterations } => cold_start(&cli.tabby, iterations).await?,
-        Cmd::RpcLoopback { iterations } => rpc_loopback(&cli.tabby, iterations).await?,
-        Cmd::LocalShell { iterations } => local_shell(&cli.tabby, iterations).await?,
+        Cmd::ColdStart { iterations } => cold_start(&cli.aerotab, iterations).await?,
+        Cmd::RpcLoopback { iterations } => rpc_loopback(&cli.aerotab, iterations).await?,
+        Cmd::LocalShell { iterations } => local_shell(&cli.aerotab, iterations).await?,
     };
     println!("{}", serde_json::to_string_pretty(&s)?);
     Ok(())

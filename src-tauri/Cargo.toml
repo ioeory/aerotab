@@ -1,22 +1,22 @@
 [package]
-name = "tabby-core"
+name = "aerotab-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-default-run = "tabby-app"
+default-run = "aerotab-app"
 
 [lib]
-name = "tabby_core"
+name = "aerotab_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "tabby"
+name = "aerotab"
 path = "src/main.rs"
 
 [[bin]]
-name = "tabby-app"
-path = "src/bin/tabby-app.rs"
+name = "aerotab-app"
+path = "src/bin/aerotab-app.rs"
 required-features = ["desktop"]
 
 [dependencies]
@@ -62,7 +62,7 @@ wat = "1"
 
 [features]
 default = ["desktop"]
-# Enables the Tauri 2 desktop runtime + the `tabby-app` binary.
+# Enables the Tauri 2 desktop runtime + the `aerotab-app` binary.
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-updater", "dep:rfd"]
 # Feature flags for incremental wiring; toggled on as modules land.
 ssh = []

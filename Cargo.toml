@@ -3,10 +3,10 @@ resolver = "2"
 members = ["src-tauri", "tools/bench"]
 
 [workspace.package]
-version = "0.1.33"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Eugeny/tabby"
+repository = "https://github.com/ioe/aerotab"
 rust-version = "1.77"
 
 [workspace.dependencies]

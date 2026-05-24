@@ -1,4 +1,4 @@
-# Tabby v2 Architecture
+# AeroTab Architecture
 
 ## High-level
 

@@ -13,7 +13,8 @@
 
 use keyring::Entry;
 
-const SERVICE: &str = "org.tabby.v2";
+const SERVICE: &str = "com.aerotab";
+const LEGACY_SERVICE: &str = "org.tabby.v2";
 const DEFAULT_ACCOUNT: &str = "sync.master";
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +38,21 @@ fn entry(account: &str) -> Result<Entry, SecretError> {
     Entry::new(SERVICE, account).map_err(SecretError::from)
 }
 
+fn legacy_entry(account: &str) -> Result<Entry, SecretError> {
+    Entry::new(LEGACY_SERVICE, account).map_err(SecretError::from)
+}
+
+fn get_password_with_legacy(
+    read: impl Fn(&Entry) -> Result<String, keyring::Error>,
+    account: &str,
+) -> Result<String, SecretError> {
+    match read(&entry(account)?) {
+        Ok(s) => Ok(s),
+        Err(keyring::Error::NoEntry) => read(&legacy_entry(account)?).map_err(SecretError::from),
+        Err(e) => Err(SecretError::from(e)),
+    }
+}
+
 /// Stores (or replaces) the master password for `account`.
 ///
 /// Passing an empty string is rejected so callers must call
@@ -52,9 +68,8 @@ pub fn set_master(account: Option<&str>, secret: &str) -> Result<(), SecretError
 
 /// Retrieves a previously stored master password.
 pub fn get_master(account: Option<&str>) -> Result<String, SecretError> {
-    entry(account.unwrap_or(DEFAULT_ACCOUNT))?
-        .get_password()
-        .map_err(SecretError::from)
+    let acct = account.unwrap_or(DEFAULT_ACCOUNT);
+    get_password_with_legacy(|e| e.get_password(), acct)
 }
 
 /// Returns true if a secret exists for `account`.
@@ -76,7 +91,7 @@ pub fn set_secret(account: &str, secret: &str) -> Result<(), SecretError> {
 }
 
 pub fn get_secret(account: &str) -> Result<String, SecretError> {
-    entry(account)?.get_password().map_err(SecretError::from)
+    get_password_with_legacy(|e| e.get_password(), account)
 }
 
 pub fn has_secret(account: &str) -> bool {
@@ -115,7 +130,7 @@ mod tests {
             eprintln!("skipping: no keyring backend");
             return;
         }
-        let err = set_master(Some("tabby-test-empty"), "").unwrap_err();
+        let err = set_master(Some("aerotab-test-empty"), "").unwrap_err();
         assert!(matches!(err, SecretError::Keyring(_)));
     }
 
@@ -125,7 +140,7 @@ mod tests {
             eprintln!("skipping: no keyring backend");
             return;
         }
-        let acct = format!("tabby-test-{}", uuid::Uuid::new_v4());
+        let acct = format!("aerotab-test-{}", uuid::Uuid::new_v4());
         // Guarantee a clean slate
         let _ = clear_master(Some(&acct));
 

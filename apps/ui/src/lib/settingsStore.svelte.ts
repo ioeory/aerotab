@@ -42,7 +42,7 @@ class SettingsCoordinator {
     // on cross-module $state tracking (e.g. components mounted outside this
     // module's reactive graph) still see the change.
     if (typeof document !== 'undefined') {
-      document.dispatchEvent(new CustomEvent('tabby:settings-changed', { detail: this.rev }));
+      document.dispatchEvent(new CustomEvent('aerotab:settings-changed', { detail: this.rev }));
     }
   }
 

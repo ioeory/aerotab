@@ -1,4 +1,4 @@
-// Built-in colour themes for the Tabby v2 UI. Themes drive a small set of
+// Built-in colour themes for the AeroTab UI. Themes drive a small set of
 // CSS custom properties on the document root; xterm picks up the matching
 // palette via `applyTheme` callers reading the same constants.
 

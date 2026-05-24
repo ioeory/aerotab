@@ -15,7 +15,7 @@
 //! ) -> i64                                // packed (ptr<<32 | len), UTF-8 result
 //! ```
 //!
-//! Plugins may import these host functions from module `"tabby"`:
+//! Plugins may import these host functions from module `"aerotab"`:
 //!
 //! ```text
 //! host_log(level: i32, ptr: i32, len: i32)   // 0=trace 1=debug 2=info 3=warn 4=error
@@ -210,7 +210,7 @@ impl WasmHost {
 
         linker
             .func_wrap(
-                "tabby",
+                "aerotab",
                 "host_log",
                 |caller: Caller<'_, PluginState>, level: i32, ptr: i32, len: i32| {
                     let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
@@ -236,7 +236,7 @@ impl WasmHost {
             .map_err(wasm_err)?;
 
         linker
-            .func_wrap("tabby", "host_time_unix_ms", || -> i64 {
+            .func_wrap("aerotab", "host_time_unix_ms", || -> i64 {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -408,7 +408,7 @@ mod tests {
     async fn echo_plugin_roundtrip() {
         let wasm = wat::parse_str(ECHO_WAT).expect("wat compile");
         let host = WasmHost::new();
-        let dummy_path = std::env::temp_dir().join(format!("tabby-wasm-{}.wasm", Uuid::new_v4()));
+        let dummy_path = std::env::temp_dir().join(format!("aerotab-wasm-{}.wasm", Uuid::new_v4()));
         host.load_bytes("echo", &wasm, &dummy_path).await.unwrap();
 
         let r = host.invoke("echo", "greet", "world").await.unwrap();
@@ -425,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_missing_dir_creates_it() {
-        let dir = std::env::temp_dir().join(format!("tabby-wasm-dir-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("aerotab-wasm-dir-{}", Uuid::new_v4()));
         let host = WasmHost::new();
         let n = host.load_dir(&dir).await.unwrap();
         assert_eq!(n, 0);

@@ -2495,7 +2495,7 @@ mod tests {
     #[tokio::test]
     async fn sync_configure_git_creates_repo() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("tabby-cmd-git-{}", Uuid::new_v4()));
+        dir.push(format!("aerotab-cmd-git-{}", Uuid::new_v4()));
         let d = Dispatcher::new();
         register_all(&d, AppState::new());
         let r = d
@@ -2530,7 +2530,7 @@ mod tests {
     #[tokio::test]
     async fn sync_persistence_survives_restart() {
         let mut state_dir = std::env::temp_dir();
-        state_dir.push(format!("tabby-cmd-state-{}", Uuid::new_v4()));
+        state_dir.push(format!("aerotab-cmd-state-{}", Uuid::new_v4()));
         let device = Uuid::new_v4();
 
         // First "process" — write a record.
@@ -2673,7 +2673,7 @@ mod tests {
         let id = id_val["id"].as_str().unwrap().to_string();
 
         // Write a command + newline.
-        let cmd = BASE64.encode("echo tabby-rpc\n".as_bytes());
+        let cmd = BASE64.encode("echo aerotab-rpc\n".as_bytes());
         let _ = d
             .dispatch(req("session.write", json!({"id": id, "data": cmd})))
             .await;
@@ -2692,12 +2692,12 @@ mod tests {
                 let bytes = BASE64.decode(chunk.as_str().unwrap()).unwrap();
                 all.push_str(&String::from_utf8_lossy(&bytes));
             }
-            if all.contains("tabby-rpc") {
+            if all.contains("aerotab-rpc") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(all.contains("tabby-rpc"), "did not see echo, got {all:?}");
+        assert!(all.contains("aerotab-rpc"), "did not see echo, got {all:?}");
 
         // Close.
         let r = d.dispatch(req("session.close", json!({"id": id}))).await;

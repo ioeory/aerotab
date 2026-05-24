@@ -40,7 +40,7 @@ impl WebDavBackend {
     ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
-            .user_agent(concat!("tabby-core/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("aerotab-core/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client build");
         let mut base = base_url.into();

@@ -26,7 +26,7 @@ interface DiagnosticPack {
   events: DiagnosticEvent[];
 }
 
-const STORAGE_KEY = 'tabby.diagnostics.events.v1';
+const STORAGE_KEY = 'aerotab.diagnostics.events.v1';
 const MAX_EVENTS = 250;
 
 function safeRandomId(): string {
@@ -160,7 +160,7 @@ export function instrumentRpcClient(client: RpcClient): RpcClient {
 
 export async function exportDiagnosticPack(buildId: string, coreVersion: string | null): Promise<'saved' | 'downloaded' | 'cancelled'> {
   const pack = JSON.stringify(diagnostics.pack(buildId, coreVersion), null, 2);
-  const filename = `tabby-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  const filename = `aerotab-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
   const pick = tauriInvoke<string | null>('pick_save_file', { defaultName: filename });
   if (pick) {
     const path = await pick;

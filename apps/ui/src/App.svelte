@@ -25,7 +25,7 @@
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.1.33-ui-20260524';
+  const buildId = '0.2.0-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1241,7 +1241,7 @@
     hotkeys.registerHandler('settings',    () => openSettings());
     hotkeys.registerHandler('toggle-sidebar', () => { void setSidebarVisible(!sidebarVisible); });
     hotkeys.registerHandler('search',      () => {
-      document.dispatchEvent(new CustomEvent('tabby:search'));
+      document.dispatchEvent(new CustomEvent('aerotab:search'));
     });
 
     // Load user-overridden bindings from settings.
@@ -1274,15 +1274,15 @@
         persistOpenTabs();
       }
     };
-    document.addEventListener('tabby:settings-changed', onAppSettingsChanged);
-    document.addEventListener('tabby:session-replaced', onSessionReplaced);
+    document.addEventListener('aerotab:settings-changed', onAppSettingsChanged);
+    document.addEventListener('aerotab:session-replaced', onSessionReplaced);
     return () => {
-      document.removeEventListener('tabby:session-replaced', onSessionReplaced);
+      document.removeEventListener('aerotab:session-replaced', onSessionReplaced);
     };
   });
   onDestroy(() => {
     if (kbdHandler) window.removeEventListener('keydown', kbdHandler);
-    document.removeEventListener('tabby:settings-changed', onAppSettingsChanged);
+    document.removeEventListener('aerotab:settings-changed', onAppSettingsChanged);
     clearHostStatsPoll();
   });
 

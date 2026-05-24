@@ -19,6 +19,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerotab-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "aerotab-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "futures",
+ "git2",
+ "keyring",
+ "portable-pty",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "rfd",
+ "russh",
+ "russh-keys",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "serialport",
+ "sled",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-updater",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wasmi",
+ "wat",
+ "zeroize",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5511,54 +5559,6 @@ dependencies = [
  "pkg-config",
  "toml 0.8.23",
  "version-compare",
-]
-
-[[package]]
-name = "tabby-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "tabby-core"
-version = "0.1.33"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "base64 0.22.1",
- "chacha20poly1305",
- "futures",
- "git2",
- "keyring",
- "portable-pty",
- "rand 0.8.6",
- "reqwest 0.12.28",
- "rfd",
- "russh",
- "russh-keys",
- "russh-sftp",
- "serde",
- "serde_json",
- "serde_yaml",
- "serialport",
- "sled",
- "tauri",
- "tauri-build",
- "tauri-plugin-updater",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wasmi",
- "wat",
- "zeroize",
 ]
 
 [[package]]

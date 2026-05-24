@@ -1,5 +1,5 @@
 <script lang="ts">
-  // M2 — Profile picker dropdown. Modelled after Tabby's "Select profile or
+  // M2 — Profile picker dropdown. Modelled after classic terminal's "Select profile or
   // enter an address" overlay: address input at top; grouped lists of
   // Recent, custom groups, user-saved profiles, built-in shells, and
   // entries imported from ~/.ssh/config.

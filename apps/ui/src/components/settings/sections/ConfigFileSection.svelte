@@ -89,7 +89,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'tabby-config.yaml';
+    a.download = 'aerotab-config.yaml';
     a.click();
     URL.revokeObjectURL(url);
   }

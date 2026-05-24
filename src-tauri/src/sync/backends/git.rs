@@ -75,7 +75,7 @@ impl GitBackend {
             inner: Arc::new(GitInner {
                 repo_path,
                 author_name: "Tabby".into(),
-                author_email: "tabby@localhost".into(),
+                author_email: "aerotab@localhost".into(),
                 remote: None,
             }),
         })

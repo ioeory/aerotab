@@ -21,7 +21,7 @@
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
   let dropSide = $state<PaneDropSide | null>(null);
 
-  const PANE_DRAG_MIME = 'application/x-tabby-pane';
+  const PANE_DRAG_MIME = 'application/x-aerotab-pane';
 
   const maximized = $derived(tab.maximizedPaneId ?? null);
   const hiddenByMaximize = $derived(!!maximized && !tabs.nodeContains(node, maximized));

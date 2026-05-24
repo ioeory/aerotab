@@ -1,7 +1,7 @@
 //! Tauri 2 desktop shell.
 //!
 //! This binary embeds the same JSON-RPC [`Dispatcher`] used by the stdio
-//! host (`tabby`), and exposes it to the webview through a single
+//! host (`aerotab`), and exposes it to the webview through a single
 //! `invoke('rpc', { frame })` command. That keeps every call site, stdio
 //! tests, bench harness, and the live UI, going through the same code path.
 
@@ -15,10 +15,10 @@ use std::{
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::Serialize;
-use tabby_core::commands::{register_all, AppState};
-use tabby_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
-use tabby_core::settings::SettingsStore;
-use tabby_core::CORE_VERSION;
+use aerotab_core::commands::{register_all, AppState};
+use aerotab_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
+use aerotab_core::settings::SettingsStore;
+use aerotab_core::CORE_VERSION;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -430,12 +430,12 @@ fn hide_main_window(app: &tauri::AppHandle) {
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, TRAY_SHOW_ID, "Show Tabby v2", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_SHOW_ID, "Show AeroTab", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, TRAY_HIDE_ID, "Hide to Tray", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("Tabby v2")
+        .tooltip("AeroTab")
         .menu(&menu)
         .show_menu_on_left_click(false);
     if let Some(icon) = app.default_window_icon().cloned() {
@@ -480,7 +480,7 @@ fn main() {
         .compact()
         .init();
 
-    tracing::info!(version = CORE_VERSION, "tabby-app starting");
+    tracing::info!(version = CORE_VERSION, "aerotab-app starting");
 
     // Make WebView2's default surface transparent on Windows so the
     // tauri.conf.json `transparent: true` flag actually shows through.
@@ -501,23 +501,24 @@ fn main() {
             let data_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("tabby-v2"));
+                .unwrap_or_else(|_| std::env::temp_dir().join("aerotab"));
 
             let rt = tauri::async_runtime::handle();
             let (dispatcher, settings_store) = rt.block_on(async {
-                tabby_core::core::init().await?;
-                tabby_core::ipc::init().await?;
-                tabby_core::ssh::init().await?;
-                tabby_core::terminal::init().await?;
-                tabby_core::serial::init().await?;
-                tabby_core::sync::init().await?;
-                tabby_core::plugins::init().await?;
+                aerotab_core::core::init().await?;
+                aerotab_core::ipc::init().await?;
+                aerotab_core::ssh::init().await?;
+                aerotab_core::terminal::init().await?;
+                aerotab_core::serial::init().await?;
+                aerotab_core::sync::init().await?;
+                aerotab_core::plugins::init().await?;
                 let d = Dispatcher::new();
                 let state = AppState::new();
 
                 std::fs::create_dir_all(&data_dir).ok();
+                aerotab_core::migrate::migrate_app_data_if_needed(&data_dir);
                 let profiles_path = data_dir.join("profiles.sled");
-                match tabby_core::profile::ProfileStore::open(&profiles_path) {
+                match aerotab_core::profile::ProfileStore::open(&profiles_path) {
                     Ok(s) => *state.profiles.lock().await = Some(s),
                     Err(e) => tracing::warn!(error = %e, "profile store open failed"),
                 }
@@ -529,11 +530,11 @@ fn main() {
                     }
                     Err(e) => tracing::warn!(error = %e, "settings store open failed"),
                 }
-                match tabby_core::vault::VaultStore::open(&data_dir) {
+                match aerotab_core::vault::VaultStore::open(&data_dir) {
                     Ok(s) => *state.vault.lock().await = Some(s),
                     Err(e) => tracing::warn!(error = %e, "vault store open failed"),
                 }
-                match tabby_core::ssh::known_hosts::KnownHosts::open(&data_dir) {
+                match aerotab_core::ssh::known_hosts::KnownHosts::open(&data_dir) {
                     Ok(s) => *state.known_hosts.lock().await = Some(s),
                     Err(e) => tracing::warn!(error = %e, "known_hosts open failed"),
                 }

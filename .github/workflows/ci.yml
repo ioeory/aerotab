@@ -55,22 +55,22 @@ jobs:
         include:
           - os: ubuntu-latest
             bundle: deb
-            artifact: 'target/release/bundle/deb/Tabby v2_0.1.0_amd64.deb'
-            upload_name: Tabby_v2_0.1.0_amd64.deb
+            artifact: 'target/release/bundle/deb/AeroTab_0.1.0_amd64.deb'
+            upload_name: AeroTab_0.1.0_amd64.deb
           - os: windows-latest
             bundle: nsis
-            artifact: 'target/x86_64-pc-windows-msvc/release/bundle/nsis/Tabby v2_0.1.0_x64-setup.exe'
-            upload_name: Tabby_v2_0.1.0_x64-setup.exe
+            artifact: 'target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_0.1.0_x64-setup.exe'
+            upload_name: AeroTab_0.1.0_x64-setup.exe
           - os: macos-13
             bundle: dmg-intel
             rust_target: x86_64-apple-darwin
-            artifact: 'target/x86_64-apple-darwin/release/bundle/dmg/Tabby v2_0.1.0_x64.dmg'
-            upload_name: Tabby_v2_0.1.0_x64.dmg
+            artifact: 'target/x86_64-apple-darwin/release/bundle/dmg/AeroTab_0.1.0_x64.dmg'
+            upload_name: AeroTab_0.1.0_x64.dmg
           - os: macos-14
             bundle: dmg-arm
             rust_target: aarch64-apple-darwin
-            artifact: 'target/aarch64-apple-darwin/release/bundle/dmg/Tabby v2_0.1.0_aarch64.dmg'
-            upload_name: Tabby_v2_0.1.0_aarch64.dmg
+            artifact: 'target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_0.1.0_aarch64.dmg'
+            upload_name: AeroTab_0.1.0_aarch64.dmg
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -120,10 +120,10 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          mv Tabby_v2_0.1.0_amd64.deb/Tabby_v2_0.1.0_amd64.deb release/ || true
-          mv Tabby_v2_0.1.0_x64-setup.exe/Tabby_v2_0.1.0_x64-setup.exe release/ || true
-          mv Tabby_v2_0.1.0_x64.dmg/Tabby_v2_0.1.0_x64.dmg release/ || true
-          mv Tabby_v2_0.1.0_aarch64.dmg/Tabby_v2_0.1.0_aarch64.dmg release/ || true
+          mv AeroTab_0.1.0_amd64.deb/AeroTab_0.1.0_amd64.deb release/ || true
+          mv AeroTab_0.1.0_x64-setup.exe/AeroTab_0.1.0_x64-setup.exe release/ || true
+          mv AeroTab_0.1.0_x64.dmg/AeroTab_0.1.0_x64.dmg release/ || true
+          mv AeroTab_0.1.0_aarch64.dmg/AeroTab_0.1.0_aarch64.dmg release/ || true
           cd release && sha256sum * > CHECKSUMS.sha256 || true && ls -la
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -133,9 +133,9 @@ jobs:
             See dist/RELEASE_NOTES.md for full details.
             
             **Artifacts:**
-            - Tabby_v2_0.1.0_amd64.deb (Linux x86_64)
-            - Tabby_v2_0.1.0_x64-setup.exe (Windows x86_64)
-            - Tabby_v2_0.1.0_x64.dmg (macOS Intel)
-            - Tabby_v2_0.1.0_aarch64.dmg (macOS Apple Silicon)
+            - AeroTab_0.1.0_amd64.deb (Linux x86_64)
+            - AeroTab_0.1.0_x64-setup.exe (Windows x86_64)
+            - AeroTab_0.1.0_x64.dmg (macOS Intel)
+            - AeroTab_0.1.0_aarch64.dmg (macOS Apple Silicon)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

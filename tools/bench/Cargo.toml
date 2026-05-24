@@ -1,11 +1,11 @@
 [package]
-name = "tabby-bench"
+name = "aerotab-bench"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "tabby-bench"
+name = "aerotab-bench"
 path = "src/main.rs"
 
 [dependencies]

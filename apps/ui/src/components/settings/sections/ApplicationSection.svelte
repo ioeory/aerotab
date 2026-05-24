@@ -179,7 +179,7 @@
   <div>
     <div class="section-h">{i18n.t('application.version')}</div>
     <div class="text-[var(--color-fg)]">
-      Tabby v2 — core {coreVersion ?? '…'}
+      AeroTab — core {coreVersion ?? '…'}
     </div>
     <div class="help">{i18n.t('application.protocolVersion', { version: protocolVersion ?? '…' })}</div>
   </div>

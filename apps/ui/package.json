@@ -1,9 +1,9 @@
 {
-  "name": "@tabby/ui",
-  "version": "0.1.33",
+  "name": "@aerotab/ui",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Tabby v2 frontend shell (Tauri webview).",
+  "description": "AeroTab frontend shell (Tauri webview).",
   "scripts": {
     "dev": "vite",
     "check": "svelte-check --tsconfig ./tsconfig.json",

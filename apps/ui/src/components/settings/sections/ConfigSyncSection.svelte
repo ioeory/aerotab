@@ -42,8 +42,8 @@
   let gitRemoteUrl = $state('');
   let gitRemoteName = $state('origin');
   let gitRemoteBranch = $state('master');
-  let gitAuthorName = $state('Tabby');
-  let gitAuthorEmail = $state('tabby@localhost');
+  let gitAuthorName = $state('AeroTab');
+  let gitAuthorEmail = $state('aerotab@localhost');
   let gitRemoteUser = $state('');
   let gitRemotePassword = $state('');
   let gitSshKeyPath = $state('');
@@ -165,7 +165,7 @@
   async function persist() {
     // Note: this is the SettingsLayout "Save" hook; passwords here are stored
     // alongside the rest of settings (sled). Production deployments should
-    // store credentials in the OS keychain via tabby-core's `secret` module;
+    // store credentials in the OS keychain via aerotab-core's `secret` module;
     // master password is intentionally excluded.
     await rpc.call('settings.set', {
       key: 'sync',
@@ -565,7 +565,7 @@
       <label for="cs-url" class="lbl">Base URL</label>
       <input
         id="cs-url" bind:value={webdavUrl} oninput={markDirty}
-        placeholder="https://webdav.example.com/tabby" class="input"
+        placeholder="https://webdav.example.com/aerotab" class="input"
       />
       <label for="cs-user" class="lbl">Username (optional)</label>
       <input id="cs-user" bind:value={webdavUser} oninput={markDirty} class="input" />
@@ -578,10 +578,10 @@
       <div class="section-h">Git</div>
       <label for="cs-repo" class="lbl">Local repo path</label>
       <input id="cs-repo" bind:value={gitRepoPath} oninput={markDirty}
-        placeholder="/home/me/.tabby-sync" class="input" />
+        placeholder="/home/me/.aerotab-sync" class="input" />
       <label for="cs-remote-url" class="lbl">Remote URL (optional)</label>
       <input id="cs-remote-url" bind:value={gitRemoteUrl} oninput={markDirty}
-        placeholder="https://github.com/me/tabby-config.git" class="input" />
+        placeholder="https://github.com/me/aerotab-config.git" class="input" />
       <div class="grid grid-cols-2 gap-3">
         <div>
           <label for="cs-remote-name" class="lbl">Remote name</label>
@@ -662,7 +662,7 @@
     <input id="cs-mp" type="password" bind:value={masterPassword} class="input"
       placeholder="Enter to (re-)configure the engine" />
     <div class="help">
-      Used to derive the encryption key for every record. Tabby never stores
+      Used to derive the encryption key for every record. AeroTab never stores
       this password — re-enter it after each launch.
     </div>
     <label for="cs-keyring-account" class="lbl">Credential account (optional)</label>

@@ -195,7 +195,7 @@ mod tests {
 
     fn tmp() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("tabby-profile-{}", Uuid::new_v4()));
+        p.push(format!("aerotab-profile-{}", Uuid::new_v4()));
         p
     }
 

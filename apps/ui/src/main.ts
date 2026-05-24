@@ -1,4 +1,4 @@
-// Tabby v2 frontend entry. Mounts the Svelte app and applies global styles.
+// AeroTab frontend entry. Mounts the Svelte app and applies global styles.
 
 import { mount } from 'svelte';
 import './app.css';

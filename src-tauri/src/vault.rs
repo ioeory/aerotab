@@ -23,7 +23,7 @@ use zeroize::Zeroize;
 use crate::sync::crypto::{decrypt, encrypt, CryptoError, KdfParams};
 
 const VERIFIER_KEY: &str = "__verifier";
-const VERIFIER_PAYLOAD: &[u8] = b"tabby-vault-v1";
+const VERIFIER_PAYLOAD: &[u8] = b"aerotab-vault-v1";
 
 #[derive(Debug, Error)]
 pub enum VaultError {

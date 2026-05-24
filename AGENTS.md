@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository.
 
 ## Project Shape
 
-Tabby v2 is a Rust + Tauri 2 desktop app with a Svelte 5 frontend.
+AeroTab is a Rust + Tauri 2 desktop app with a Svelte 5 frontend.
 
 - Frontend shell: [apps/ui](apps/ui)
 - Rust/Tauri backend: [src-tauri](src-tauri)
@@ -34,12 +34,12 @@ The frontend requires Node 20+. CI uses stable Rust with `rustfmt` and `clippy`;
 
 - JSON-RPC methods are registered in [src-tauri/src/commands.rs](src-tauri/src/commands.rs). Keep frontend calls, shared TS types, and Rust params/results aligned.
 - Frontend RPC access goes through [apps/ui/src/lib/rpc.ts](apps/ui/src/lib/rpc.ts). Shared UI-facing shapes live in [apps/ui/src/lib/types.ts](apps/ui/src/lib/types.ts).
-- Tauri desktop shell behavior lives in [src-tauri/src/bin/tabby-app.rs](src-tauri/src/bin/tabby-app.rs), including updater, file pickers, transparency, and tray integration.
+- Tauri desktop shell behavior lives in [src-tauri/src/bin/aerotab-app.rs](src-tauri/src/bin/aerotab-app.rs), including updater, file pickers, transparency, and tray integration.
 - SSH, SFTP, and host stats belong under [src-tauri/src/ssh](src-tauri/src/ssh). Host stats must use a separate exec channel and must not write probe commands into terminal scrollback.
 - Terminal behavior belongs in [apps/ui/src/components/TerminalPane.svelte](apps/ui/src/components/TerminalPane.svelte) and [src-tauri/src/terminal](src-tauri/src/terminal). Keep ended-session scrollback visible; do not cover the terminal with a full-screen overlay—append a small `[session ended]` marker and use a compact close/status chip only.
 - Pane layout is a per-tab tree (`PaneNode` leaves and splits), not a single global split direction for the whole tab. Use [apps/ui/src/lib/tabs.svelte.ts](apps/ui/src/lib/tabs.svelte.ts) and pane-tree helpers; `tabs.movePane` reorders leaves within a tab via side targets and a small drag handle so text selection is not treated as pane drag.
 - SSH UI opens profiles through `session.openSshProfile`. Keep [apps/ui/src/lib/types.ts](apps/ui/src/lib/types.ts) auth shapes aligned with Rust (`PublicKey.key_path`, etc.). `AuthMethod::Agent` uses the system ssh-agent (`SSH_AUTH_SOCK` on Unix; `\\.\pipe\openssh-ssh-agent` or `SSH_AUTH_SOCK` on Windows). PuTTY Pageant window-message protocol is not supported yet.
-- SFTP lives in [apps/ui/src/components/SftpBrowser.svelte](apps/ui/src/components/SftpBrowser.svelte) (modal or per-tab right dock). Dual-pane **local + remote** browser; drag between panes or from the OS to upload/download. Text edit for remote files under 512 KiB. Transfers support pause/resume. Per-tab dock follows the tab’s **active SSH pane** (`activePaneId`); width is draggable (persisted as `sftp.dockWidthPx`). Tauri helpers: `local_list_dir`, `local_home_dir`, etc. in [tabby-app.rs](src-tauri/src/bin/tabby-app.rs). Shortcuts: open dock `Ctrl+Alt+F`, toggle/collapse `Ctrl+Alt+E`.
+- SFTP lives in [apps/ui/src/components/SftpBrowser.svelte](apps/ui/src/components/SftpBrowser.svelte) (modal or per-tab right dock). Dual-pane **local + remote** browser; drag between panes or from the OS to upload/download. Text edit for remote files under 512 KiB. Transfers support pause/resume. Per-tab dock follows the tab’s **active SSH pane** (`activePaneId`); width is draggable (persisted as `sftp.dockWidthPx`). Tauri helpers: `local_list_dir`, `local_home_dir`, etc. in [aerotab-app.rs](src-tauri/src/bin/aerotab-app.rs). Shortcuts: open dock `Ctrl+Alt+F`, toggle/collapse `Ctrl+Alt+E`.
 - Tab context menu: close / close others / close to right / close all / duplicate tab / open SFTP (see [TabBar.svelte](apps/ui/src/components/TabBar.svelte)).
 - Jump chain: ProfileModal accepts `user@host` lines and `@profile-id` / `@Profile Name` references ([jumpProfiles.ts](apps/ui/src/lib/jumpProfiles.ts)). `~/.ssh/config` `ProxyJump` is parsed in [ssh_config.rs](src-tauri/src/ssh_config.rs) and applied when connecting from the picker ([sshConfigJump.ts](apps/ui/src/lib/sshConfigJump.ts)).
 - SSH tunnels: `tunnel.open` / `tunnel.close` / `tunnel.list` in [ssh/tunnel.rs](src-tauri/src/ssh/tunnel.rs) (`-L` local, `-R` remote, `-D` SOCKS5). Manage from Settings → SSH → Port forwarding.
@@ -53,8 +53,8 @@ The frontend requires Node 20+. CI uses stable Rust with `rustfmt` and `clippy`;
 - Settings UI uses section components under [apps/ui/src/components/settings](apps/ui/src/components/settings) and the coordinator in [apps/ui/src/lib/settingsStore.svelte.ts](apps/ui/src/lib/settingsStore.svelte.ts). For a11y, settings rows may use `<label class="row"><span class="row-label">…</span>…</label>` around controls without changing layout.
 - i18n infrastructure is in [apps/ui/src/lib/i18n.svelte.ts](apps/ui/src/lib/i18n.svelte.ts). `application.locale` is `system`, `en`, or `zh-CN`; preview language immediately from Application settings. Add user-facing strings there instead of hardcoding new high-visibility text.
 - Sidebar visibility is persisted in window settings and toggled with `Ctrl+Alt+S`.
-- System tray reads `window.trayEnabled` / `trayMinimizeToTray` in [src-tauri/src/bin/tabby-app.rs](src-tauri/src/bin/tabby-app.rs) (`tray-icon`); close/minimize can hide to tray. `.gitignore` should keep `Cargo.lock` trackable and ignore `.tauri/dev-updater.key`.
-- Terminal transfers (experimental): when enabled in terminal settings, a `trzsz` filter bridges the session with Tauri native file APIs (`pick_open_files`, `local_read_chunk`, `local_write_chunk`, etc. in [src-tauri/src/bin/tabby-app.rs](src-tauri/src/bin/tabby-app.rs)); drag files onto the terminal or answer a remote `trz`/`tsz` prompt to transfer. ZMODEM/lrzsz still shows an in-pane hint with an optional SFTP shortcut—native rz/sz is not implemented.
+- System tray reads `window.trayEnabled` / `trayMinimizeToTray` in [src-tauri/src/bin/aerotab-app.rs](src-tauri/src/bin/aerotab-app.rs) (`tray-icon`); close/minimize can hide to tray. `.gitignore` should keep `Cargo.lock` trackable and ignore `.tauri/dev-updater.key`.
+- Terminal transfers (experimental): when enabled in terminal settings, a `trzsz` filter bridges the session with Tauri native file APIs (`pick_open_files`, `local_read_chunk`, `local_write_chunk`, etc. in [src-tauri/src/bin/aerotab-app.rs](src-tauri/src/bin/aerotab-app.rs)); drag files onto the terminal or answer a remote `trz`/`tsz` prompt to transfer. ZMODEM/lrzsz still shows an in-pane hint with an optional SFTP shortcut—native rz/sz is not implemented.
 
 ## WSL → Windows NSIS（交叉编译，默认发布路径）
 
@@ -81,12 +81,12 @@ rustup target add x86_64-pc-windows-msvc
 
 **产物路径**：
 
-`target/x86_64-pc-windows-msvc/release/bundle/nsis/Tabby v2_<version>_x64-setup.exe`
+`target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_<version>_x64-setup.exe`
 
 **手测（发版默认流程，无需再向用户确认）**：
 
 1. 将安装包拷到 Windows 本机盘（勿从 `\\wsl.localhost\...` 直接安装）：
-   `cp "target/x86_64-pc-windows-msvc/release/bundle/nsis/Tabby v2_<ver>_x64-setup.exe" /mnt/c/Users/<user>/Downloads/`
+   `cp "target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_<ver>_x64-setup.exe" /mnt/c/Users/<user>/Downloads/`
 2. 静默安装并重装覆盖：`tools/install-windows-smoke.sh`（或手动 `setup.exe /S`）
 3. 冒烟：启动已安装应用，确认进程存在、窗口标题含版本号；必要时检查 footer buildId。
 
@@ -101,10 +101,11 @@ rustup target add x86_64-pc-windows-msvc
 - Windows 包在 WSL 上一律走 `./tools/build-windows-xwin.sh`（`cargo-xwin` + `makensis`），不要改用裸 MSVC 链路。
 - When invoking PowerShell from bash, escape `$` variables so bash does not expand them first.
 - Copy NSIS installers to a Windows local path before silent install testing; installing directly from `\\wsl.localhost` can hang.
-- Windows transparency: set WebView2 background in [src-tauri/src/bin/tabby-app.rs](src-tauri/src/bin/tabby-app.rs), use one painted CSS alpha layer only, and xterm `allowTransparency` with DOM renderer (avoid canvas-webgl when opacity is below 100%).
+- Windows transparency: set WebView2 background in [src-tauri/src/bin/aerotab-app.rs](src-tauri/src/bin/aerotab-app.rs), use one painted CSS alpha layer only, and xterm `allowTransparency` with DOM renderer (avoid canvas-webgl when opacity is below 100%).
 - `ssh.hostStats` uses a separate exec channel (Linux `/proc`/`df` first; macOS/BSD `sysctl`/`vm_stat`/FreeBSD fallbacks). Never write probe commands into terminal scrollback; polling follows SSH settings.
 - SFTP sudo mode is intentionally passwordless only: it uses `sudo -n` and should fail fast when a password prompt would be required.
 - Color scheme swatches should key by scheme plus index, not by color value; palettes can contain duplicate colors.
+- App identifier is `com.aerotab`. Legacy Tabby v2 data under `org.tabby.v2` is copied on first launch via [`migrate.rs`](src-tauri/src/migrate.rs); keyring reads fall back to service `org.tabby.v2` when `com.aerotab` has no entry ([`secret.rs`](src-tauri/src/secret.rs)).
 
 ## Validation Expectations
 

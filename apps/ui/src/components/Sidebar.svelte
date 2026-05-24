@@ -133,7 +133,7 @@
 <aside class="w-[240px] shrink-0 border-r border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col">
   <div class="px-4 py-3 border-b border-[var(--color-border-soft)] flex items-center gap-2">
     <div class="w-6 h-6 rounded-md bg-[var(--color-accent)] text-[var(--color-bg)] grid place-items-center font-bold text-[12px]">›_</div>
-    <h1 class="text-[13px] font-semibold tracking-wide">Tabby v2</h1>
+    <h1 class="text-[13px] font-semibold tracking-wide">AeroTab</h1>
     <button
       type="button"
       onclick={openSettings}

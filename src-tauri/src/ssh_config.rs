@@ -1,6 +1,6 @@
 //! Parser for the user's `~/.ssh/config` file.
 //!
-//! Tabby surfaces Host entries from the SSH client config as read-only
+//! AeroTab surfaces Host entries from the SSH client config as read-only
 //! connection profiles in the picker. We only need the basics: Host,
 //! HostName, User, Port, IdentityFile. Wildcard hosts (`Host *`) are
 //! skipped because they are templates, not connectable targets.

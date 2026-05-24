@@ -146,7 +146,7 @@
       }
       if (tab) tabs.replacePaneSession(tab.id, oldId, next);
       document.dispatchEvent(
-        new CustomEvent('tabby:session-replaced', { detail: { oldId, session: next } }),
+        new CustomEvent('aerotab:session-replaced', { detail: { oldId, session: next } }),
       );
       try { await rpc.call('session.close', { id: oldId }); } catch { /* old session may already be gone */ }
     } catch (err) {
@@ -533,13 +533,13 @@
 
     // App-level Ctrl+F also routes here when this pane is active.
     const searchListener = () => { if (active) openSearch(); };
-    document.addEventListener('tabby:search', searchListener);
+    document.addEventListener('aerotab:search', searchListener);
     // Settings-changed fallback (in addition to the settingsRev prop) — fires
     // when any settings section calls settingsCoord.bumpRev(). Forces a
     // palette/font reload directly so live-apply works even if the prop
     // chain is somehow stale.
     const settingsListener = () => { void reloadSettingsLive(); };
-    document.addEventListener('tabby:settings-changed', settingsListener);
+    document.addEventListener('aerotab:settings-changed', settingsListener);
     const focusListener = (ev: Event) => {
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
       if (detail?.sessionId && detail.sessionId !== session.id) return;
@@ -554,13 +554,13 @@
         requestAnimationFrame(() => fit?.fit());
       });
     };
-    document.addEventListener('tabby:focus-pane', focusListener);
-    document.addEventListener('tabby:fit-pane', fitListener);
+    document.addEventListener('aerotab:focus-pane', focusListener);
+    document.addEventListener('aerotab:fit-pane', fitListener);
     cleanupSearchListener = () => {
-      document.removeEventListener('tabby:search', searchListener);
-      document.removeEventListener('tabby:settings-changed', settingsListener);
-      document.removeEventListener('tabby:focus-pane', focusListener);
-      document.removeEventListener('tabby:fit-pane', fitListener);
+      document.removeEventListener('aerotab:search', searchListener);
+      document.removeEventListener('aerotab:settings-changed', settingsListener);
+      document.removeEventListener('aerotab:focus-pane', focusListener);
+      document.removeEventListener('aerotab:fit-pane', fitListener);
     };
 
     term.onData((data) => {
