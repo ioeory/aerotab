@@ -150,20 +150,16 @@ fn detect_windows() -> Vec<ShellEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
+    #[cfg(unix)]
     fn detect_returns_some_entries_on_unix() {
         // CI runners always have at least /bin/sh.
-        #[cfg(unix)]
-        {
-            let list = detect();
-            // List may be empty in exotic sandboxes; just ensure it
-            // doesn't panic and is well-formed when populated.
-            for e in &list {
-                assert!(!e.command.is_empty());
-                assert!(!e.id.is_empty());
-            }
+        let list = super::detect();
+        // List may be empty in exotic sandboxes; just ensure it
+        // doesn't panic and is well-formed when populated.
+        for e in &list {
+            assert!(!e.command.is_empty());
+            assert!(!e.id.is_empty());
         }
     }
 }

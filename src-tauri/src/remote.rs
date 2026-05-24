@@ -27,7 +27,7 @@ fn launch_rdp(address: &str) -> Result<(), RemoteError> {
             .arg(format!("/v:{address}"))
             .spawn()
             .map_err(|e| RemoteError::Launch(e.to_string()))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {

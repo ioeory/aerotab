@@ -12,7 +12,7 @@ pub fn decode_console_bytes(bytes: &[u8]) -> String {
     {
         use encoding_rs::GBK;
         let (cow, _, _) = GBK.decode(bytes);
-        return cow.into_owned();
+        cow.into_owned()
     }
     #[cfg(not(windows))]
     {
