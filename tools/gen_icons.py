@@ -1,27 +1,35 @@
-"""Generate AeroTab app icons from icon-source.png (32, 128, 256 px)."""
+"""Regenerate Tauri bundle icons from docs/assets/logo.png."""
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
-from PIL import Image
-
-OUT = Path(__file__).resolve().parents[1] / "src-tauri" / "icons"
-SOURCE = OUT / "icon-source.png"
-SIZES = (32, 128, 256)
+ROOT = Path(__file__).resolve().parents[1]
+LOGO = ROOT / "docs" / "assets" / "logo.png"
+ICONS = ROOT / "src-tauri" / "icons"
+TAURI_DIR = ROOT / "src-tauri"
 
 
 def main() -> None:
-    if not SOURCE.is_file():
-        raise SystemExit(f"Missing source icon: {SOURCE}")
-    src = Image.open(SOURCE).convert("RGBA")
-    OUT.mkdir(parents=True, exist_ok=True)
-    for size in SIZES:
-        img = src.resize((size, size), Image.Resampling.LANCZOS)
-        out = OUT / ("icon.png" if size == 256 else f"{size}x{size}.png")
-        img.save(out, format="PNG")
-        print(f"wrote {out}")
+    if not LOGO.is_file():
+        raise SystemExit(f"Missing logo: {LOGO}")
+    ICONS.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(LOGO, ICONS / "icon-source.png")
+    rel_logo = LOGO.relative_to(TAURI_DIR)
+    print(f"Generating icons from {rel_logo} …")
+    subprocess.run(
+        ["cargo", "tauri", "icon", str(rel_logo)],
+        cwd=TAURI_DIR,
+        check=True,
+    )
+    print("Done. Icons written to src-tauri/icons/")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(e.returncode) from e
