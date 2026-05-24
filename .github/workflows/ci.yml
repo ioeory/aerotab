@@ -10,23 +10,41 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # GitHub 无官方 debian-latest 托管 runner；在 ubuntu 宿主上用 debian:bookworm 容器跑 Linux CI。
+  rust-debian:
+    name: Rust (debian-bookworm)
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Debian build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git pkg-config libssl-dev libudev-dev build-essential
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --features desktop -- -D warnings
+      - run: cargo test --lib --features desktop -- --test-threads=1
+
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libudev-dev
+      - name: macOS deps
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --features desktop -- -D warnings
@@ -58,22 +76,22 @@ jobs:
         include:
           - os: ubuntu-latest
             bundle: deb
-            artifact: 'target/release/bundle/deb/AeroTab_0.1.0_amd64.deb'
-            upload_name: AeroTab_0.1.0_amd64.deb
+            artifact: 'target/release/bundle/deb/AeroTab_0.2.5_amd64.deb'
+            upload_name: AeroTab_0.2.5_amd64.deb
           - os: windows-latest
             bundle: nsis
-            artifact: 'target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_0.1.0_x64-setup.exe'
-            upload_name: AeroTab_0.1.0_x64-setup.exe
+            artifact: 'target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_0.2.5_x64-setup.exe'
+            upload_name: AeroTab_0.2.5_x64-setup.exe
           - os: macos-13
             bundle: dmg-intel
             rust_target: x86_64-apple-darwin
-            artifact: 'target/x86_64-apple-darwin/release/bundle/dmg/AeroTab_0.1.0_x64.dmg'
-            upload_name: AeroTab_0.1.0_x64.dmg
+            artifact: 'target/x86_64-apple-darwin/release/bundle/dmg/AeroTab_0.2.5_x64.dmg'
+            upload_name: AeroTab_0.2.5_x64.dmg
           - os: macos-14
             bundle: dmg-arm
             rust_target: aarch64-apple-darwin
-            artifact: 'target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_0.1.0_aarch64.dmg'
-            upload_name: AeroTab_0.1.0_aarch64.dmg
+            artifact: 'target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_0.2.5_aarch64.dmg'
+            upload_name: AeroTab_0.2.5_aarch64.dmg
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -123,22 +141,22 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          mv AeroTab_0.1.0_amd64.deb/AeroTab_0.1.0_amd64.deb release/ || true
-          mv AeroTab_0.1.0_x64-setup.exe/AeroTab_0.1.0_x64-setup.exe release/ || true
-          mv AeroTab_0.1.0_x64.dmg/AeroTab_0.1.0_x64.dmg release/ || true
-          mv AeroTab_0.1.0_aarch64.dmg/AeroTab_0.1.0_aarch64.dmg release/ || true
+          mv AeroTab_0.2.5_amd64.deb/AeroTab_0.2.5_amd64.deb release/ || true
+          mv AeroTab_0.2.5_x64-setup.exe/AeroTab_0.2.5_x64-setup.exe release/ || true
+          mv AeroTab_0.2.5_x64.dmg/AeroTab_0.2.5_x64.dmg release/ || true
+          mv AeroTab_0.2.5_aarch64.dmg/AeroTab_0.2.5_aarch64.dmg release/ || true
           cd release && sha256sum * > CHECKSUMS.sha256 || true && ls -la
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*
           body: |
             See dist/RELEASE_NOTES.md for full details.
-            
+
             **Artifacts:**
-            - AeroTab_0.1.0_amd64.deb (Linux x86_64)
-            - AeroTab_0.1.0_x64-setup.exe (Windows x86_64)
-            - AeroTab_0.1.0_x64.dmg (macOS Intel)
-            - AeroTab_0.1.0_aarch64.dmg (macOS Apple Silicon)
+            - AeroTab_0.2.5_amd64.deb (Linux x86_64)
+            - AeroTab_0.2.5_x64-setup.exe (Windows x86_64)
+            - AeroTab_0.2.5_x64.dmg (macOS Intel)
+            - AeroTab_0.2.5_aarch64.dmg (macOS Apple Silicon)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
