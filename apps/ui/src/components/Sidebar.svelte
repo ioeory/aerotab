@@ -7,6 +7,7 @@
   import { profileEndpointLabel, sortProfiles } from '../lib/profileMeta';
   import { i18n } from '../lib/i18n.svelte';
   import { PROFILES_CHANGED } from '../lib/profileEvents';
+  import { withRpcTimeout } from '../lib/rpcTimeout';
   import ProfileIcon from './ProfileIcon.svelte';
   import { onMount, onDestroy } from 'svelte';
 
@@ -25,17 +26,18 @@
 
   export async function refresh() {
     try {
-      profiles = await rpc.call<StoredProfile[]>('profile.list');
+      profiles = await withRpcTimeout(
+        rpc.call<StoredProfile[]>('profile.list'),
+        20_000,
+        'profile.list',
+      );
     } catch {
       profiles = [];
     }
   }
-  $effect(() => {
-    void refresh();
-  });
-
   const onProfilesChanged = () => { void refresh(); };
   onMount(() => {
+    void refresh();
     document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
   });
   onDestroy(() => {

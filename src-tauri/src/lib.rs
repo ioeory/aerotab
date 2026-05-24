@@ -27,6 +27,7 @@ pub mod ssh;
 pub mod ssh_config;
 pub mod sync;
 pub mod terminal;
+pub mod text_encoding;
 pub mod vault;
 
 pub use error::{CoreError, Result};

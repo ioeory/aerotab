@@ -35,7 +35,7 @@
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.1-ui-20260524';
+  const buildId = '0.2.4-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -510,9 +510,16 @@
       }
     } catch { /* not configured yet */ }
     await loadHostStatsSettings();
-    void bootstrapSyncEngine(rpc).catch((e) => {
-      console.warn('sync bootstrap:', e);
-    });
+    void (async () => {
+      try {
+        const boot = await bootstrapSyncEngine(rpc);
+        if (boot === 'no_keyring_secret' || boot === 'no_git_https_secret') {
+          console.warn('sync bootstrap: credentials missing — open Config sync to re-key');
+        }
+      } catch (e) {
+        console.warn('sync bootstrap:', e);
+      }
+    })();
     try {
       const vaultBoot = await bootstrapVault(rpc);
       if (vaultBoot === 'needs_password') {

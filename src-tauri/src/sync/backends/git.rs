@@ -799,13 +799,14 @@ fn run_git(
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = crate::text_encoding::decode_console_bytes(&output.stderr);
+    let stdout = crate::text_encoding::decode_console_bytes(&output.stdout);
     let detail = if stderr.trim().is_empty() {
         stdout.trim().to_string()
     } else {
         format!("{}\n{}", stderr.trim(), stdout.trim()).trim().to_string()
     };
+    let detail = crate::text_encoding::sanitize_transport_message(&detail);
     Err(SyncError::Transport(format!(
         "git {} failed (exit {:?}): {detail}",
         args.first().copied().unwrap_or("?"),
@@ -825,7 +826,7 @@ fn io_err(e: std::io::Error) -> SyncError {
 }
 
 fn git_err(e: git2::Error) -> SyncError {
-    let msg = e.message().to_string();
+    let msg = crate::text_encoding::sanitize_transport_message(e.message());
     let hint = if msg.contains("too many redirects or authentication replays") {
         " — for GitLab HTTPS use remote user `oauth2` and a Personal Access Token as password; \
          do not embed credentials in the remote URL; re-run Configure / re-key after fixing"
@@ -833,6 +834,8 @@ fn git_err(e: git2::Error) -> SyncError {
         " — verify SSH port and that the host speaks SSH (not HTTP); use ssh://git@host:PORT/path \
          or set SSH port in sync settings; on Windows install Git for Windows; for PAT auth use \
          https://host/group/repo.git; re-run Configure / re-key"
+    } else if msg.contains("failed to resolve address") {
+        " — DNS lookup failed: check network/VPN, or add the host to hosts/DNS; for HTTPS use https://host/group/repo.git"
     } else if msg.contains("401") || msg.contains("403") || msg.contains("authentication") {
         " — check HTTPS username/PAT or complete Git OAuth sign-in"
     } else {

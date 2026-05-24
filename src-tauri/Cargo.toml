@@ -49,6 +49,7 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 base64 = { workspace = true }
 wasmi = { workspace = true }
+encoding_rs = "0.8"
 
 tauri = { version = "2", optional = true , features = ["tray-icon"] }
 tauri-plugin-updater = { version = "2", optional = true }

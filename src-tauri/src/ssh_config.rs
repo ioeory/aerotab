@@ -108,10 +108,22 @@ pub fn parse(text: &str) -> Vec<SshConfigEntry> {
 
 /// Load and parse the user's `~/.ssh/config`. Returns an empty list if the
 /// file does not exist or cannot be read — the picker still works.
+const MAX_SSH_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+
 pub fn load_default() -> Vec<SshConfigEntry> {
     let Some(path) = default_config_path() else {
         return Vec::new();
     };
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_SSH_CONFIG_BYTES {
+            tracing::warn!(
+                path = %path.display(),
+                len = meta.len(),
+                "ssh config too large; skipping import"
+            );
+            return Vec::new();
+        }
+    }
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };

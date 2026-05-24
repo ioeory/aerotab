@@ -226,7 +226,14 @@ export async function applyPersistedAutoSync(rpc: RpcClient, settings: Persisted
     return;
   }
   const groups = selectedSyncGroups(settings);
-  if (groups.length === 0) return;
+  if (groups.length === 0) {
+    await rpc.call('sync.stopAutoSync', {});
+    return;
+  }
+  const configured = await isSyncEngineConfigured(rpc);
+  if (!configured) {
+    return;
+  }
   const interval_ms = Math.max(1, settings.autoSyncMinutes ?? 15) * 60_000;
   await rpc.call('sync.startAutoSync', { interval_ms, groups });
 }

@@ -12,7 +12,8 @@
 //! Key = profile UUID bytes; value = JSON-serialised [`Profile`].
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sled::Db;
@@ -117,6 +118,8 @@ pub struct ProfileStore {
 
 struct Inner {
     db: Db,
+    /// Serialize sled access — concurrent `spawn_blocking` callers can deadlock on Windows.
+    op_lock: Mutex<()>,
 }
 
 impl ProfileStore {
@@ -125,7 +128,10 @@ impl ProfileStore {
         // Touch the tree to make sure it exists.
         let _ = db.open_tree(TREE_NAME)?;
         Ok(Self {
-            inner: Arc::new(Inner { db }),
+            inner: Arc::new(Inner {
+                db,
+                op_lock: Mutex::new(()),
+            }),
         })
     }
 
@@ -133,30 +139,65 @@ impl ProfileStore {
         self.inner.db.open_tree(TREE_NAME).map_err(Into::into)
     }
 
+    fn with_tree<T>(&self, f: impl FnOnce(&sled::Tree) -> Result<T, ProfileError>) -> Result<T, ProfileError> {
+        let _guard = self
+            .inner
+            .op_lock
+            .lock()
+            .map_err(|e| ProfileError::Sled(format!("profile store lock: {e}")))?;
+        let tree = self.tree()?;
+        f(&tree)
+    }
+
     pub async fn list(&self) -> Result<Vec<Profile>, ProfileError> {
         let me = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let tree = me.tree()?;
-            let mut out = Vec::new();
-            for kv in tree.iter() {
-                let (_, v) = kv?;
-                let p: Profile = serde_json::from_slice(&v)?;
-                out.push(p);
-            }
-            Ok(out)
+        const TIMEOUT: Duration = Duration::from_secs(12);
+        tokio::time::timeout(TIMEOUT, async {
+            tokio::task::spawn_blocking(move || {
+                me.with_tree(|tree| {
+                    let started = Instant::now();
+                    const MAX_SCAN: Duration = Duration::from_secs(10);
+                    let mut out = Vec::new();
+                    for kv in tree.iter() {
+                        if started.elapsed() > MAX_SCAN {
+                            tracing::warn!("profile list: scan time limit reached");
+                            break;
+                        }
+                        let (_, v) = match kv {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "profile list: skip corrupt sled key");
+                                continue;
+                            }
+                        };
+                        match serde_json::from_slice::<Profile>(&v) {
+                            Ok(p) => out.push(p),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "profile list: skip corrupt profile JSON");
+                            }
+                        }
+                    }
+                    Ok(out)
+                })
+            })
+            .await
+            .map_err(|e| ProfileError::Sled(format!("join: {e}")))?
         })
         .await
-        .map_err(|e| ProfileError::Sled(format!("join: {e}")))?
+        .map_err(|_| {
+            ProfileError::Sled(
+                "profile list timed out (close other AeroTab instances or check antivirus locking profiles.sled)".into(),
+            )
+        })?
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Profile>, ProfileError> {
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
-            let tree = me.tree()?;
-            match tree.get(id.as_bytes())? {
+            me.with_tree(|tree| match tree.get(id.as_bytes())? {
                 Some(v) => Ok(Some(serde_json::from_slice(&v)?)),
                 None => Ok(None),
-            }
+            })
         })
         .await
         .map_err(|e| ProfileError::Sled(format!("join: {e}")))?
@@ -165,11 +206,12 @@ impl ProfileStore {
     pub async fn upsert(&self, profile: Profile) -> Result<(), ProfileError> {
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
-            let tree = me.tree()?;
-            let bytes = serde_json::to_vec(&profile)?;
-            tree.insert(profile.id.as_bytes(), bytes)?;
-            tree.flush()?;
-            Ok(())
+            me.with_tree(|tree| {
+                let bytes = serde_json::to_vec(&profile)?;
+                tree.insert(profile.id.as_bytes(), bytes)?;
+                tree.flush()?;
+                Ok(())
+            })
         })
         .await
         .map_err(|e| ProfileError::Sled(format!("join: {e}")))?
@@ -178,10 +220,11 @@ impl ProfileStore {
     pub async fn delete(&self, id: Uuid) -> Result<bool, ProfileError> {
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
-            let tree = me.tree()?;
-            let removed = tree.remove(id.as_bytes())?.is_some();
-            tree.flush()?;
-            Ok(removed)
+            me.with_tree(|tree| {
+                let removed = tree.remove(id.as_bytes())?.is_some();
+                tree.flush()?;
+                Ok(removed)
+            })
         })
         .await
         .map_err(|e| ProfileError::Sled(format!("join: {e}")))?

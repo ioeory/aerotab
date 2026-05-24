@@ -860,7 +860,10 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("profile.list", move |_params| {
             let st = st.clone();
             async move {
-                let store = require_profiles(&st).await?;
+                let Some(store) = st.profiles.lock().await.clone() else {
+                    tracing::warn!("profile.list: store not configured");
+                    return Ok(json!([]));
+                };
                 let list = store.list().await.map_err(|e| internal(e.to_string()))?;
                 serde_json::to_value(list).map_err(|e| internal(e.to_string()))
             }
@@ -915,8 +918,21 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
         // M2 — built-in shells + ~/.ssh/config import. Stateless; doesn't
         // require the profile store to be configured.
         dispatcher.register("profile.discover", move |_params| async move {
-            let shells = crate::shell_detect::detect();
-            let ssh_config = crate::ssh_config::load_default();
+            use std::time::Duration;
+            let result = tokio::time::timeout(
+                Duration::from_secs(8),
+                tokio::task::spawn_blocking(|| {
+                    let shells = crate::shell_detect::detect();
+                    let ssh_config = crate::ssh_config::load_default();
+                    (shells, ssh_config)
+                }),
+            )
+            .await
+            .map_err(|_| {
+                internal("profile.discover timed out (check ~/.ssh/config is readable)")
+            })?
+            .map_err(|e| internal(format!("profile.discover join: {e}")))?;
+            let (shells, ssh_config) = result;
             Ok(json!({
                 "shells": shells,
                 "sshConfig": ssh_config,
@@ -2201,13 +2217,24 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 stop_auto(&st).await;
                 let interval = std::time::Duration::from_millis(p.interval_ms);
                 let groups = selected_sync_groups(p.groups);
+                let st_immediate = st.clone();
+                let eng_immediate = eng.clone();
+                let groups_now = groups.clone();
+                // Run one cycle immediately so users see activity without waiting a full interval.
+                match run_sync_now_cycle(&st_immediate, &eng_immediate, &groups_now).await {
+                    Ok((results, _)) => {
+                        *st_immediate.sync_last_ms.lock().await = Some(now_ms());
+                        record_sync_history_ok(&st_immediate, "auto", &groups_now, &results).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "auto-sync initial cycle failed");
+                        record_sync_history_err(&st_immediate, "auto", &groups_now, &e).await;
+                    }
+                }
                 let st_tick = st.clone();
                 let handle = tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
-                    // Skip the immediate first tick to avoid double-sync if
-                    // the caller just configured the engine.
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    ticker.tick().await;
                     loop {
                         ticker.tick().await;
                         match run_sync_now_cycle(&st_tick, &eng, &groups).await {
@@ -2326,7 +2353,7 @@ async fn run_sync_now_cycle(
     let settings = require_settings(st).await.ok();
     let vault = st.vault.lock().await.clone();
     let plugins = st.wasm_host.list().await;
-    if groups.iter().any(|g| *g == Group::Credentials) {
+    if groups.contains(&Group::Credentials) {
         if let Some(vault) = vault.as_ref() {
             let _ = crate::sync::bridge::try_unlock_vault_for_sync(
                 vault,

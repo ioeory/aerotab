@@ -534,9 +534,29 @@ fn main() {
                 std::fs::create_dir_all(&data_dir).ok();
                 aerotab_core::migrate::migrate_app_data_if_needed(&data_dir);
                 let profiles_path = data_dir.join("profiles.sled");
-                match aerotab_core::profile::ProfileStore::open(&profiles_path) {
+                let open_profiles = || aerotab_core::profile::ProfileStore::open(&profiles_path);
+                match open_profiles() {
                     Ok(s) => *state.profiles.lock().await = Some(s),
-                    Err(e) => tracing::warn!(error = %e, "profile store open failed"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "profile store open failed; trying recovery");
+                        let backup = data_dir.join(format!(
+                            "profiles.sled.bak-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0)
+                        ));
+                        if profiles_path.exists() {
+                            let _ = std::fs::rename(&profiles_path, &backup);
+                        }
+                        match open_profiles() {
+                            Ok(s) => {
+                                tracing::info!(backup = %backup.display(), "profile store recovered");
+                                *state.profiles.lock().await = Some(s);
+                            }
+                            Err(e2) => tracing::warn!(error = %e2, "profile store recovery failed"),
+                        }
+                    }
                 }
                 let mut desktop_settings_store = None;
                 match SettingsStore::open(&data_dir) {

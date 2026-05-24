@@ -3,13 +3,15 @@
   // ~/.ssh/config entries imported from the host. Mirrors the sidebar's
   // profile list but with grouping, search, and inline edit/delete.
 
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { Activity, Plus, Trash2, Pencil, Plug, Search, ShieldAlert, ShieldCheck, ShieldX, Star } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { tabs } from '../../../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
+  import { PROFILES_CHANGED } from '../../../lib/profileEvents';
+  import { withRpcTimeout } from '../../../lib/rpcTimeout';
   import ProfileModal from '../../ProfileModal.svelte';
   import ProfileIcon from '../../ProfileIcon.svelte';
 
@@ -31,24 +33,63 @@
   let sshConfig = $state<SshConfigEntry[]>([]);
   let query = $state('');
   let loading = $state(true);
+  let loadError = $state('');
+  let loadGen = 0;
   let healthRunning = $state(false);
   let health = $state<Record<string, ProfileHealthResult>>({});
   let profileModal: { open: (existing?: StoredProfile) => void } | null = $state(null);
 
   async function load() {
+    const gen = ++loadGen;
     loading = true;
+    loadError = '';
+    const failsafe = setTimeout(() => {
+      if (gen === loadGen && loading) {
+        loading = false;
+        loadError = i18n.t('profiles.loadTimeout');
+      }
+    }, 25_000);
     try {
-      saved = await rpc.call<StoredProfile[]>('profile.list');
+      const listResult = await withRpcTimeout(
+        rpc.call<StoredProfile[]>('profile.list'),
+        12_000,
+        'profile.list',
+      ).catch((e) => {
+        const msg = (e as Error).message;
+        loadError = msg;
+        onError(`profiles: ${msg}`);
+        return [] as StoredProfile[];
+      });
+      if (gen !== loadGen) return;
+      saved = listResult;
+      loading = false;
+
+      void withRpcTimeout(
+        rpc.call<{ sshConfig: SshConfigEntry[] }>('profile.discover'),
+        6_000,
+        'profile.discover',
+      )
+        .then((r) => {
+          if (gen === loadGen) {
+            sshConfig = Array.isArray(r.sshConfig) ? r.sshConfig : [];
+          }
+        })
+        .catch(() => {
+          if (gen === loadGen) sshConfig = [];
+        });
     } catch (e) {
-      saved = [];
-      onError(`profiles: ${(e as Error).message}`);
+      if (gen === loadGen) {
+        loadError = (e as Error).message;
+        saved = [];
+        loading = false;
+      }
+    } finally {
+      clearTimeout(failsafe);
+      if (gen === loadGen) loading = false;
     }
-    try {
-      const r = await rpc.call<{ sshConfig: SshConfigEntry[] }>('profile.discover');
-      sshConfig = Array.isArray(r.sshConfig) ? r.sshConfig : [];
-    } catch { sshConfig = []; }
-    loading = false;
   }
+
+  const onProfilesChanged = () => { void load(); };
 
   const grouped = $derived(() => {
     const groups = new Map<string, StoredProfile[]>();
@@ -162,7 +203,13 @@
     return result.checks.filter((check) => check.status !== 'ok').slice(0, 3);
   }
 
-  onMount(() => { void load(); });
+  onMount(() => {
+    document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
+    void load();
+  });
+  onDestroy(() => {
+    document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
+  });
 </script>
 
 <div class="settings-section">
@@ -200,9 +247,18 @@
   {#if loading}
     <div class="placeholder">{i18n.t('common.loading')}</div>
   {:else}
+    {#if loadError}
+      <div class="placeholder text-[var(--color-danger)]">
+        {loadError}
+        <button type="button" class="btn-secondary ml-2 text-[11px] py-0.5 px-2"
+                onclick={() => { void load(); }}>
+          {i18n.t('profiles.retryLoad')}
+        </button>
+      </div>
+    {/if}
     <div>
       <div class="section-h">{i18n.t('profiles.savedProfiles', { count: saved.length })}</div>
-      {#if saved.length === 0}
+      {#if saved.length === 0 && !loadError}
         <div class="placeholder">{i18n.t('profiles.empty')}</div>
       {:else}
         {#each grouped() as [groupName, items] (groupName)}
