@@ -306,8 +306,9 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
                 let x11 = load_ssh_x11_options(&st).await;
+                let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let mut shell = ssh::connect_shell_with_known_hosts(
-                    &p.profile,
+                    &profile,
                     cols as u32,
                     rows as u32,
                     kh,
@@ -323,7 +324,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     sm.open(
                         SessionKind::Ssh,
                         p.title
-                            .unwrap_or_else(|| format!("{}@{}", p.profile.user, p.profile.host)),
+                            .unwrap_or_else(|| format!("{}@{}", profile.user, profile.host)),
                     )
                 };
                 st.channels.lock().await.insert(
@@ -358,6 +359,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let x11 = load_ssh_x11_options(&st).await;
                 let mut shell = match profile.spec {
                     ProfileKind::Ssh { ssh } => {
+                        let ssh = materialize_ssh_profile(&st, ssh).await?;
                         ssh::connect_shell_with_known_hosts(
                             &ssh,
                             cols as u32,
@@ -1348,6 +1350,14 @@ fn oauth_https_credentials(provider: OAuthProvider, token: String) -> (String, S
     }
 }
 
+async fn materialize_ssh_profile(st: &AppState, mut ssh: SshProfile) -> Result<SshProfile, RpcError> {
+    let vault = st.vault.lock().await.clone();
+    ssh::vault_resolve::resolve_profile_vault_auth(vault.as_ref(), &mut ssh)
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(ssh)
+}
+
 async fn resolve_ssh_profile(st: &AppState, profile_id: Uuid) -> Result<SshProfile, RpcError> {
     let store = require_profiles(st).await?;
     let profile = store
@@ -1356,7 +1366,7 @@ async fn resolve_ssh_profile(st: &AppState, profile_id: Uuid) -> Result<SshProfi
         .map_err(|e| internal(e.to_string()))?
         .ok_or_else(|| invalid_params(format!("profile not found: {profile_id}")))?;
     match profile.spec {
-        ProfileKind::Ssh { ssh } => Ok(ssh),
+        ProfileKind::Ssh { ssh } => materialize_ssh_profile(st, ssh).await,
         _ => Err(invalid_params("profile is not SSH")),
     }
 }
@@ -1439,8 +1449,9 @@ fn register_tunnel(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: TunnelOpenParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let kh = st.known_hosts.lock().await.clone();
+                let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let req = TunnelOpenRequest {
-                    profile: p.profile,
+                    profile,
                     kind: p.kind,
                     bind_host: p.bind_host,
                     bind_port: p.bind_port,
@@ -2048,6 +2059,66 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
     {
         let st = state.clone();
+        dispatcher.register("sync.ensureVaultUnlock", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                struct EnsureVaultUnlockParams {
+                    password: Option<String>,
+                    account: Option<String>,
+                }
+                let p: EnsureVaultUnlockParams = if params.is_null() {
+                    EnsureVaultUnlockParams {
+                        password: None,
+                        account: None,
+                    }
+                } else {
+                    serde_json::from_value(params)
+                        .map_err(|e| invalid_params(e.to_string()))?
+                };
+                let vault = match st.vault.lock().await.clone() {
+                    Some(v) => v,
+                    None => {
+                        return Ok(json!({
+                            "configured": false,
+                            "initialized": false,
+                            "unlocked": false,
+                        }));
+                    }
+                };
+                let settings = require_settings(&st).await.ok();
+                let initialized = vault
+                    .is_initialized()
+                    .map_err(|e| internal(e.to_string()))?;
+                if !initialized {
+                    return Ok(json!({
+                        "configured": true,
+                        "initialized": false,
+                        "unlocked": false,
+                    }));
+                }
+                let unlocked = if vault.is_unlocked().await {
+                    true
+                } else {
+                    crate::sync::bridge::try_unlock_vault_for_sync(
+                        &vault,
+                        settings.as_ref(),
+                        p.password.as_deref(),
+                        p.account.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| internal(e.to_string()))?
+                };
+                Ok(json!({
+                    "configured": true,
+                    "initialized": true,
+                    "unlocked": unlocked,
+                }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
         dispatcher.register("sync.now", move |params| {
             let st = st.clone();
             async move {
@@ -2058,23 +2129,9 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 };
                 let groups = selected_sync_groups(p.groups);
                 let eng = require_engine(&st).await?;
-                let git = st.git_backend.lock().await.clone();
-                // Pull remote commits first so we reconcile against the
-                // latest known state.
-                if let Some(g) = &git {
-                    g.fetch_remote()
-                        .await
-                        .map_err(|e| internal(e.to_string()))?;
-                }
-                let results = eng
-                    .sync_groups(groups)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?;
-                if let Some(g) = &git {
-                    g.push_remote().await.map_err(|e| internal(e.to_string()))?;
-                }
+                let (results, bridge_notes) = run_sync_now_cycle(&st, &eng, &groups).await?;
                 *st.sync_last_ms.lock().await = Some(now_ms());
-                let obj: serde_json::Map<String, Value> = results
+                let mut obj: serde_json::Map<String, Value> = results
                     .into_iter()
                     .map(|(g, s)| {
                         let key = format!("{g:?}");
@@ -2082,6 +2139,10 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         (key, v)
                     })
                     .collect();
+                obj.insert(
+                    "_bridge".into(),
+                    serde_json::to_value(bridge_notes).unwrap_or(Value::Null),
+                );
                 Ok(Value::Object(obj))
             }
         });
@@ -2109,11 +2170,13 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     ticker.tick().await;
                     loop {
                         ticker.tick().await;
-                        match eng.sync_groups(groups.clone()).await {
+                        match run_sync_now_cycle(&st_tick, &eng, &groups).await {
                             Ok(_) => {
                                 *st_tick.sync_last_ms.lock().await = Some(now_ms());
                             }
-                            Err(e) => tracing::warn!(error = %e, "auto-sync tick failed"),
+                            Err(e) => {
+                                tracing::warn!(error = ?e, "auto-sync tick failed");
+                            }
                         }
                     }
                 });
@@ -2158,6 +2221,75 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
             }
         });
     }
+}
+
+/// Export locals → fetch → reconcile → import → push (Git).
+async fn run_sync_now_cycle(
+    st: &AppState,
+    eng: &SyncEngine,
+    groups: &[crate::sync::Group],
+) -> Result<
+    (
+        Vec<(crate::sync::Group, crate::sync::SyncStats)>,
+        crate::sync::bridge::BridgeNotes,
+    ),
+    RpcError,
+> {
+    let profiles = require_profiles(st).await.ok();
+    let settings = require_settings(st).await.ok();
+    let vault = st.vault.lock().await.clone();
+    let plugins = st.wasm_host.list().await;
+    if groups.iter().any(|g| *g == Group::Credentials) {
+        if let Some(vault) = vault.as_ref() {
+            let _ = crate::sync::bridge::try_unlock_vault_for_sync(
+                vault,
+                settings.as_ref(),
+                None,
+                None,
+            )
+            .await;
+        }
+    }
+    let mut bridge_notes = crate::sync::bridge::BridgeNotes::default();
+    if let (Some(profiles), Some(settings)) = (&profiles, &settings) {
+        bridge_notes = crate::sync::bridge::export_locals(
+            profiles,
+            settings,
+            vault.as_ref(),
+            &plugins,
+            eng,
+            groups,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    }
+    let git = st.git_backend.lock().await.clone();
+    if let Some(g) = &git {
+        g.fetch_remote()
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+    }
+    let results = eng
+        .sync_groups(groups.to_vec())
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    if let (Some(profiles), Some(settings)) = (&profiles, &settings) {
+        crate::sync::bridge::import_locals(
+            profiles,
+            settings,
+            vault.as_ref(),
+            eng,
+            groups,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    }
+    if let Some(g) = &git {
+        g.push_remote()
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+    }
+    Ok((results, bridge_notes))
 }
 
 /// Cancels any running auto-sync task. Returns true if one was active.

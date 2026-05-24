@@ -7,6 +7,7 @@
 //! Full implementation lands W10-W12 (plan steps 11a, 12).
 
 pub mod backends;
+pub mod bridge;
 pub mod crypto;
 pub mod engine;
 pub mod oauth;

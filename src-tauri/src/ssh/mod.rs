@@ -10,6 +10,7 @@ pub mod known_hosts;
 pub mod sftp;
 pub mod stats;
 pub mod tunnel;
+pub mod vault_resolve;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +38,13 @@ pub enum AuthMethod {
         passphrase: Option<String>,
     },
     Agent,
+    /// Load credentials from the encrypted vault at connect time.
+    VaultRef {
+        entry_id: String,
+        /// Optional second vault entry holding a key passphrase.
+        #[serde(default)]
+        passphrase_entry_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +271,11 @@ where
                 .map_err(SshError::from)?
         }
         AuthMethod::Agent => authenticate_agent_generic(handle, profile).await?,
+        AuthMethod::VaultRef { .. } => {
+            return Err(SshError::Connect(
+                "vault auth was not resolved before connect".into(),
+            ));
+        }
     };
     if !authed {
         Err(SshError::Auth)

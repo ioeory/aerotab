@@ -31,10 +31,14 @@
   let host = $state('');
   let port = $state(22);
   let user = $state('');
-  let authKind = $state<'password' | 'key'>('password');
+  let authKind = $state<'password' | 'key' | 'vault'>('password');
   let password = $state('');
   let keyPath = $state('');
   let keyPassphrase = $state('');
+  let vaultEntryId = $state('');
+  let vaultPassphraseEntryId = $state('');
+  let vaultEntries = $state<Array<{ id: string; label: string; kind: string }>>([]);
+  let vaultUnlocked = $state(false);
   /** One bastion per line, in `user@host[:port]` form. Each hop reuses the
    * target profile's auth method (key or password). */
   let jumpsText = $state('');
@@ -57,8 +61,24 @@
     jumpsText = '';
   }
 
+  async function refreshVaultEntries() {
+    try {
+      const st = await rpc.call<{ initialized: boolean; unlocked: boolean }>('vault.status', {});
+      vaultUnlocked = st.initialized && st.unlocked;
+      if (!vaultUnlocked) {
+        vaultEntries = [];
+        return;
+      }
+      vaultEntries = await rpc.call<Array<{ id: string; label: string; kind: string }>>('vault.list', {});
+    } catch {
+      vaultUnlocked = false;
+      vaultEntries = [];
+    }
+  }
+
   export function open(existing?: StoredProfile) {
     editing = existing ?? null;
+    void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
       .then((list) => { tunnelProfiles = list.filter((p) => p.kind === 'ssh'); })
       .catch(() => { tunnelProfiles = []; });
@@ -82,16 +102,29 @@
           password = existing.ssh.auth.Password.secret;
           keyPath = '';
           keyPassphrase = '';
+          vaultEntryId = '';
+          vaultPassphraseEntryId = '';
         } else if (typeof existing.ssh.auth === 'object' && 'PublicKey' in existing.ssh.auth) {
           authKind = 'key';
           keyPath = existing.ssh.auth.PublicKey.key_path;
           keyPassphrase = existing.ssh.auth.PublicKey.passphrase ?? '';
           password = '';
+          vaultEntryId = '';
+          vaultPassphraseEntryId = '';
+        } else if (typeof existing.ssh.auth === 'object' && 'VaultRef' in existing.ssh.auth) {
+          authKind = 'vault';
+          vaultEntryId = existing.ssh.auth.VaultRef.entry_id;
+          vaultPassphraseEntryId = existing.ssh.auth.VaultRef.passphrase_entry_id ?? '';
+          password = '';
+          keyPath = '';
+          keyPassphrase = '';
         } else {
           authKind = 'key';
           keyPath = '';
           keyPassphrase = '';
           password = '';
+          vaultEntryId = '';
+          vaultPassphraseEntryId = '';
         }
       } else {
         loadRemoteFields(existing.kind === 'rdp' ? existing.rdp : existing.vnc);
@@ -112,6 +145,8 @@
       password = '';
       keyPath = '';
       keyPassphrase = '';
+      vaultEntryId = '';
+      vaultPassphraseEntryId = '';
       jumpsText = '';
       remoteSshProfileId = '';
       localBindPort = '';
@@ -136,10 +171,23 @@
     } as const;
     let profile: StoredProfile;
     if (profileKind === 'ssh') {
-      const auth: SshAuth =
-        authKind === 'key'
-          ? { PublicKey: { key_path: keyPath, passphrase: keyPassphrase || undefined } }
-          : { Password: { secret: password } };
+      let auth: SshAuth;
+      if (authKind === 'vault') {
+        if (!vaultEntryId.trim()) {
+          onError(i18n.t('profileModal.vaultEntry'));
+          return;
+        }
+        auth = {
+          VaultRef: {
+            entry_id: vaultEntryId.trim(),
+            passphrase_entry_id: vaultPassphraseEntryId.trim() || undefined,
+          },
+        };
+      } else if (authKind === 'key') {
+        auth = { PublicKey: { key_path: keyPath, passphrase: keyPassphrase || undefined } };
+      } else {
+        auth = { Password: { secret: password } };
+      }
       let jump_via: SshProfileSpec[];
       try {
         const profiles = await loadProfilesForJumps(rpc);
@@ -261,9 +309,33 @@
       <select id="pm-auth" bind:value={authKind} class="input">
         <option value="password">{i18n.t('profileModal.password')}</option>
         <option value="key">{i18n.t('profileModal.publicKey')}</option>
+        <option value="vault">{i18n.t('profileModal.vault')}</option>
       </select>
 
-      {#if authKind === 'password'}
+      {#if authKind === 'vault'}
+        {#if !vaultUnlocked}
+          <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-2">{i18n.t('profileModal.vaultLockedHint')}</p>
+        {:else}
+          <label for="pm-vault-entry" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+            {i18n.t('profileModal.vaultEntry')}
+          </label>
+          <select id="pm-vault-entry" bind:value={vaultEntryId} class="input">
+            <option value="">—</option>
+            {#each vaultEntries as ve (ve.id)}
+              <option value={ve.id}>{ve.label} ({ve.kind})</option>
+            {/each}
+          </select>
+          <label for="pm-vault-pass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+            {i18n.t('profileModal.vaultPassphraseEntry')}
+          </label>
+          <select id="pm-vault-pass" bind:value={vaultPassphraseEntryId} class="input">
+            <option value="">—</option>
+            {#each vaultEntries.filter((e) => e.kind === 'password') as ve (ve.id)}
+              <option value={ve.id}>{ve.label}</option>
+            {/each}
+          </select>
+        {/if}
+      {:else if authKind === 'password'}
         <label for="pm-pw" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
           {i18n.t('profileModal.passwordStoredLocally')}
         </label>

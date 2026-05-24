@@ -134,7 +134,7 @@ impl LoadedPlugin {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PluginInfo {
     pub name: String,
     pub path: String,

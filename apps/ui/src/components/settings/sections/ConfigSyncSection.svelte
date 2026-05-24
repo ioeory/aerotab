@@ -72,6 +72,18 @@
   let masterSecretSaved = $state(false);
   let secretBusy = $state(false);
   let secretInfo = $state('');
+  // Vault unlock for credential sync (independent of Settings → Vault page)
+  let vaultPassword = $state('');
+  let vaultConfirmPassword = $state('');
+  let vaultKeyringAccount = $state('sync.vault');
+  let vaultSecretSaved = $state(false);
+  let vaultBusy = $state(false);
+  let vaultInfo = $state('');
+  let vaultStatus = $state<{ configured: boolean; initialized: boolean; unlocked: boolean }>({
+    configured: false,
+    initialized: false,
+    unlocked: false,
+  });
   let stateDir = $state('');
   let autoSyncEnabled = $state(false);
   let autoSyncMinutes = $state(15);
@@ -101,7 +113,11 @@
   }
 
   function formatSyncStats(stats: Record<string, unknown> | null | undefined): string {
-    const entries = Object.entries(stats ?? {});
+    const bridge = stats?._bridge as {
+      credentials_skipped_locked?: boolean;
+      credentials_skipped_uninitialized?: boolean;
+    } | undefined;
+    const entries = Object.entries(stats ?? {}).filter(([k]) => k !== '_bridge');
     if (entries.length === 0) {
       return i18n.t('sync.complete', { count: 0 });
     }
@@ -123,10 +139,17 @@
       merged,
       unchanged,
     });
-    if (pushed + pulled + merged === 0) {
+    const notes: string[] = [];
+    if (bridge?.credentials_skipped_locked) {
+      notes.push(i18n.t('sync.credentialsSkippedLocked'));
+    }
+    if (bridge?.credentials_skipped_uninitialized) {
+      notes.push(i18n.t('sync.credentialsSkippedUninitialized'));
+    }
+    if (pushed + pulled + merged === 0 && notes.length === 0) {
       return `${line} ${i18n.t('sync.noRecordsExchanged')}`;
     }
-    return line;
+    return notes.length ? `${line} ${notes.join(' ')}` : line;
   }
 
   let statusTimer: ReturnType<typeof setInterval> | null = null;
@@ -178,6 +201,7 @@
       autoSyncMinutes,
       enabledGroups,
       keyringAccount,
+      vaultKeyringAccount,
     };
   }
 
@@ -218,6 +242,7 @@
       if (typeof v.gitlabOAuthClientId === 'string') gitlabOAuthClientId = v.gitlabOAuthClientId;
       if (typeof v.gitlabOAuthBaseUrl === 'string') gitlabOAuthBaseUrl = v.gitlabOAuthBaseUrl;
       if (typeof v.keyringAccount === 'string') keyringAccount = v.keyringAccount;
+      if (typeof v.vaultKeyringAccount === 'string') vaultKeyringAccount = v.vaultKeyringAccount;
       if (typeof v.stateDir === 'string') stateDir = v.stateDir;
       if (typeof v.autoSyncEnabled === 'boolean') autoSyncEnabled = v.autoSyncEnabled;
       if (typeof v.autoSyncMinutes === 'number') autoSyncMinutes = v.autoSyncMinutes;
@@ -248,7 +273,7 @@
         gitAuthorName, gitAuthorEmail,
         gitRemoteUser, gitRemotePassword, gitSshKeyPath, gitSshPassphrase,
         gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
-        keyringAccount,
+        keyringAccount, vaultKeyringAccount,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
       },
     });
@@ -302,6 +327,148 @@
       onError(`secret save: ${(e as Error).message}`);
     } finally {
       secretBusy = false;
+    }
+  }
+
+  function vaultSecretParams(): { account?: string } {
+    const account = vaultKeyringAccount.trim();
+    return account ? { account } : { account: 'sync.vault' };
+  }
+
+  async function refreshVaultStatus() {
+    try {
+      vaultStatus = await rpc.call('vault.status', {});
+    } catch {
+      vaultStatus = { configured: false, initialized: false, unlocked: false };
+    }
+  }
+
+  async function refreshVaultSecretStatus() {
+    vaultBusy = true;
+    try {
+      const r = await rpc.call<{ has: boolean }>('secret.hasMaster', vaultSecretParams());
+      vaultSecretSaved = r.has;
+      vaultInfo = r.has ? i18n.t('sync.vaultSecretSaved') : i18n.t('sync.vaultSecretNotSaved');
+    } catch (e) {
+      vaultInfo = '';
+      onError(`vault secret status: ${(e as Error).message}`);
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  async function saveVaultSecret() {
+    if (!vaultPassword) {
+      vaultInfo = i18n.t('sync.vaultPasswordRequired');
+      return;
+    }
+    vaultBusy = true;
+    try {
+      await rpc.call('secret.setMaster', { ...vaultSecretParams(), secret: vaultPassword });
+      await refreshVaultSecretStatus();
+    } catch (e) {
+      onError(`vault secret save: ${(e as Error).message}`);
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  async function clearVaultSecret() {
+    if (!confirm(i18n.t('sync.vaultForgetConfirm'))) return;
+    vaultBusy = true;
+    try {
+      await rpc.call('secret.clearMaster', vaultSecretParams());
+      await refreshVaultSecretStatus();
+    } catch (e) {
+      onError(`vault secret clear: ${(e as Error).message}`);
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  async function unlockVaultNow() {
+    vaultBusy = true;
+    try {
+      const r = await rpc.call<{ unlocked: boolean; initialized: boolean }>('sync.ensureVaultUnlock', {
+        password: vaultPassword || undefined,
+        account: vaultKeyringAccount.trim() || undefined,
+      });
+      if (!r.initialized) {
+        vaultInfo = i18n.t('sync.vaultNotInitialized');
+        return;
+      }
+      if (r.unlocked) {
+        vaultPassword = '';
+        vaultInfo = i18n.t('sync.vaultUnlocked');
+        await refreshVaultStatus();
+      } else {
+        vaultInfo = i18n.t('sync.vaultUnlockFailed');
+      }
+    } catch (e) {
+      onError(`vault unlock: ${(e as Error).message}`);
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  async function initializeVaultForSync() {
+    if (!vaultPassword) {
+      vaultInfo = i18n.t('sync.vaultPasswordRequired');
+      return;
+    }
+    if (vaultPassword !== vaultConfirmPassword) {
+      vaultInfo = i18n.t('sync.vaultPasswordMismatch');
+      return;
+    }
+    vaultBusy = true;
+    try {
+      await rpc.call('vault.initialize', { password: vaultPassword });
+      await rpc.call('vault.unlock', { password: vaultPassword });
+      vaultPassword = '';
+      vaultConfirmPassword = '';
+      vaultInfo = i18n.t('sync.vaultUnlocked');
+      await refreshVaultStatus();
+    } catch (e) {
+      onError(`vault initialize: ${(e as Error).message}`);
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  async function lockVaultForSync() {
+    try {
+      await rpc.call('vault.lock', {});
+      vaultInfo = i18n.t('sync.vaultLocked');
+      await refreshVaultStatus();
+    } catch (e) {
+      onError(`vault lock: ${(e as Error).message}`);
+    }
+  }
+
+  /** Unlock vault when Credentials group is enabled (keyring or typed password). */
+  async function ensureVaultForSync(): Promise<boolean> {
+    if (!enabledGroups.Credentials) return true;
+    await refreshVaultStatus();
+    if (vaultStatus.unlocked) return true;
+    try {
+      const r = await rpc.call<{ unlocked: boolean; initialized: boolean }>('sync.ensureVaultUnlock', {
+        password: vaultPassword || undefined,
+        account: vaultKeyringAccount.trim() || undefined,
+      });
+      if (r.unlocked) {
+        vaultPassword = '';
+        await refreshVaultStatus();
+        return true;
+      }
+      if (!r.initialized) {
+        setSyncInfo('err', i18n.t('sync.vaultNotInitialized'));
+      } else {
+        setSyncInfo('err', i18n.t('sync.vaultUnlockRequired'));
+      }
+      return false;
+    } catch (e) {
+      setSyncInfo('err', (e as Error).message);
+      return false;
     }
   }
 
@@ -386,6 +553,7 @@
       setSyncInfo('err', i18n.t('sync.noGroups'));
       return;
     }
+    if (!(await ensureVaultForSync())) return;
     busy = true;
     setSyncInfo('info', i18n.t('sync.syncing'));
     try {
@@ -573,6 +741,8 @@
     void (async () => {
       await loadPersisted();
       await refreshSecretStatus();
+      await refreshVaultStatus();
+      await refreshVaultSecretStatus();
       const boot = await bootstrapSyncEngine(rpc);
       if (boot === 'configured') {
         setSyncInfo('ok', i18n.t('sync.engineRestored'));
@@ -766,6 +936,68 @@
       <div class="help">Configure / re-key will use the saved credential for this run.</div>
     {/if}
   </div>
+
+  {#if enabledGroups.Credentials}
+    <div>
+      <div class="section-h">{i18n.t('sync.vaultSectionTitle')}</div>
+      <div class="text-[12px] text-[var(--color-fg-muted)] mb-2">
+        {i18n.t('sync.vaultSectionHelp')}
+        {#if vaultStatus.unlocked}
+          <span class="text-[var(--color-accent)]"> · {i18n.t('sync.vaultStatusUnlocked')}</span>
+        {:else if vaultStatus.initialized}
+          <span> · {i18n.t('sync.vaultStatusLocked')}</span>
+        {:else}
+          <span> · {i18n.t('sync.vaultStatusNotInitialized')}</span>
+        {/if}
+      </div>
+
+      {#if !vaultStatus.initialized}
+        <label for="cs-vault-pw-init" class="lbl">{i18n.t('sync.vaultPassword')}</label>
+        <input id="cs-vault-pw-init" type="password" bind:value={vaultPassword} class="input" />
+        <label for="cs-vault-pw2" class="lbl">{i18n.t('sync.vaultPasswordConfirm')}</label>
+        <input id="cs-vault-pw2" type="password" bind:value={vaultConfirmPassword} class="input" />
+        <button type="button" class="btn-secondary mt-2" disabled={vaultBusy}
+          onclick={() => void initializeVaultForSync()}>
+          {i18n.t('sync.vaultInitialize')}
+        </button>
+      {:else}
+        <label for="cs-vault-pw" class="lbl">{i18n.t('sync.vaultPassword')}</label>
+        <input id="cs-vault-pw" type="password" bind:value={vaultPassword} class="input"
+          placeholder={i18n.t('sync.vaultPasswordPlaceholder')} />
+        <label for="cs-vault-keyring" class="lbl">{i18n.t('sync.vaultKeyringAccount')}</label>
+        <input id="cs-vault-keyring" bind:value={vaultKeyringAccount} oninput={markDirty} class="input"
+          placeholder="sync.vault" />
+        <div class="flex gap-2 items-center pt-2 flex-wrap">
+          <button type="button" class="btn-secondary" disabled={vaultBusy}
+            onclick={() => void unlockVaultNow()}>
+            {i18n.t('sync.vaultUnlock')}
+          </button>
+          <button type="button" class="btn-secondary" disabled={vaultBusy || !vaultStatus.unlocked}
+            onclick={() => void lockVaultForSync()}>
+            {i18n.t('sync.vaultLock')}
+          </button>
+          <button type="button" class="btn-secondary" disabled={vaultBusy || !vaultPassword}
+            onclick={() => void saveVaultSecret()}>
+            {i18n.t('sync.vaultSaveToKeyring')}
+          </button>
+          <button type="button" class="btn-secondary" disabled={vaultBusy}
+            onclick={() => void refreshVaultSecretStatus()}>
+            {i18n.t('sync.vaultCheckKeyring')}
+          </button>
+          <button type="button" class="btn-secondary" disabled={vaultBusy || !vaultSecretSaved}
+            onclick={() => void clearVaultSecret()}>
+            {i18n.t('sync.vaultForgetKeyring')}
+          </button>
+        </div>
+        {#if vaultInfo}
+          <div class="help mt-1">{vaultInfo}</div>
+        {/if}
+        {#if vaultSecretSaved && !vaultPassword}
+          <div class="help">{i18n.t('sync.vaultKeyringAutoHint')}</div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
   <div>
     <div class="section-h">Local state</div>

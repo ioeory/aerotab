@@ -39,6 +39,8 @@ export interface PersistedSyncSettings {
   autoSyncMinutes?: number;
   enabledGroups?: Partial<Record<SyncGroup, boolean>>;
   keyringAccount?: string;
+  /** OS keyring account for vault password used during credential sync. */
+  vaultKeyringAccount?: string;
 }
 
 const SYNC_GROUPS: SyncGroup[] = [

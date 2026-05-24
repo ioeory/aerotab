@@ -32,6 +32,7 @@ export interface PluginRow {
 export type SshAuth =
   | { Password: { secret: string } }
   | { PublicKey: { key_path: string; passphrase?: string } }
+  | { VaultRef: { entry_id: string; passphrase_entry_id?: string } }
   | 'Agent';
 
 export type ProfileIconKind = 'builtin' | 'emoji' | 'file' | 'data' | string;

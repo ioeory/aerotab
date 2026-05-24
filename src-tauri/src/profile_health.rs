@@ -177,6 +177,23 @@ fn inspect_auth(label: &str, auth: &AuthMethod, checks: &mut Vec<ProfileHealthCh
                 "agent auth configured; live availability is checked during connection probing",
             );
         }
+        AuthMethod::VaultRef { entry_id, .. } => {
+            if entry_id.trim().is_empty() {
+                push_check(
+                    checks,
+                    format!("{label} vault"),
+                    HealthStatus::Error,
+                    "vault entry id is empty",
+                );
+            } else {
+                push_check(
+                    checks,
+                    format!("{label} vault"),
+                    HealthStatus::Ok,
+                    format!("vault entry {entry_id} (resolved at connect time)"),
+                );
+            }
+        }
     }
 }
 

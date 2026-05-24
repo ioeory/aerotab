@@ -46,7 +46,7 @@ git2 = { workspace = true }
 keyring = { workspace = true }
 
 async-trait = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 base64 = { workspace = true }
 wasmi = { workspace = true }
 
