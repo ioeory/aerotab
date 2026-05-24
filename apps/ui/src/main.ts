@@ -22,7 +22,7 @@ document.addEventListener(
 
 mount(App, { target });
 
-// Window starts hidden so WebView2 / backend init is not shown as a white flash.
+// Focus the main window after the first frame (setup also shows it; this is a backup).
 requestAnimationFrame(() => {
-  requestAnimationFrame(() => revealMainWindow());
+  revealMainWindow();
 });

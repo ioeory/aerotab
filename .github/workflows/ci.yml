@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Debian build dependencies
         run: |
-          apt-get update
+            apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl
           # WebKitGTK 4.1 for Tauri 2 is in bookworm-backports (not enabled by default).
           echo "deb http://deb.debian.org/debian bookworm-backports main" \
@@ -105,8 +105,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust_target }}
+      - name: Add Rust cross-compilation target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+      - name: Install tauri-cli
+        run: command -v cargo-tauri >/dev/null || cargo install tauri-cli --locked
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
@@ -115,6 +118,9 @@ jobs:
             libssl-dev pkg-config libudev-dev \
             libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
             libwebkit2gtk-4.1-dev file wget patchelf
+      - name: macOS deps
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -123,18 +129,24 @@ jobs:
           cache: 'npm'
           cache-dependency-path: apps/ui/package-lock.json
       - name: Build UI
-        run: cd apps/ui && npm install --no-audit --no-fund && npm run build
+        working-directory: apps/ui
+        run: npm install --no-audit --no-fund && npm run build
       - name: Build deb
         if: matrix.bundle == 'deb'
+        working-directory: src-tauri
         run: cargo tauri build --bundles deb
       - name: Build nsis
         if: matrix.bundle == 'nsis'
-        run: cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis -- --features desktop
+        working-directory: src-tauri
+        # Native Windows runner — do not use cargo-xwin (Linux→Windows cross only).
+        run: cargo tauri build --bundles nsis
       - name: Build dmg (Intel)
         if: matrix.bundle == 'dmg-intel'
+        working-directory: src-tauri
         run: cargo tauri build --target x86_64-apple-darwin --bundles dmg
       - name: Build dmg (Apple Silicon)
         if: matrix.bundle == 'dmg-arm'
+        working-directory: src-tauri
         run: cargo tauri build --target aarch64-apple-darwin --bundles dmg
       - name: Upload artifact
         uses: actions/upload-artifact@v4

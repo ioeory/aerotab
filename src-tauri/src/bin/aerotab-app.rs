@@ -5,6 +5,9 @@
 //! `invoke('rpc', { frame })` command. That keeps every call site, stdio
 //! tests, bench harness, and the live UI, going through the same code path.
 
+// Release Windows: GUI subsystem only (no extra console window with stderr logs).
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 use std::{
     io::SeekFrom,
     path::{Path, PathBuf},
@@ -91,13 +94,19 @@ fn parse_window_behavior(value: serde_json::Value) -> WindowBehaviorSettings {
     out
 }
 
-/// Reveal the main window after the frontend has painted (see `apps/ui/src/main.ts`).
+/// Reveal/focus the main window (also called from the frontend after first paint).
 #[tauri::command]
-fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != MAIN_WINDOW_LABEL {
+fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    reveal_main_window(&app)
+}
+
+fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return Ok(());
+    };
+    if !window.is_visible().unwrap_or(true) {
+        window.show().map_err(|e| e.to_string())?;
     }
-    window.show().map_err(|e| e.to_string())?;
     let _ = window.set_focus();
     Ok(())
 }
@@ -626,6 +635,10 @@ fn main() {
             }
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 disable_native_webview_context_menus(&window);
+            }
+            // Ensure the shell is visible even if the webview has not called show yet.
+            if let Err(e) = reveal_main_window(app.handle()) {
+                tracing::warn!(error = %e, "failed to show main window during setup");
             }
             Ok(())
         })
