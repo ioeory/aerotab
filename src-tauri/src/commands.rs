@@ -705,6 +705,9 @@ struct ConfigureGitParams {
     /// SSH port when remote uses SSH (default 22). Embedded in `ssh://` remote URL.
     #[serde(default)]
     remote_ssh_port: Option<u16>,
+    /// `ssh` | `https` — explicit transport from UI (avoids mis-detecting SSH as HTTPS).
+    #[serde(default)]
+    remote_auth: Option<String>,
     /// `github` or `gitlab` — load access token from OS keyring.
     #[serde(default)]
     oauth_provider: Option<String>,
@@ -1951,17 +1954,19 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 }
                 if let Some(url) = p.remote_url.as_ref() {
                     use crate::sync::backends::git::{align_git_remote_url, GitRemoteTransport};
-                    let transport = if p.oauth_provider.is_some()
-                        || p
-                            .remote_password
-                            .as_ref()
-                            .is_some_and(|s| !s.is_empty())
-                    {
-                        GitRemoteTransport::Https
-                    } else if p.remote_ssh_key.is_some() {
-                        GitRemoteTransport::Ssh
-                    } else {
-                        GitRemoteTransport::Unspecified
+                    let transport = match p.remote_auth.as_deref() {
+                        Some("ssh") => GitRemoteTransport::Ssh,
+                        Some("https") => GitRemoteTransport::Https,
+                        _ if p.oauth_provider.is_some()
+                            || p
+                                .remote_password
+                                .as_ref()
+                                .is_some_and(|s| !s.is_empty()) =>
+                        {
+                            GitRemoteTransport::Https
+                        }
+                        _ if p.remote_ssh_key.is_some() => GitRemoteTransport::Ssh,
+                        _ => GitRemoteTransport::Unspecified,
                     };
                     let url = align_git_remote_url(url, transport, p.remote_ssh_port);
                     backend = backend

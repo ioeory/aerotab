@@ -16,6 +16,7 @@
 //! so the async trait stays honest.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -222,20 +223,12 @@ impl GitBackend {
             return Ok(0);
         };
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
-        let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
-        let mut cb = RemoteCallbacks::new();
-        let auth = remote_cfg.auth.clone();
-        cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
-        let mut opts = FetchOptions::new();
-        opts.remote_callbacks(cb);
         let refspec = format!(
             "+refs/heads/{branch}:refs/remotes/{name}/{branch}",
             branch = remote_cfg.branch,
             name = remote_cfg.name
         );
-        remote
-            .fetch(&[refspec.as_str()], Some(&mut opts), None)
-            .map_err(git_err)?;
+        self.fetch_remote_refs(&remote_cfg, &refspec)?;
 
         // Fast-forward HEAD if possible.
         let remote_ref = format!("refs/remotes/{}/{}", remote_cfg.name, remote_cfg.branch);
@@ -304,20 +297,96 @@ impl GitBackend {
         // Force-create or update the named branch ref.
         let _ = repo.reference(&local_branch_ref, head_oid, true, "align push branch");
 
+        let refspec = format!(
+            "refs/heads/{branch}:refs/heads/{branch}",
+            branch = remote_cfg.branch
+        );
+        self.push_remote_refs(&remote_cfg, &refspec)?;
+        Ok(())
+    }
+
+    fn fetch_remote_refs(&self, remote_cfg: &RemoteConfig, refspec: &str) -> Result<(), SyncError> {
+        let ssh_port = ssh_port_from_ssh_url(&remote_cfg.url);
+        if prefer_git_cli_ssh() && is_ssh_remote_url(&remote_cfg.url) {
+            return run_git(
+                &self.inner.repo_path,
+                &remote_cfg.auth,
+                ssh_port,
+                &["fetch", &remote_cfg.name, refspec],
+            );
+        }
+        match self.fetch_remote_refs_libgit2(remote_cfg, refspec) {
+            Ok(()) => Ok(()),
+            Err(e)
+                if is_ssh_remote_url(&remote_cfg.url) && transport_is_ssh_banner_failure(&e) =>
+            {
+                run_git(
+                    &self.inner.repo_path,
+                    &remote_cfg.auth,
+                    ssh_port,
+                    &["fetch", &remote_cfg.name, refspec],
+                )
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn fetch_remote_refs_libgit2(
+        &self,
+        remote_cfg: &RemoteConfig,
+        refspec: &str,
+    ) -> Result<(), SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
+        let mut cb = RemoteCallbacks::new();
+        let auth = remote_cfg.auth.clone();
+        cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
+        let mut opts = FetchOptions::new();
+        opts.remote_callbacks(cb);
+        remote
+            .fetch(&[refspec], Some(&mut opts), None)
+            .map_err(git_err)
+    }
+
+    fn push_remote_refs(&self, remote_cfg: &RemoteConfig, refspec: &str) -> Result<(), SyncError> {
+        let ssh_port = ssh_port_from_ssh_url(&remote_cfg.url);
+        if prefer_git_cli_ssh() && is_ssh_remote_url(&remote_cfg.url) {
+            return run_git(
+                &self.inner.repo_path,
+                &remote_cfg.auth,
+                ssh_port,
+                &["push", &remote_cfg.name, refspec],
+            );
+        }
+        match self.push_remote_refs_libgit2(remote_cfg, refspec) {
+            Ok(()) => Ok(()),
+            Err(e)
+                if is_ssh_remote_url(&remote_cfg.url) && transport_is_ssh_banner_failure(&e) =>
+            {
+                run_git(
+                    &self.inner.repo_path,
+                    &remote_cfg.auth,
+                    ssh_port,
+                    &["push", &remote_cfg.name, refspec],
+                )
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn push_remote_refs_libgit2(
+        &self,
+        remote_cfg: &RemoteConfig,
+        refspec: &str,
+    ) -> Result<(), SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
         let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
         let mut cb = RemoteCallbacks::new();
         let auth = remote_cfg.auth.clone();
         cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
         let mut opts = PushOptions::new();
         opts.remote_callbacks(cb);
-        let refspec = format!(
-            "refs/heads/{branch}:refs/heads/{branch}",
-            branch = remote_cfg.branch
-        );
-        remote
-            .push(&[refspec.as_str()], Some(&mut opts))
-            .map_err(git_err)?;
-        Ok(())
+        remote.push(&[refspec], Some(&mut opts)).map_err(git_err)
     }
 }
 
@@ -376,24 +445,30 @@ fn ensure_ssh_remote_url(url: &str, ssh_port: Option<u16>) -> String {
     if let Some(rest) = url.strip_prefix("git@") {
         let (host, parsed_port, path) = parse_git_scp_suffix(rest);
         let port = parsed_port.or(ssh_port);
-        return format_ssh_url(host, port, &path);
+        return format_ssh_url(host, port, "git", &path);
     }
     if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
         if let Some((host_part, path)) = rest.split_once('/') {
             let host = host_part.split(':').next().unwrap_or(host_part);
             let path = path.trim_start_matches('/');
-            return format_ssh_url(host, ssh_port, path);
+            return format_ssh_url(host, ssh_port, "git", path);
         }
     }
     url.to_string()
 }
 
-fn format_ssh_url(host: &str, port: Option<u16>, path: &str) -> String {
+fn format_ssh_url(host: &str, port: Option<u16>, user: &str, path: &str) -> String {
+    let user = if user.is_empty() { "git" } else { user };
     let path = path.trim_start_matches('/');
+    let path = if path.is_empty() {
+        String::new()
+    } else {
+        format!("/{path}")
+    };
     let port = port.filter(|p| *p != 22);
     match port {
-        Some(p) => format!("ssh://git@{host}:{p}/{path}"),
-        None => format!("ssh://git@{host}/{path}"),
+        Some(p) => format!("ssh://{user}@{host}:{p}{path}"),
+        None => format!("ssh://{user}@{host}{path}"),
     }
 }
 
@@ -419,12 +494,19 @@ fn parse_git_scp_suffix(rest: &str) -> (&str, Option<u16>, String) {
     )
 }
 
+fn authority_user_from_ssh_url(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("ssh://")?;
+    let authority = rest.split('/').next()?;
+    authority.split_once('@').map(|(user, _)| user)
+}
+
 fn apply_ssh_port_to_ssh_url(url: &str, ssh_port: Option<u16>) -> String {
     let Some(rest) = url.strip_prefix("ssh://") else {
         return url.to_string();
     };
-    let rest = rest.strip_prefix("git@").unwrap_or(rest);
-    let Some((host_part, path)) = rest.split_once('/') else {
+    let user = authority_user_from_ssh_url(url).unwrap_or("git");
+    let host_path = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
+    let Some((host_part, path)) = host_path.split_once('/') else {
         return url.to_string();
     };
     let host = host_part.split(':').next().unwrap_or(host_part);
@@ -433,7 +515,7 @@ fn apply_ssh_port_to_ssh_url(url: &str, ssh_port: Option<u16>) -> String {
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok());
     let port = existing_port.or(ssh_port);
-    format_ssh_url(host, port, path)
+    format_ssh_url(host, port, user, path)
 }
 
 /// Strip `https://user:pass@host/...` userinfo — embedded creds confuse libgit2 and
@@ -586,6 +668,149 @@ mod url_tests {
             "ssh://git@gitlab.example.com:2222/mygroup/myrepo.git"
         );
     }
+
+    #[test]
+    fn preserves_ssh_url_with_explicit_port() {
+        let url = "ssh://git@23.95.2.174:22173/yuri/aerotab-config.git";
+        assert_eq!(
+            align_git_remote_url(url, GitRemoteTransport::Ssh, Some(22173)),
+            "ssh://git@23.95.2.174:22173/yuri/aerotab-config.git"
+        );
+    }
+}
+
+fn is_ssh_remote_url(url: &str) -> bool {
+    url.starts_with("ssh://") || url.starts_with("git@")
+}
+
+fn ssh_port_from_ssh_url(url: &str) -> Option<u16> {
+    if !url.starts_with("ssh://") {
+        return None;
+    }
+    let rest = url.strip_prefix("ssh://")?;
+    let authority = rest.split('/').next()?;
+    let host_part = authority.split('@').nth(1).unwrap_or(authority);
+    host_part.split(':').nth(1)?.parse().ok()
+}
+
+/// libgit2's vendored libssh2 on Windows often fails SSH banner handshake on non-22 ports.
+fn prefer_git_cli_ssh() -> bool {
+    cfg!(windows)
+}
+
+fn transport_is_ssh_banner_failure(err: &SyncError) -> bool {
+    match err {
+        SyncError::Transport(m) => {
+            m.contains("Failed getting banner") || m.contains("failed to start SSH session")
+        }
+        _ => false,
+    }
+}
+
+fn resolve_git_executable() -> Result<PathBuf, SyncError> {
+    if let Ok(p) = std::env::var("AEROTAB_GIT") {
+        let pb = PathBuf::from(&p);
+        if pb.is_file() {
+            return Ok(pb);
+        }
+    }
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok(PathBuf::from("git"));
+    }
+    #[cfg(windows)]
+    for candidate in [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+    ] {
+        let pb = PathBuf::from(candidate);
+        if pb.is_file() {
+            return Ok(pb);
+        }
+    }
+    Err(SyncError::Transport(
+        "git executable not found — install Git for Windows and ensure `git` is on PATH".into(),
+    ))
+}
+
+#[cfg(windows)]
+fn resolve_windows_openssh() -> Option<PathBuf> {
+    for candidate in [
+        r"C:\Program Files\Git\usr\bin\ssh.exe",
+        r"C:\Windows\System32\OpenSSH\ssh.exe",
+    ] {
+        let pb = PathBuf::from(candidate);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    None
+}
+
+fn quote_for_git_ssh_command(s: &str) -> String {
+    if s.contains(' ') || s.contains('"') {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn build_git_ssh_command(auth: &RemoteAuth, port: Option<u16>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    #[cfg(windows)]
+    if let Some(ssh) = resolve_windows_openssh() {
+        parts.push(quote_for_git_ssh_command(&ssh.to_string_lossy()));
+    }
+    if parts.is_empty() {
+        parts.push("ssh".into());
+    }
+    if let Some(p) = port.filter(|p| *p != 22) {
+        parts.push("-p".into());
+        parts.push(p.to_string());
+    }
+    if let Some(key) = &auth.ssh_key_path {
+        parts.push("-i".into());
+        parts.push(quote_for_git_ssh_command(&key.to_string_lossy()));
+    }
+    parts.push("-o".into());
+    parts.push("StrictHostKeyChecking=accept-new".into());
+    parts.join(" ")
+}
+
+fn run_git(
+    repo_path: &Path,
+    auth: &RemoteAuth,
+    ssh_port: Option<u16>,
+    args: &[&str],
+) -> Result<(), SyncError> {
+    let git = resolve_git_executable()?;
+    let ssh_cmd = build_git_ssh_command(auth, ssh_port);
+    let output = Command::new(&git)
+        .arg("-C")
+        .arg(repo_path)
+        .env("GIT_SSH_COMMAND", &ssh_cmd)
+        .args(args)
+        .output()
+        .map_err(io_err)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        format!("{}\n{}", stderr.trim(), stdout.trim()).trim().to_string()
+    };
+    Err(SyncError::Transport(format!(
+        "git {} failed (exit {:?}): {detail}",
+        args.first().copied().unwrap_or("?"),
+        output.status.code()
+    )))
 }
 
 fn count_commits_between(repo: &Repository, base: git2::Oid, head: git2::Oid) -> Option<usize> {
@@ -605,8 +830,9 @@ fn git_err(e: git2::Error) -> SyncError {
         " — for GitLab HTTPS use remote user `oauth2` and a Personal Access Token as password; \
          do not embed credentials in the remote URL; re-run Configure / re-key after fixing"
     } else if msg.contains("Failed getting banner") || msg.contains("failed to start SSH session") {
-        " — check SSH port (set SSH port in sync settings or use ssh://git@host:PORT/path); \
-         for HTTPS/OAuth use https://host/group/repo.git (not git@); re-run Configure / re-key"
+        " — verify SSH port and that the host speaks SSH (not HTTP); use ssh://git@host:PORT/path \
+         or set SSH port in sync settings; on Windows install Git for Windows; for PAT auth use \
+         https://host/group/repo.git; re-run Configure / re-key"
     } else if msg.contains("401") || msg.contains("403") || msg.contains("authentication") {
         " — check HTTPS username/PAT or complete Git OAuth sign-in"
     } else {

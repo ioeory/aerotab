@@ -197,6 +197,7 @@ export async function configureSyncEngineFromSettings(
   if (settings.gitRemoteUrl) args.remote_url = settings.gitRemoteUrl;
   const mode = settings.gitAuthMode ?? 'none';
   if (mode === 'https') {
+    args.remote_auth = 'https';
     const pw = await loadGitHttpsPassword(rpc, settings);
     if (!pw) {
       throw new Error(
@@ -206,6 +207,7 @@ export async function configureSyncEngineFromSettings(
     args.remote_user = settings.gitRemoteUser?.trim() || 'oauth2';
     args.remote_password = pw;
   } else if (mode === 'ssh') {
+    args.remote_auth = 'ssh';
     args.remote_ssh_key = settings.gitSshKeyPath;
     if (settings.gitSshPassphrase) args.remote_ssh_passphrase = settings.gitSshPassphrase;
     const port = Number(settings.gitSshPort);
