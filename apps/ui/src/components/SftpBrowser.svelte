@@ -1016,8 +1016,8 @@
 >
   <div
     class={mode === 'modal'
-      ? 'bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl w-full max-w-[min(1200px,96vw)] h-full max-h-[720px] flex flex-col overflow-hidden'
-      : 'h-full w-full flex flex-col overflow-hidden'}
+      ? 'panel w-full max-w-[min(1200px,96vw)] h-full max-h-[720px] flex flex-col overflow-hidden'
+      : 'h-full w-full flex flex-col overflow-hidden bg-[var(--color-panel)]'}
   >
     <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
       <div class="text-[var(--color-accent)] font-semibold text-[13px]">SFTP</div>
@@ -1037,7 +1037,7 @@
         {#if onPopOut}
           <button
             type="button"
-            class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            class="btn-ghost p-1"
             onclick={() => onPopOut(sudoMode)}
             title={i18n.t('sftp.openWindow')}
             aria-label={i18n.t('sftp.openWindow')}
@@ -1048,7 +1048,7 @@
         {#if mode === 'dock' && onCollapse}
           <button
             type="button"
-            class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            class="btn-ghost p-1"
             onclick={onCollapse}
             title={i18n.t('sftp.collapseDock')}
             aria-label={i18n.t('sftp.collapseDock')}
@@ -1058,7 +1058,7 @@
         {/if}
         <button
           type="button"
-          class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+          class="btn-ghost p-1"
           onclick={onClose}
           aria-label={i18n.t('common.close')}
         >
@@ -1132,7 +1132,7 @@
         ondragover={preventDragDefaults}
         ondrop={(e) => { void handleRemotePaneDrop(e); }}
       >
-        <div class="px-2 py-1 text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)] border-b border-[var(--color-border-soft)]">
+        <div class="px-2 py-1 shell-section-title border-b border-[var(--color-border-soft)]">
           {i18n.t('sftp.remotePane')}
         </div>
         <div class="flex-1 min-h-0 overflow-y-auto">
@@ -1360,17 +1360,3 @@
   </div>
 {/if}
 
-<style>
-  .toolbtn {
-    display: inline-grid;
-    place-items: center;
-    width: 26px; height: 26px;
-    color: var(--color-fg-muted);
-    border-radius: var(--radius-sm);
-    background: transparent;
-  }
-  .toolbtn:hover {
-    color: var(--color-fg);
-    background: var(--color-panel-2);
-  }
-</style>

@@ -66,23 +66,21 @@
      class="fixed inset-0 z-[60] bg-black/50 grid place-items-start pt-[12vh] px-4"
      onclick={onClose}
      onkeydown={onKey}>
-  <div class="w-full max-w-[560px] bg-[var(--color-panel)] border border-[var(--color-border)]
-              rounded-lg shadow-2xl overflow-hidden"
+  <div class="panel w-full max-w-[560px] overflow-hidden"
        onclick={(e) => e.stopPropagation()}
        role="presentation">
     <div class="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border-soft)]">
       <input bind:this={inputEl} bind:value={query}
              type="text" placeholder={i18n.t('commandPalette.placeholder')}
-             class="flex-1 bg-transparent text-[var(--color-fg)] outline-none text-[13.5px]" />
-      <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+             class="input flex-1 border-0 bg-transparent shadow-none focus:shadow-none" />
+      <button type="button" class="btn-ghost p-1"
               onclick={onClose} aria-label={i18n.t('common.close')}><X size={13} /></button>
     </div>
     <ul class="max-h-[50vh] overflow-y-auto py-1" role="listbox">
       {#each filtered as a, i (a.id)}
         <li role="option" aria-selected={i === selected}
             tabindex="-1"
-            class="px-3 py-1.5 cursor-pointer flex items-center gap-2 text-[12.5px]
-                   {i === selected ? 'bg-[var(--color-panel-2)] text-[var(--color-fg)]' : 'text-[var(--color-fg)]'}"
+            class="list-item mx-1 text-[12.5px] {i === selected ? 'list-item-active' : ''}"
             onmouseenter={() => (selected = i)}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
@@ -99,9 +97,7 @@
             {/if}
           </div>
           {#if a.shortcut}
-            <kbd class="text-[10px] text-[var(--color-fg-muted)] px-1.5 py-0.5 border border-[var(--color-border)] rounded">
-              {a.shortcut}
-            </kbd>
+            <kbd class="kbd">{a.shortcut}</kbd>
           {/if}
         </li>
       {/each}

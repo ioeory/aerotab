@@ -124,35 +124,3 @@
   </form>
 </dialog>
 
-<style>
-  .input {
-    background: var(--color-bg);
-    color: var(--color-fg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    padding: 6px 10px;
-    font: inherit;
-  }
-  .input:focus {
-    outline: none;
-    border-color: var(--color-accent);
-  }
-  .btn-primary {
-    background: var(--color-accent);
-    color: var(--color-bg);
-    border: none;
-    padding: 6px 14px;
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-secondary {
-    background: var(--color-panel-2);
-    color: var(--color-fg);
-    border: 1px solid var(--color-border);
-    padding: 6px 14px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-</style>

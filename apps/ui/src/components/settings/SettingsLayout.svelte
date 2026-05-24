@@ -116,8 +116,7 @@
   aria-label={i18n.t('settings.title')}
 >
   <div
-    class="bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl
-           w-full max-w-[920px] h-[80vh] flex flex-col overflow-hidden"
+    class="panel w-full max-w-[920px] h-[80vh] flex flex-col overflow-hidden"
   >
     <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
       <div class="text-[var(--color-accent)] font-semibold text-[13px]">{i18n.t('settings.title')}</div>
@@ -129,7 +128,7 @@
       {/if}
       <button
         type="button"
-        class="ml-auto p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+        class="btn-ghost ml-auto p-1"
         onclick={onClose}
         aria-label={i18n.t('common.close')}
       >
@@ -141,13 +140,13 @@
       <nav class="overflow-y-auto border-r border-[var(--color-border-soft)]
                   bg-[var(--color-panel-2)] py-3">
         {#each groups as g (g.titleKey)}
-          <div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-fg-muted)]">
+          <div class="px-3 pt-2 pb-1 shell-section-title">
             {i18n.t(g.titleKey)}
           </div>
           {#each g.entries as e (e.id)}
             <button
               type="button"
-              class="nav-btn {active === e.id ? 'active' : ''}"
+              class="shell-nav-item {active === e.id ? 'active' : ''}"
               onclick={() => (active = e.id)}
             >
               {i18n.t(e.labelKey)}
@@ -208,45 +207,3 @@
   </div>
 </div>
 
-<style>
-  .nav-btn {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 6px 14px;
-    font-size: 12px;
-    color: var(--color-fg);
-    background: transparent;
-    border: none;
-    cursor: pointer;
-  }
-  .nav-btn:hover {
-    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-  }
-  .nav-btn.active {
-    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
-    color: var(--color-accent);
-    font-weight: 600;
-  }
-  .btn-primary {
-    background: var(--color-accent);
-    color: var(--color-bg);
-    border: none;
-    padding: 6px 14px;
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .btn-primary[disabled] {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn-secondary {
-    background: var(--color-panel-2);
-    color: var(--color-fg);
-    border: 1px solid var(--color-border);
-    padding: 6px 14px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-</style>

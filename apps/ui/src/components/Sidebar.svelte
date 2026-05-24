@@ -10,6 +10,7 @@
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import ProfileIcon from './ProfileIcon.svelte';
   import { onMount, onDestroy } from 'svelte';
+  import logoUrl from '../assets/logo.png';
 
   interface Props {
     rpc: RpcClient;
@@ -142,14 +143,14 @@
   }
 </script>
 
-<aside data-aerotab-context-menu="" class="w-[240px] shrink-0 border-r border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col">
+<aside data-aerotab-context-menu="" class="w-[240px] shrink-0 border-r border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col shadow-[inset_-1px_0_0_var(--color-border-soft)]">
   <div class="px-4 py-3 border-b border-[var(--color-border-soft)] flex items-center gap-2">
-    <div class="w-6 h-6 rounded-md bg-[var(--color-accent)] text-[var(--color-bg)] grid place-items-center font-bold text-[12px]">›_</div>
-    <h1 class="text-[13px] font-semibold tracking-wide">AeroTab</h1>
+    <img src={logoUrl} alt="" class="aerotab-logo" width="24" height="24" />
+    <h1 class="text-[13px] font-semibold tracking-wide font-mono">AeroTab</h1>
     <button
       type="button"
       onclick={openSettings}
-      class="ml-auto p-1 rounded text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]"
+      class="btn-ghost ml-auto"
       title={i18n.t('sidebar.settings')}
       aria-label={i18n.t('sidebar.settings')}
     >
@@ -161,8 +162,7 @@
     <button
       type="button"
       onclick={openLocal}
-      class="flex items-center gap-2 px-3 py-2 rounded-md text-[12.5px] text-left
-             hover:bg-[var(--color-panel-2)] text-[var(--color-fg)]"
+      class="list-item w-full text-[12.5px] text-left"
     >
       <TerminalIcon size={14} class="text-[var(--color-accent)]" />
       <span class="flex-1">{i18n.t('sidebar.newLocalShell')}</span>
@@ -171,8 +171,7 @@
     <button
       type="button"
       onclick={() => openProfileModal()}
-      class="flex items-center gap-2 px-3 py-2 rounded-md text-[12.5px] text-left
-             hover:bg-[var(--color-panel-2)] text-[var(--color-fg)]"
+      class="list-item w-full text-[12.5px] text-left"
     >
       <Server size={14} class="text-[var(--color-accent)]" />
       <span class="flex-1">{i18n.t('sidebar.newSshProfile')}</span>
@@ -181,8 +180,7 @@
     <button
       type="button"
       onclick={openSerialModal}
-      class="flex items-center gap-2 px-3 py-2 rounded-md text-[12.5px] text-left
-             hover:bg-[var(--color-panel-2)] text-[var(--color-fg)]"
+      class="list-item w-full text-[12.5px] text-left"
     >
       <Usb size={14} class="text-[var(--color-accent)]" />
       <span class="flex-1">{i18n.t('sidebar.newSerialConnection')}</span>
@@ -190,7 +188,7 @@
     </button>
   </div>
 
-  <div class="px-3 pt-3 pb-1 text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
+  <div class="px-3 pt-3 pb-1 shell-section-title">
     {i18n.t('sidebar.sshProfiles')}
   </div>
   <div class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5">
@@ -267,8 +265,7 @@
   <div role="presentation" data-aerotab-context-menu="" class="fixed inset-0 z-[55]" onclick={closeMenu}
        oncontextmenu={(e) => { e.preventDefault(); closeMenu(); }}>
     <div role="menu" tabindex="-1"
-         class="absolute min-w-[200px] bg-[var(--color-panel)] border border-[var(--color-border)]
-                rounded shadow-xl py-1 text-[12.5px] text-[var(--color-fg)]"
+         class="absolute min-w-[200px] panel py-1 text-[12.5px] text-[var(--color-fg)]"
          style="left:{menuX}px; top:{menuY}px;"
           onkeydown={(e) => e.stopPropagation()}
          onclick={(e) => e.stopPropagation()}>

@@ -304,8 +304,8 @@
     margin: 0 auto;
     background: var(--color-panel);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-panel);
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -330,9 +330,8 @@
     padding: 8px 14px 4px;
     font-size: 10.5px;
     text-transform: uppercase;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.12em;
     color: var(--color-fg-muted);
-    font-weight: 600;
   }
   .picker-row {
     display: flex;
@@ -350,13 +349,13 @@
   }
   .picker-row:hover { background: var(--color-panel-2); }
   .picker-row.active {
-    background: var(--color-accent);
-    color: white;
-    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 22%, var(--color-panel-2));
+    color: var(--color-fg);
+    border-radius: var(--radius-md);
     margin: 1px 6px;
     padding-left: 8px;
   }
-  .picker-row.active .picker-sub { color: rgba(255,255,255,0.8); }
+  .picker-row.active .picker-sub { color: var(--color-fg-muted); }
   .picker-label { font-weight: 500; }
   .picker-pill {
     font-size: 10px;
@@ -378,10 +377,12 @@
   .picker-kbd {
     margin-left: auto;
     font-size: 10px;
-    background: rgba(255,255,255,0.18);
-    color: white;
+    font-family: var(--font-mono);
+    background: var(--color-bg);
+    color: var(--color-fg-muted);
+    border: 1px solid var(--color-border);
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     display: inline-flex;
     align-items: center;
     gap: 3px;

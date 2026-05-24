@@ -61,7 +61,7 @@
     onDropFiles(e);
   }}
 >
-  <div class="px-2 py-1 text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)] border-b border-[var(--color-border-soft)]">
+  <div class="px-2 py-1 shell-section-title border-b border-[var(--color-border-soft)]">
     {i18n.t('sftp.localPane')}
   </div>
   <div class="flex items-center gap-1 px-2 py-1 border-b border-[var(--color-border-soft)] text-[12px]">
@@ -129,18 +129,3 @@
   </div>
 </div>
 
-<style>
-  .toolbtn {
-    display: inline-grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    color: var(--color-fg-muted);
-    border-radius: var(--radius-sm);
-    background: transparent;
-  }
-  .toolbtn:hover {
-    color: var(--color-fg);
-    background: var(--color-panel-2);
-  }
-</style>

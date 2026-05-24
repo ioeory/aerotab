@@ -118,10 +118,11 @@
       oncontextmenu={(e) => showTabMenu(tab, i, e)}
       onpointerenter={() => onTabHover(tab)}
       onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') activateTab(tab.id); }}
-      class="group flex items-center gap-2 px-3 py-1.5 rounded-t-md cursor-pointer text-[12.5px] border-t border-l border-r transition-colors
+      class="tab-shell group flex items-center gap-2 px-3 py-1.5 rounded-t-md cursor-pointer text-[12.5px] border-t border-l border-r
              {isActive
                ? 'bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-fg)]'
-               : 'bg-[var(--color-panel)] border-transparent text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]'}"
+               : 'bg-[var(--color-panel)] border-transparent text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]'}
+             {dragIdx === i ? 'opacity-60 ring-1 ring-[var(--color-accent)]' : ''}"
     >
       <Icon size={13} class={isActive ? 'text-[var(--color-accent)]' : ''} />
       <span class="truncate max-w-[180px]">{tab.title}</span>
@@ -155,31 +156,26 @@
     </div>
     <div class="ml-auto flex items-center gap-1 pr-1">
       <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
-              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-              onclick={() => onAddTab?.()}>
+              class="btn-ghost p-1" onclick={() => onAddTab?.()}>
         <Plus size={14} />
       </button>
     </div>
   {:else}
     <div class="ml-auto flex items-center gap-1 pr-1">
       <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
-              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-              onclick={() => onAddTab?.()}>
+              class="btn-ghost p-1" onclick={() => onAddTab?.()}>
         <Plus size={14} />
       </button>
       <button type="button" title={i18n.t('tabbar.splitRight')} aria-label={i18n.t('tabbar.splitRight')}
-              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-              onclick={(e) => splitActive('row', e)}>
+              class="btn-ghost p-1" onclick={(e) => splitActive('row', e)}>
         <Columns2 size={14} />
       </button>
       <button type="button" title={i18n.t('tabbar.splitDown')} aria-label={i18n.t('tabbar.splitDown')}
-              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-              onclick={(e) => splitActive('col', e)}>
+              class="btn-ghost p-1" onclick={(e) => splitActive('col', e)}>
         <Rows2 size={14} />
       </button>
       <button type="button" title={i18n.t('tabbar.openSftpCurrent')} aria-label={i18n.t('tabbar.openSftpCurrent')}
-              class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-              onclick={() => onOpenSftp?.()}>
+              class="btn-ghost p-1" onclick={() => onOpenSftp?.()}>
         <FolderOpen size={14} />
       </button>
     </div>
@@ -189,8 +185,7 @@
 {#if menuOpen && menuTab}
   <div
     data-aerotab-context-menu=""
-    class="fixed z-[200] min-w-[180px] py-1 rounded-md border border-[var(--color-border)]
-           bg-[var(--color-panel)] shadow-xl text-[12px]"
+    class="panel fixed z-[200] min-w-[180px] py-1 text-[12px]"
     style="left: {menuX}px; top: {menuY}px;"
     role="menu"
   >
@@ -224,20 +219,3 @@
   </div>
 {/if}
 
-<style>
-  .ctx-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 0.4rem 0.75rem;
-    color: var(--color-fg);
-  }
-  .ctx-item:hover:not(:disabled) {
-    background: var(--color-panel-2);
-    color: var(--color-accent);
-  }
-  .ctx-item:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-</style>

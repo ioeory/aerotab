@@ -173,9 +173,7 @@
         type="button"
         title={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
         aria-label={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
-        class="absolute top-1 right-7 z-10 p-1 rounded bg-[var(--color-panel)]/85 backdrop-blur
-               text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-panel)]
-               border border-[var(--color-border-soft)]"
+        class="btn-ghost absolute top-1 right-7 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)]"
         onclick={(e) => toggleMaximize(node.pane.id, e)}
         onpointerdown={(e) => e.stopPropagation()}
       >
@@ -185,9 +183,7 @@
         type="button"
         title={i18n.t('pane.closePaneShortcut')}
         aria-label={i18n.t('pane.closePane')}
-        class="absolute top-1 right-1 z-10 p-1 rounded bg-[var(--color-panel)]/85 backdrop-blur
-               text-[var(--color-fg-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-panel)]
-               border border-[var(--color-border-soft)]"
+        class="btn-ghost absolute top-1 right-1 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)] hover:!text-[var(--color-danger)]"
         onclick={(e) => closePane(node.pane.id, e)}
         onpointerdown={(e) => e.stopPropagation()}
       >
@@ -198,9 +194,8 @@
         draggable="true"
         title={i18n.t('pane.movePane')}
         aria-label={i18n.t('pane.movePane')}
-        class="absolute top-1 left-1 z-10 px-1 py-0.5 rounded text-[10px] bg-[var(--color-panel)]/80
-               backdrop-blur text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-panel)]
-               border border-[var(--color-border-soft)] inline-flex items-center gap-0.5 cursor-grab active:cursor-grabbing"
+        class="btn-ghost absolute top-1 left-1 z-10 px-1 py-0.5 text-[10px] bg-[var(--color-panel)]/80
+               backdrop-blur border border-[var(--color-border-soft)] inline-flex items-center gap-0.5 cursor-grab active:cursor-grabbing"
         ondragstart={(e) => onPaneDragStart(node.pane.id, e)}
         ondragend={() => (dropSide = null)}
         onclick={(e) => e.stopPropagation()}

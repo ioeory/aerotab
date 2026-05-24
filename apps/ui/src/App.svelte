@@ -33,9 +33,10 @@
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
+  import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.5-ui-20260524';
+  const buildId = '0.2.6-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1392,9 +1393,9 @@
         {/each}
         {#if tabs.tabs.length === 0}
           <div class="absolute inset-0 grid place-items-center text-[var(--color-fg-muted)] text-[12.5px]">
-            <div class="text-center">
-              <div class="text-[var(--color-accent)] text-[20px] font-bold mb-2">›_</div>
-              <div>{i18n.t('app.empty.title')}</div>
+            <div class="text-center max-w-[280px]">
+              <img src={logoUrl} alt="" class="aerotab-logo mx-auto mb-3 w-12 h-12 rounded-lg opacity-90" width="48" height="48" />
+              <div class="text-[var(--color-fg)] font-medium">{i18n.t('app.empty.title')}</div>
               <div class="opacity-70 mt-1">{i18n.t('app.empty.subtitle')}</div>
             </div>
           </div>
@@ -1402,10 +1403,10 @@
       </div>
       {#if currentSftpDock}
         {#if currentSftpCollapsed}
-          <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2">
+          <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2 shadow-[inset_1px_0_0_var(--color-border-soft)]">
             <button
               type="button"
-              class="p-1.5 rounded text-[var(--color-accent)] hover:bg-[var(--color-panel-2)]"
+              class="btn-ghost p-1.5 text-[var(--color-accent)]"
               title={i18n.t('sftp.expandDock')}
               aria-label={i18n.t('sftp.expandDock')}
               onclick={() => setCurrentSftpCollapsed(false)}
@@ -1415,7 +1416,7 @@
             <FolderOpen size={14} class="text-[var(--color-fg-muted)]" />
             <button
               type="button"
-              class="mt-auto p-1 rounded text-[var(--color-fg-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-panel-2)]"
+              class="btn-ghost mt-auto p-1 hover:!text-[var(--color-danger)]"
               title={i18n.t('sftp.closeDock')}
               aria-label={i18n.t('sftp.closeDock')}
               onclick={() => closeSftpDock()}
@@ -1450,10 +1451,10 @@
       {/if}
     </div>
 
-    <footer class="px-3 py-1 border-t border-[var(--color-border-soft)] flex items-center gap-3
-                   text-[11px] text-[var(--color-fg-muted)]">
+    <footer class="px-3 py-1.5 border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] flex items-center gap-3
+                   text-[11px] text-[var(--color-fg-muted)] font-mono">
       <button type="button"
-              class="p-0.5 rounded hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]"
+              class="btn-ghost p-0.5"
               title={sidebarVisible ? i18n.t('app.footer.hideSidebar') : i18n.t('app.footer.showSidebar')}
               aria-label={sidebarVisible ? i18n.t('app.footer.hideSidebar') : i18n.t('app.footer.showSidebar')}
               onclick={() => { void setSidebarVisible(!sidebarVisible); }}>
@@ -1469,7 +1470,7 @@
         </span>
         <button
           type="button"
-          class="hidden lg:inline p-0.5 rounded hover:text-[var(--color-fg)] hover:bg-[var(--color-panel-2)]"
+          class="btn-ghost hidden lg:inline p-0.5"
           title={i18n.t('app.footer.refreshStats')}
           aria-label={i18n.t('app.footer.refreshStats')}
           onclick={() => { void refreshHostStats(); }}

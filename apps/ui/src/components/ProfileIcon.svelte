@@ -43,7 +43,7 @@
   .profile-icon {
     width: 24px;
     height: 24px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     display: inline-grid;
     place-items: center;
     flex: 0 0 auto;
