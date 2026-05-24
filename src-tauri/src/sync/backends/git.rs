@@ -246,41 +246,33 @@ impl GitBackend {
         if analysis.0.is_up_to_date() {
             return Ok(0);
         }
+        let head_target = repo.head().ok().and_then(|h| h.target());
         if analysis.0.is_fast_forward() {
-            let head_target = repo.head().ok().and_then(|h| h.target());
-            let local_branch_ref = format!("refs/heads/{}", remote_cfg.branch);
-            let mut local_ref = match repo.find_reference(&local_branch_ref) {
-                Ok(r) => r,
-                Err(_) => repo
-                    .reference(
-                        &local_branch_ref,
-                        fetch_commit.id(),
-                        true,
-                        "init local branch",
-                    )
-                    .map_err(git_err)?,
-            };
-            local_ref
-                .set_target(fetch_commit.id(), "fast-forward")
-                .map_err(git_err)?;
-            repo.set_head(&local_branch_ref).map_err(git_err)?;
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
-                .map_err(git_err)?;
-            // Rough commit count between old and new HEAD.
+            let n = checkout_branch_to_commit(&repo, &remote_cfg, fetch_commit.id(), "fast-forward")?;
             if let Some(old) = head_target {
                 let count = count_commits_between(&repo, old, fetch_commit.id()).unwrap_or(0);
-                return Ok(count);
+                return Ok(count.max(n));
             }
-            return Ok(1);
+            return Ok(n.max(1));
         }
-        // True merges (history divergence) are not handled by the git
-        // backend; the engine's record-level merge resolves data conflicts
-        // and a subsequent fast-forward push will succeed once the local
-        // branch is rewritten. For now surface a clear error so callers
-        // know the operator needs to intervene.
-        Err(SyncError::Transport(
-            "diverged history; manual reconcile required".into(),
-        ))
+        // Both sides have unique commits. Git is only the transport layer — reset the
+        // working tree to the remote tip and let SyncEngine merge records (VV) from
+        // local sled/memory, then push a linear history on the next commit.
+        tracing::info!(
+            branch = %remote_cfg.branch,
+            "git fetch: diverged history; aligning branch to remote before record merge"
+        );
+        let n = checkout_branch_to_commit(
+            &repo,
+            &remote_cfg,
+            fetch_commit.id(),
+            "sync: align to remote",
+        )?;
+        if let Some(old) = head_target {
+            let count = count_commits_between(&repo, old, fetch_commit.id()).unwrap_or(0);
+            return Ok(count.max(n));
+        }
+        Ok(n.max(1))
     }
 
     fn push_blocking(&self) -> Result<(), SyncError> {
@@ -815,6 +807,34 @@ fn run_git(
     )))
 }
 
+/// Point `refs/heads/<branch>` and the working tree at `commit` (force checkout).
+fn checkout_branch_to_commit(
+    repo: &Repository,
+    remote_cfg: &RemoteConfig,
+    commit: git2::Oid,
+    log_message: &str,
+) -> Result<usize, SyncError> {
+    let local_branch_ref = format!("refs/heads/{}", remote_cfg.branch);
+    match repo.find_reference(&local_branch_ref) {
+        Ok(mut local_ref) => {
+            if local_ref.target() == Some(commit) {
+                return Ok(0);
+            }
+            local_ref.set_target(commit, log_message).map_err(git_err)?;
+        }
+        Err(_) => {
+            repo.reference(&local_branch_ref, commit, true, "init local branch")
+                .map_err(git_err)?;
+        }
+    }
+    repo.set_head(&local_branch_ref).map_err(git_err)?;
+    repo.checkout_head(Some(
+        git2::build::CheckoutBuilder::default().force(),
+    ))
+    .map_err(git_err)?;
+    Ok(1)
+}
+
 fn count_commits_between(repo: &Repository, base: git2::Oid, head: git2::Oid) -> Option<usize> {
     let mut walk = repo.revwalk().ok()?;
     walk.push(head).ok()?;
@@ -1047,6 +1067,50 @@ mod tests {
             v.https(),
             "libgit2 must be built with TLS (enable git2 features: https, vendored-openssl)"
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_recovers_from_diverged_history() {
+        let bare = bare_remote();
+        let url = format!("file://{}", bare.display());
+
+        let a_dir = tmpdir();
+        let id_a = RecordId(Uuid::new_v4());
+        let a = GitBackend::open_or_init(&a_dir)
+            .unwrap()
+            .with_remote("origin", &url, "master")
+            .unwrap();
+        a.put(Group::Appearance, id_a, b"from-a").await.unwrap();
+        a.push_remote().await.unwrap();
+
+        let b_dir = tmpdir();
+        let id_b = RecordId(Uuid::new_v4());
+        let b = GitBackend::open_or_init(&b_dir)
+            .unwrap()
+            .with_remote("origin", &url, "master")
+            .unwrap();
+        b.fetch_remote().await.unwrap();
+        b.put(Group::Appearance, id_b, b"from-b").await.unwrap();
+
+        let a2 = GitBackend::open_or_init(&a_dir)
+            .unwrap()
+            .with_remote("origin", &url, "master")
+            .unwrap();
+        let id_a2 = RecordId(Uuid::new_v4());
+        a2.put(Group::Appearance, id_a2, b"from-a2").await.unwrap();
+        a2.push_remote().await.unwrap();
+
+        // Diverged: B has a local-only commit; remote moved on A.
+        b.fetch_remote().await.expect("fetch should realign, not error");
+        let listed = b.list(Group::Appearance).await.unwrap();
+        assert!(
+            listed.contains(&id_a) || listed.contains(&id_a2),
+            "after realign, working tree should reflect remote commits"
+        );
+
+        let _ = std::fs::remove_dir_all(&a_dir);
+        let _ = std::fs::remove_dir_all(&b_dir);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     #[tokio::test]
