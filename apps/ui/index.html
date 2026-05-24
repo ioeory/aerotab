@@ -3,7 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>AeroTab</title>
+    <!-- Paint immediately before JS/CSS bundles load (WebView2 on Win10 defaults to white). -->
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: #0b0d12;
+        color: #e6e9ef;
+      }
+      #root {
+        min-height: 100%;
+        background: #0b0d12;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

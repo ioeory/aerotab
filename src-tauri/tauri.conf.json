@@ -18,7 +18,9 @@
         "height": 720,
         "minWidth": 640,
         "minHeight": 400,
-        "transparent": true
+        "visible": false,
+        "transparent": true,
+        "backgroundColor": "#0b0d12"
       }
     ],
     "security": {

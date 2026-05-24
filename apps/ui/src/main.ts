@@ -3,6 +3,7 @@
 import { mount } from 'svelte';
 import './app.css';
 import App from './App.svelte';
+import { revealMainWindow } from './lib/revealWindow';
 
 const target = document.getElementById('root');
 if (!target) throw new Error('#root not found');
@@ -20,3 +21,8 @@ document.addEventListener(
 );
 
 mount(App, { target });
+
+// Window starts hidden so WebView2 / backend init is not shown as a white flash.
+requestAnimationFrame(() => {
+  requestAnimationFrame(() => revealMainWindow());
+});

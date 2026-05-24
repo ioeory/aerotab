@@ -91,6 +91,17 @@ fn parse_window_behavior(value: serde_json::Value) -> WindowBehaviorSettings {
     out
 }
 
+/// Reveal the main window after the frontend has painted (see `apps/ui/src/main.ts`).
+#[tauri::command]
+fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Ok(());
+    }
+    window.show().map_err(|e| e.to_string())?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
 #[tauri::command]
 async fn rpc(
     state: tauri::State<'_, AppRpc>,
@@ -500,16 +511,15 @@ fn main() {
 
     tracing::info!(version = CORE_VERSION, "aerotab-app starting");
 
-    // Make WebView2's default surface transparent on Windows so the
-    // tauri.conf.json `transparent: true` flag actually shows through.
-    // Without this the WebView paints its own opaque background over the
-    // transparent native window and the opacity slider has no visible effect.
-    // Format is ARGB hex; 00 alpha = fully transparent.
+    // WebView2 defaults to white while the page loads. Use the app shell
+    // color so Win10 does not flash a bright surface behind `transparent:true`.
+    // Translucent window mode still uses CSS on #root; this only affects the
+    // WebView2 surface before/outside painted HTML.
     #[cfg(target_os = "windows")]
     {
         // SAFETY: set_var is single-threaded here, before any threads spawn.
         unsafe {
-            std::env::set_var("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "00FFFFFF");
+            std::env::set_var("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "FF0b0d12");
         }
     }
 
@@ -653,6 +663,7 @@ fn main() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            show_main_window,
             rpc,
             check_update,
             install_update,
