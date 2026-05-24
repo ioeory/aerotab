@@ -170,7 +170,7 @@
         {:else if active === 'colorscheme'}
           <ColorSchemeSection {rpc} {onError} />
         {:else if active === 'configsync'}
-          <ConfigSyncSection {rpc} {onError} />
+          <ConfigSyncSection {rpc} {onError} onSyncApplied={onSettingsChanged} />
         {:else if active === 'hotkeys'}
           <HotkeysSection {rpc} {onError} />
         {:else if active === 'plugins'}

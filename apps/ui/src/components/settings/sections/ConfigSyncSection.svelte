@@ -20,8 +20,10 @@
   interface Props {
     rpc: RpcClient;
     onError: (msg: string) => void;
+    /** Called after sync pulls data into local stores so the app can refresh. */
+    onSyncApplied?: () => void | Promise<void>;
   }
-  let { rpc, onError }: Props = $props();
+  let { rpc, onError, onSyncApplied }: Props = $props();
 
   type Backend = 'webdav' | 'git';
   type SyncGroup = 'Connections' | 'Appearance' | 'Shortcuts' | 'PluginCfg' | 'Credentials';
@@ -560,6 +562,7 @@
       const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
       setSyncInfo('ok', formatSyncStats(stats));
       await refreshStatus();
+      await onSyncApplied?.();
     } catch (e) {
       const message = (e as Error).message;
       setSyncInfo('err', i18n.t('sync.failed', { message }));

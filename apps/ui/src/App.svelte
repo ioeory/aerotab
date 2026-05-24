@@ -11,6 +11,7 @@
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
   import { selectClient, uuidv4 } from './lib/rpc';
   import { tabs, type PaneNode, type SplitDir, type SplitSide, type Tab } from './lib/tabs.svelte';
+  import { applyStoredSettingsToUi } from './lib/applyStoredSettings';
   import { applyTheme, BUILTIN_THEMES } from './lib/theme';
   import { applyCustomCss, applyLigatures } from './lib/customCss';
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
@@ -435,6 +436,13 @@
     }
   }
 
+  /** Reload profiles, theme, hotkeys, etc. after sync or settings save. */
+  async function refreshAppFromSettingsStore() {
+    settingsRev += 1;
+    sidebar?.refresh();
+    await applyStoredSettingsToUi(rpc);
+  }
+
   async function syncNowFromPalette() {
     try {
       await ensureSyncEngineConfigured(rpc);
@@ -446,7 +454,8 @@
       }
       status = i18n.t('sync.syncing');
       const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
-      status = i18n.t('sync.complete', { count: Object.keys(stats).length });
+      await refreshAppFromSettingsStore();
+      status = i18n.t('sync.complete', { count: Object.keys(stats).filter((k) => k !== '_bridge').length });
     } catch (e) {
       onError(`sync now: ${(e as Error).message}`);
     }
@@ -1474,7 +1483,7 @@
     {buildId}
     initialSection={settingsInitialSection}
     onClose={closeSettings}
-    onSettingsChanged={() => (settingsRev += 1)}
+    onSettingsChanged={() => { void refreshAppFromSettingsStore(); }}
     {onError}
   />
 {/if}
