@@ -6,6 +6,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
   import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput } from '../lib/profileMeta';
+  import { notifyProfilesChanged } from '../lib/profileEvents';
   import ProfileIcon from './ProfileIcon.svelte';
 
   interface Props {
@@ -215,6 +216,7 @@
     try {
       await rpc.call('profile.upsert', profile);
       close();
+      notifyProfilesChanged();
       onSaved();
     } catch (e) {
       onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));

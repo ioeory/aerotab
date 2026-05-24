@@ -97,7 +97,7 @@ impl GitBackend {
         branch: impl Into<String>,
     ) -> Result<Self, SyncError> {
         let name = name.into();
-        let url = url.into();
+        let url = normalize_git_remote_url(&url.into());
         let branch = branch.into();
         // Register the remote with git itself so cli tools see it too.
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
@@ -225,7 +225,7 @@ impl GitBackend {
         let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
         let mut cb = RemoteCallbacks::new();
         let auth = remote_cfg.auth.clone();
-        cb.credentials(move |_url, user, allowed| build_creds(&auth, user, allowed));
+        cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
         let mut opts = FetchOptions::new();
         opts.remote_callbacks(cb);
         let refspec = format!(
@@ -307,7 +307,7 @@ impl GitBackend {
         let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
         let mut cb = RemoteCallbacks::new();
         let auth = remote_cfg.auth.clone();
-        cb.credentials(move |_url, user, allowed| build_creds(&auth, user, allowed));
+        cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
         let mut opts = PushOptions::new();
         opts.remote_callbacks(cb);
         let refspec = format!(
@@ -321,26 +321,101 @@ impl GitBackend {
     }
 }
 
+/// Strip `https://user:pass@host/...` userinfo — embedded creds confuse libgit2 and
+/// often cause "too many redirects or authentication replays" on Windows.
+fn normalize_git_remote_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let stripped = strip_embedded_credentials(trimmed);
+    if stripped.starts_with("http://")
+        && (stripped.contains("gitlab.com")
+            || stripped.contains("github.com")
+            || stripped.contains("github."))
+    {
+        return stripped.replacen("http://", "https://", 1);
+    }
+    stripped
+}
+
+fn strip_embedded_credentials(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let scheme = &url[..scheme_end + 3];
+    let rest = &url[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return url.to_string();
+    };
+    format!("{}{}", scheme, &rest[at + 1..])
+}
+
+fn host_hint_from_url(url: &str) -> Option<&str> {
+    let rest = url.split("://").nth(1)?;
+    let host = rest.split('@').next()?.split('/').next()?;
+    Some(host.split(':').next().unwrap_or(host))
+}
+
+fn default_https_username(host: Option<&str>) -> &'static str {
+    match host {
+        Some(h) if h.contains("gitlab") => "oauth2",
+        Some(h) if h.contains("github") => "x-access-token",
+        _ => "git",
+    }
+}
+
 fn build_creds(
     auth: &RemoteAuth,
+    url: &str,
     user_from_url: Option<&str>,
     allowed: git2::CredentialType,
 ) -> Result<Cred, git2::Error> {
+    // HTTPS remotes: prefer explicit user/pass before SSH or system default.
+    if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+        if let Some(pw) = auth.password.as_deref().filter(|p| !p.is_empty()) {
+            let host = host_hint_from_url(url);
+            let user = auth
+                .username
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .or(user_from_url.filter(|u| !u.is_empty()))
+                .unwrap_or_else(|| default_https_username(host));
+            return Cred::userpass_plaintext(user, pw);
+        }
+    }
     if allowed.contains(git2::CredentialType::SSH_KEY) {
         if let Some(path) = &auth.ssh_key_path {
-            let user = user_from_url.or(auth.username.as_deref()).unwrap_or("git");
+            let user = user_from_url
+                .filter(|u| !u.is_empty())
+                .or(auth.username.as_deref().filter(|u| !u.is_empty()))
+                .unwrap_or("git");
             return Cred::ssh_key(user, None, path, auth.ssh_passphrase.as_deref());
         }
     }
-    if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
-        let user = auth.username.as_deref().unwrap_or("git");
-        let pw = auth.password.as_deref().unwrap_or("");
-        return Cred::userpass_plaintext(user, pw);
+    // Never return Cred::default() — on WinHTTP this retriggers NTLM and hits the
+    // "too many redirects or authentication replays" guard after ~7 attempts.
+    Err(git2::Error::from_str(
+        "HTTPS credentials missing or rejected (check GitLab PAT user oauth2 + token as password)",
+    ))
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn strips_embedded_credentials() {
+        assert_eq!(
+            normalize_git_remote_url("https://user:token@gitlab.com/a/b.git"),
+            "https://gitlab.com/a/b.git"
+        );
     }
-    if allowed.contains(git2::CredentialType::DEFAULT) {
-        return Cred::default();
+
+    #[test]
+    fn upgrades_gitlab_http_to_https() {
+        assert_eq!(
+            normalize_git_remote_url("http://gitlab.com/group/repo.git"),
+            "https://gitlab.com/group/repo.git"
+        );
     }
-    Err(git2::Error::from_str("no usable credentials"))
 }
 
 fn count_commits_between(repo: &Repository, base: git2::Oid, head: git2::Oid) -> Option<usize> {
@@ -355,7 +430,16 @@ fn io_err(e: std::io::Error) -> SyncError {
 }
 
 fn git_err(e: git2::Error) -> SyncError {
-    SyncError::Transport(format!("git: {e}"))
+    let msg = e.message().to_string();
+    let hint = if msg.contains("too many redirects or authentication replays") {
+        " — for GitLab HTTPS use remote user `oauth2` and a Personal Access Token as password; \
+         do not embed credentials in the remote URL; re-run Configure / re-key after fixing"
+    } else if msg.contains("401") || msg.contains("403") || msg.contains("authentication") {
+        " — check HTTPS username/PAT or complete Git OAuth sign-in"
+    } else {
+        ""
+    };
+    SyncError::Transport(format!("git: {msg}{hint}"))
 }
 
 fn group_segment(group: Group) -> &'static str {

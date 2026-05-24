@@ -828,7 +828,8 @@
 <div
   bind:this={host}
   role="application"
-  class="h-full w-full relative {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+  data-aerotab-context-menu=""
+  class="terminal-surface h-full w-full relative {active ? '' : 'pointer-events-none opacity-[0.92]'}"
   oncontextmenu={onContextMenu}
   onpointerup={onPointerUp}
   ondragover={onTransferDragOver}
@@ -933,7 +934,7 @@
 {/if}
 
 {#if menuOpen && active}
-  <div role="presentation" class="fixed inset-0 z-40" onclick={() => (menuOpen = false)}
+  <div role="presentation" data-aerotab-context-menu="" class="fixed inset-0 z-40" onclick={() => (menuOpen = false)}
        oncontextmenu={(e) => { e.preventDefault(); menuOpen = false; }}>
     <div role="menu" tabindex="-1"
          class="absolute min-w-[160px] bg-[var(--color-panel)] border border-[var(--color-border)]

@@ -29,6 +29,7 @@
     selectedSyncGroups,
   } from './lib/syncConfig';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
+  import { PROFILES_CHANGED } from './lib/profileEvents';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
@@ -1472,7 +1473,7 @@
 <ProfileModal
   {rpc}
   bind:this={profileModal}
-  onSaved={() => sidebar?.refresh()}
+  onSaved={() => { void refreshProfileList(); void sidebar?.refresh(); }}
   onClosed={() => focusActivePane()}
   {onError}
 />

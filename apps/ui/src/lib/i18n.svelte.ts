@@ -112,6 +112,9 @@ const en: Messages = {
   'sync.noRecordsExchanged': 'No encrypted records were exchanged. Check that profiles exist and Git credentials allow push.',
   'sync.credentialsSkippedLocked': 'Vault credentials were not exported (unlock Vault first).',
   'sync.credentialsSkippedUninitialized': 'Vault is not initialized; Credentials group was skipped.',
+  'sync.gitHttpsAuthHelp':
+    'Use a clean HTTPS URL without user:token@ in the address. GitLab: username oauth2 + Personal Access Token as password. Token is saved to the OS credential store on Configure (not in settings files).',
+  'sync.gitHttpsSavedHint': 'Git HTTPS token saved in OS credential store; Configure / re-key will use it.',
   'sync.vaultSectionTitle': 'Vault (credential sync)',
   'sync.vaultSectionHelp': 'Unlock the vault here so Credentials can export/import during sync. Optional: save the password to the OS credential store for automatic unlock.',
   'sync.vaultStatusUnlocked': 'unlocked',
@@ -544,6 +547,9 @@ const zhCN: Messages = {
   'sync.noRecordsExchanged': '没有交换任何加密记录。请确认已有 Profile/设置，且 Git 凭据允许 push。',
   'sync.credentialsSkippedLocked': '凭据库未解锁，Credentials 分组未导出。',
   'sync.credentialsSkippedUninitialized': '凭据库未初始化，已跳过 Credentials 分组。',
+  'sync.gitHttpsAuthHelp':
+    '远程 URL 不要写 user:token@ 前缀。GitLab：用户名 oauth2，密码填 Personal Access Token。Token 在 Configure 时写入系统凭据库，不会写入 settings 文件。',
+  'sync.gitHttpsSavedHint': 'Git HTTPS Token 已保存在系统凭据库；Configure / re-key 会自动使用。',
   'sync.vaultSectionTitle': '凭据库（同步用）',
   'sync.vaultSectionHelp': '在此解锁凭据库，同步时才能导出/导入 Credentials。可将密码保存到系统凭据库以实现自动解锁。',
   'sync.vaultStatusUnlocked': '已解锁',

@@ -6,7 +6,9 @@
   import { dispatchFocusPane } from '../lib/focusPane';
   import { profileEndpointLabel, sortProfiles } from '../lib/profileMeta';
   import { i18n } from '../lib/i18n.svelte';
+  import { PROFILES_CHANGED } from '../lib/profileEvents';
   import ProfileIcon from './ProfileIcon.svelte';
+  import { onMount, onDestroy } from 'svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -19,7 +21,7 @@
   let { rpc, onError, openProfileModal, openSerialModal, openSftp, openSettings }: Props = $props();
 
   let profiles = $state<StoredProfile[]>([]);
-  const visibleProfiles = $derived(sortProfiles(profiles));
+  const visibleProfiles = $derived(sortProfiles(profiles.filter((p) => p.kind === 'ssh')));
 
   export async function refresh() {
     try {
@@ -30,6 +32,14 @@
   }
   $effect(() => {
     void refresh();
+  });
+
+  const onProfilesChanged = () => { void refresh(); };
+  onMount(() => {
+    document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
+  });
+  onDestroy(() => {
+    document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
   });
 
   async function openLocal() {
@@ -130,7 +140,7 @@
   }
 </script>
 
-<aside class="w-[240px] shrink-0 border-r border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col">
+<aside data-aerotab-context-menu="" class="w-[240px] shrink-0 border-r border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col">
   <div class="px-4 py-3 border-b border-[var(--color-border-soft)] flex items-center gap-2">
     <div class="w-6 h-6 rounded-md bg-[var(--color-accent)] text-[var(--color-bg)] grid place-items-center font-bold text-[12px]">›_</div>
     <h1 class="text-[13px] font-semibold tracking-wide">AeroTab</h1>
@@ -252,7 +262,7 @@
 
 {#if menuOpen && menuProfile}
   {@const mp = menuProfile}
-  <div role="presentation" class="fixed inset-0 z-[55]" onclick={closeMenu}
+  <div role="presentation" data-aerotab-context-menu="" class="fixed inset-0 z-[55]" onclick={closeMenu}
        oncontextmenu={(e) => { e.preventDefault(); closeMenu(); }}>
     <div role="menu" tabindex="-1"
          class="absolute min-w-[200px] bg-[var(--color-panel)] border border-[var(--color-border)]

@@ -59,6 +59,22 @@ impl DesktopWindowState {
     }
 }
 
+/// Disable WebView2's built-in context menu (Back / Refresh / Print, etc.).
+#[cfg(target_os = "windows")]
+fn disable_native_webview_context_menus(window: &tauri::WebviewWindow) {
+    let _ = window.with_webview(|platform| {
+        let controller = platform.controller();
+        if let Ok(core) = unsafe { controller.CoreWebView2() } {
+            if let Ok(settings) = unsafe { core.Settings() } {
+                let _ = unsafe { settings.SetAreDefaultContextMenusEnabled(false) };
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn disable_native_webview_context_menus(_window: &tauri::WebviewWindow) {}
+
 fn parse_window_behavior(value: serde_json::Value) -> WindowBehaviorSettings {
     let mut out = WindowBehaviorSettings::default();
     let Some(obj) = value.as_object() else {
@@ -575,6 +591,9 @@ fn main() {
             });
             if tray_available {
                 spawn_minimize_to_tray_watcher(app.handle().clone());
+            }
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                disable_native_webview_context_menus(&window);
             }
             Ok(())
         })

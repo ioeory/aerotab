@@ -12,10 +12,11 @@
 
 ## Features
 
-- **SSH & serial** — profiles, jump chains, agent/key/password auth, known_hosts
+- **SSH & serial** — profiles, jump chains, agent / key / password / **Vault** auth, known_hosts
 - **Pane layout** — splits, drag-reorder, maximize, session workspaces
 - **SFTP** — dual-pane local/remote browser, drag-and-drop, pause/resume transfers
-- **Config sync** — encrypted WebDAV or Git backends; optional credential groups
+- **Encrypted config sync** — WebDAV or Git; exports profiles, settings, shortcuts, plugins metadata, and optional Vault entries
+- **Vault** — master-password secret store; unlock in Settings → Vault or **Config sync** when syncing credentials
 - **Git OAuth** — GitHub / GitLab device-flow tokens in the OS keyring
 - **Broadcast input** — send keystrokes to all SSH panes in a tab (`Ctrl+Shift+B`)
 - **Remote desktop** — RDP / VNC profiles with optional SSH tunnel
@@ -54,22 +55,74 @@ cd apps/ui && npm run check
 # target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_<version>_x64-setup.exe
 ```
 
-See [docs/release.md](docs/release.md) and [AGENTS.md](AGENTS.md).
+Copy the installer to a Windows local path before installing (not from `\\wsl.localhost\...`). See [docs/release.md](docs/release.md) and [AGENTS.md](AGENTS.md).
 
-## Upgrading from AeroTab
+## Config sync (overview)
 
-AeroTab **0.2.0+** uses a new application ID (`com.aerotab`). On first launch, the app attempts to **copy** profile and settings data from the previous `com.aerotab` data directory when the new directory is empty.
+Sync has two layers:
 
-- **Install path** changes from `AeroTab` to `AeroTab` under `%LOCALAPPDATA%` (Windows).
-- **OS keyring** entries use service `com.aerotab`; you may need to re-save sync master passwords and OAuth tokens once.
+1. **Engine** — configured once with **Configure / re-key** (Git/WebDAV URL, sync master password, device id). Settings live in `settings.sync`; the sync master password is stored in the **OS credential store** (default account `sync.master`), not in plain settings.
+2. **Data** — each **Sync now** (or auto-sync tick) exports local state → reconciles with the remote → imports back into local stores, then refreshes the UI.
+
+| Group | What syncs |
+|-------|------------|
+| Connections | SSH / RDP / VNC profiles (`profiles.sled`) |
+| Appearance | Theme, window, terminal, appearance, hotkeys bundle, most other `settings` keys |
+| Shortcuts | `hotkeys` |
+| PluginCfg | Loaded WASM plugin list |
+| Credentials | Vault entries (vault must be **unlocked**; optional auto-unlock via keyring account `sync.vault`) |
+
+**Typical setup (Settings → Config sync):**
+
+1. Fill Git (or WebDAV) fields and choose sync groups.
+2. **Save to OS credential store** for the sync master password → **Configure / re-key**.
+3. If **Credentials** is enabled: use **Vault (credential sync)** to initialize/unlock, or save the vault password to the OS store.
+4. **Sync now** — expect non-zero push/pull when data differs; sidebar profiles and theme update without restart.
+5. Optional: **Apply auto-sync** for periodic sync.
+
+On launch, the app runs `bootstrapSyncEngine()` so **Sync now** works without reopening settings when the engine was configured before.
+
+Protocol details: [docs/sync-protocol.md](docs/sync-protocol.md).
+
+## Local data
+
+| Platform | App data directory |
+|----------|-------------------|
+| Linux / WSL (Linux build) | `~/.local/share/com.aerotab/` |
+| Windows | `%APPDATA%\com.aerotab\` |
+| macOS | `~/Library/Application Support/com.aerotab/` |
+
+Main files: `settings.sled`, `profiles.sled`, `vault.sled`, `known_hosts.json`, `plugins/`.
+
+**OS keyring** (service `com.aerotab`): sync master password (`sync.master` by default), optional vault password for sync (`sync.vault`), Git OAuth tokens.
+
+## Versioning & release
+
+Bump version in this order, then rebuild installers:
+
+1. [Cargo.toml](Cargo.toml) — `[workspace.package].version`
+2. [src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) — `"version"` and window `title`
+3. [apps/ui/package.json](apps/ui/package.json) — `"version"`
+
+Tag releases `vX.Y.Z`. Full signing and feed steps: [docs/release.md](docs/release.md).
+
+## Upgrading from Tabby v2 / older AeroTab
+
+AeroTab **0.2.0+** uses application id **`com.aerotab`**. On first launch, if the new data directory is empty, the app copies legacy data from **`org.tabby.v2`** (see [src-tauri/src/migrate.rs](src-tauri/src/migrate.rs)).
+
+- Windows install path: `%LOCALAPPDATA%\Programs\AeroTab\` (NSIS).
+- Re-save **sync master password** and **Git OAuth** tokens in the OS keyring if prompts appear (`com.aerotab`; reads may fall back to `org.tabby.v2` once).
 
 ## Project layout
 
 ```
-apps/ui/          Svelte 5 frontend (Tauri webview)
-src-tauri/        Rust core + Tauri host (aerotab-core)
-docs/             Architecture, sync protocol, release notes
-tools/            Windows build, icons, benchmarks
+apps/ui/              Svelte 5 frontend (Tauri webview)
+  src/lib/syncConfig.ts          Sync bootstrap & engine configure helpers
+  src/lib/applyStoredSettings.ts  Re-apply theme/hotkeys after sync
+src-tauri/            Rust core + Tauri host (aerotab-core)
+  src/sync/bridge.rs             Export/import local stores ↔ sync engine
+docs/                 Architecture, sync protocol, release
+tools/                Windows build, icons, smoke install
 ```
 
 ## Relationship to Tabby

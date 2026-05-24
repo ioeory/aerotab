@@ -101,7 +101,7 @@
 
 <svelte:window onclick={closeMenu} />
 
-<div class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
+<div data-aerotab-context-menu="" class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
   {#each tabs.tabs as tab, i (tab.id)}
     {@const first = tabs.firstPane(tab)}
     {@const Icon = iconFor(first ? first.kind : 'Local')}
@@ -188,6 +188,7 @@
 
 {#if menuOpen && menuTab}
   <div
+    data-aerotab-context-menu=""
     class="fixed z-[200] min-w-[180px] py-1 rounded-md border border-[var(--color-border)]
            bg-[var(--color-panel)] shadow-xl text-[12px]"
     style="left: {menuX}px; top: {menuY}px;"

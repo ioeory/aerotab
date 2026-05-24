@@ -298,24 +298,17 @@ fn redacted_settings_all(settings: &SettingsStore) -> Result<Vec<SettingEntry>, 
     let all = settings.all().map_err(store_err)?;
     Ok(all
         .into_iter()
+        // Never sync the `sync` settings blob: it holds engine config and may
+        // contain HTTPS/WebDAV secrets. Importing a redacted copy would wipe
+        // local credentials after the first `sync.now`.
+        .filter(|e| e.key != "sync")
         .map(|mut e| {
-            if e.key == "sync" {
-                e.value = redact_sync_value(e.value);
-            }
             if e.key == "ai" {
                 e.value = redact_ai_value(e.value);
             }
             e
         })
         .collect())
-}
-
-fn redact_sync_value(mut v: Value) -> Value {
-    if let Some(obj) = v.as_object_mut() {
-        obj.remove("gitRemotePassword");
-        obj.remove("webdavPassword");
-    }
-    v
 }
 
 fn redact_ai_value(mut v: Value) -> Value {
@@ -328,6 +321,9 @@ fn redact_ai_value(mut v: Value) -> Value {
 fn apply_settings_bundle(settings: &SettingsStore, bytes: &[u8]) -> Result<(), SyncError> {
     let bundle: SettingsBundle = serde_json::from_slice(bytes).map_err(json_err)?;
     for e in bundle.entries {
+        if e.key == "sync" {
+            continue;
+        }
         settings.set(&e.key, &e.value).map_err(store_err)?;
     }
     Ok(())

@@ -41,6 +41,58 @@ export interface PersistedSyncSettings {
   keyringAccount?: string;
   /** OS keyring account for vault password used during credential sync. */
   vaultKeyringAccount?: string;
+  /** OS keyring account for Git HTTPS PAT (not stored in settings.sled). */
+  gitHttpsKeyringAccount?: string;
+}
+
+/** Keyring account for Git HTTPS personal access token. */
+export const DEFAULT_GIT_HTTPS_KEYRING_ACCOUNT = 'sync.git.https';
+
+export function gitHttpsKeyringAccount(settings: PersistedSyncSettings | null): string {
+  const a = settings?.gitHttpsKeyringAccount?.trim();
+  return a || DEFAULT_GIT_HTTPS_KEYRING_ACCOUNT;
+}
+
+export async function loadGitHttpsPassword(
+  rpc: RpcClient,
+  settings: PersistedSyncSettings | null,
+): Promise<string | undefined> {
+  const inline = settings?.gitRemotePassword?.trim();
+  if (inline) return inline;
+  try {
+    const r = await rpc.call<{ secret: string }>('secret.getMaster', {
+      account: gitHttpsKeyringAccount(settings),
+    });
+    return r.secret?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function saveGitHttpsPassword(
+  rpc: RpcClient,
+  settings: PersistedSyncSettings | null,
+  password: string,
+): Promise<void> {
+  if (!password.trim()) return;
+  await rpc.call('secret.setMaster', {
+    account: gitHttpsKeyringAccount(settings),
+    secret: password,
+  });
+}
+
+export async function hasGitHttpsPassword(
+  rpc: RpcClient,
+  settings: PersistedSyncSettings | null,
+): Promise<boolean> {
+  try {
+    const r = await rpc.call<{ has: boolean }>('secret.hasMaster', {
+      account: gitHttpsKeyringAccount(settings),
+    });
+    return r.has;
+  } catch {
+    return false;
+  }
 }
 
 const SYNC_GROUPS: SyncGroup[] = [
@@ -133,8 +185,12 @@ export async function configureSyncEngineFromSettings(
   if (settings.gitRemoteUrl) args.remote_url = settings.gitRemoteUrl;
   const mode = settings.gitAuthMode ?? 'none';
   if (mode === 'https') {
-    args.remote_user = settings.gitRemoteUser;
-    args.remote_password = settings.gitRemotePassword;
+    const pw = await loadGitHttpsPassword(rpc, settings);
+    if (pw) {
+      args.remote_user =
+        settings.gitRemoteUser?.trim() || 'oauth2';
+      args.remote_password = pw;
+    }
   } else if (mode === 'ssh') {
     args.remote_ssh_key = settings.gitSshKeyPath;
     if (settings.gitSshPassphrase) args.remote_ssh_passphrase = settings.gitSshPassphrase;

@@ -1018,10 +1018,11 @@ fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
     dispatcher.register("ssh.hostStats", move |params| {
         let st = st.clone();
         async move {
-            let p: HostStatsParams =
-                serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-            let kh = st.known_hosts.lock().await.clone();
-            let stats = ssh::stats::probe_host_stats(&p.profile, kh)
+                let p: HostStatsParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let profile = materialize_ssh_profile(&st, p.profile).await?;
+                let kh = st.known_hosts.lock().await.clone();
+                let stats = ssh::stats::probe_host_stats(&profile, kh)
                 .await
                 .map_err(|e| internal(e.to_string()))?;
             serde_json::to_value(stats).map_err(|e| internal(e.to_string()))
@@ -1113,9 +1114,10 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: SftpOpenParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let kh = st.known_hosts.lock().await.clone();
                 let sftp =
-                    Sftp::open_with_options(&p.profile, kh, SftpOpenOptions { sudo: p.sudo })
+                    Sftp::open_with_options(&profile, kh, SftpOpenOptions { sudo: p.sudo })
                         .await
                         .map_err(|e| internal(e.to_string()))?;
                 let id = Uuid::new_v4();
@@ -1960,8 +1962,12 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                                 "OAuth token missing; complete device sign-in first",
                             ));
                         }
-                    } else if let (Some(u), Some(pw)) = (p.remote_user, p.remote_password) {
-                        backend = backend.with_https_auth(u, pw);
+                    } else if let Some(pw) = p.remote_password.filter(|s| !s.is_empty()) {
+                        let user = p
+                            .remote_user
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "oauth2".into());
+                        backend = backend.with_https_auth(user, pw);
                     }
                     if let Some(key) = p.remote_ssh_key {
                         backend = backend.with_ssh_key(key, p.remote_ssh_passphrase);

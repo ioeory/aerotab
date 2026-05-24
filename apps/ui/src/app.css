@@ -52,9 +52,10 @@ html, body {
   background: color-mix(in srgb, var(--color-bg) var(--ui-bg-opacity-percent), transparent);
 }
 
-/* Spaciness — uses CSS zoom (supported by Chromium/WebKit, which covers
- * both Tauri webviews) so every pixel-sized element rescales uniformly. */
-html { zoom: var(--ui-spaciness); }
+/* Spaciness — zoom the shell, but counter-zoom terminal surfaces so xterm
+ * mouse/selection coordinates stay aligned (global html zoom breaks xterm). */
+#root { zoom: var(--ui-spaciness); }
+.terminal-surface { zoom: calc(1 / var(--ui-spaciness)); }
 
 /* When the Window section sets opacity below 100% it adds
  * `data-translucent="true"` to <body>. The chrome panels (sidebar/tabbar/
@@ -80,6 +81,10 @@ button { font-family: inherit; }
 /* xterm.js theme alignment with our tokens (the lib injects inline colors via
  * Terminal options too — see TerminalPane.svelte). */
 .xterm .xterm-viewport { background: transparent !important; }
+.xterm .xterm-rows,
+.xterm .xterm-selection {
+  line-height: inherit;
+}
 
 body[data-translucent="true"] .xterm,
 body[data-translucent="true"] .xterm .xterm-helpers,

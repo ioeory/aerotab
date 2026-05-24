@@ -14,6 +14,8 @@
     applyPersistedAutoSync,
     bootstrapSyncEngine,
     configureSyncEngineFromSettings,
+    hasGitHttpsPassword,
+    saveGitHttpsPassword,
     type PersistedSyncSettings,
   } from '../../../lib/syncConfig';
 
@@ -54,6 +56,7 @@
   let gitAuthorEmail = $state('aerotab@localhost');
   let gitRemoteUser = $state('');
   let gitRemotePassword = $state('');
+  let gitHttpsSaved = $state(false);
   let gitSshKeyPath = $state('');
   let gitSshPassphrase = $state('');
   let gitAuthMode = $state<'none' | 'https' | 'ssh' | 'oauth_github' | 'oauth_gitlab'>('none');
@@ -191,7 +194,6 @@
       gitAuthorName,
       gitAuthorEmail,
       gitRemoteUser,
-      gitRemotePassword,
       gitSshKeyPath,
       gitSshPassphrase,
       gitAuthMode,
@@ -204,7 +206,18 @@
       enabledGroups,
       keyringAccount,
       vaultKeyringAccount,
+      gitHttpsKeyringAccount: 'sync.git.https',
     };
+  }
+
+  const GIT_HTTPS_KEYRING = 'sync.git.https';
+
+  async function refreshGitHttpsSecretStatus() {
+    try {
+      gitHttpsSaved = await hasGitHttpsPassword(rpc, currentPersistedSettings());
+    } catch {
+      gitHttpsSaved = false;
+    }
   }
 
   function setGroupEnabled(group: SyncGroup, checked: boolean) {
@@ -231,7 +244,8 @@
       if (typeof v.gitAuthorName === 'string') gitAuthorName = v.gitAuthorName;
       if (typeof v.gitAuthorEmail === 'string') gitAuthorEmail = v.gitAuthorEmail;
       if (typeof v.gitRemoteUser === 'string') gitRemoteUser = v.gitRemoteUser;
-      if (typeof v.gitRemotePassword === 'string') gitRemotePassword = v.gitRemotePassword;
+      // PAT is stored in the OS keyring, not settings.sled (see persist()).
+      gitRemotePassword = '';
       if (typeof v.gitSshKeyPath === 'string') gitSshKeyPath = v.gitSshKeyPath;
       if (typeof v.gitSshPassphrase === 'string') gitSshPassphrase = v.gitSshPassphrase;
       if (
@@ -273,9 +287,10 @@
         webdavUrl, webdavUser, webdavPassword,
         gitRepoPath, gitRemoteUrl, gitRemoteName, gitRemoteBranch,
         gitAuthorName, gitAuthorEmail,
-        gitRemoteUser, gitRemotePassword, gitSshKeyPath, gitSshPassphrase,
+        gitRemoteUser,
+        gitSshKeyPath, gitSshPassphrase,
         gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
-        keyringAccount, vaultKeyringAccount,
+        keyringAccount, vaultKeyringAccount, gitHttpsKeyringAccount: GIT_HTTPS_KEYRING,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
       },
     });
@@ -515,6 +530,11 @@
     setSyncInfo('info', i18n.t('sync.configuring'));
     try {
       const snapshot = currentPersistedSettings();
+      if (gitAuthMode === 'https' && gitRemotePassword.trim()) {
+        await saveGitHttpsPassword(rpc, snapshot, gitRemotePassword);
+        gitRemotePassword = '';
+        await refreshGitHttpsSecretStatus();
+      }
       await configureSyncEngineFromSettings(rpc, snapshot, passwordForConfigure);
       if (masterPassword.trim()) {
         await rpc.call('secret.setMaster', { ...secretParams(), secret: masterPassword });
@@ -746,6 +766,7 @@
       await refreshSecretStatus();
       await refreshVaultStatus();
       await refreshVaultSecretStatus();
+      await refreshGitHttpsSecretStatus();
       const boot = await bootstrapSyncEngine(rpc);
       if (boot === 'configured') {
         setSyncInfo('ok', i18n.t('sync.engineRestored'));
@@ -890,10 +911,15 @@
         {/if}
       {:else if gitAuthMode === 'https'}
         <label for="cs-r-user" class="lbl">Remote username</label>
-        <input id="cs-r-user" bind:value={gitRemoteUser} oninput={markDirty} class="input" />
+        <input id="cs-r-user" bind:value={gitRemoteUser} oninput={markDirty} class="input"
+          placeholder="GitLab: oauth2 · GitHub: x-access-token" />
         <label for="cs-r-pass" class="lbl">Remote password / token</label>
         <input id="cs-r-pass" type="password"
           bind:value={gitRemotePassword} oninput={markDirty} class="input" />
+        <div class="help">{i18n.t('sync.gitHttpsAuthHelp')}</div>
+        {#if gitHttpsSaved && !gitRemotePassword}
+          <div class="help">{i18n.t('sync.gitHttpsSavedHint')}</div>
+        {/if}
       {:else if gitAuthMode === 'ssh'}
         <label for="cs-ssh-key" class="lbl">SSH private-key path</label>
         <input id="cs-ssh-key" bind:value={gitSshKeyPath} oninput={markDirty}
