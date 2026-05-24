@@ -20,12 +20,16 @@ jobs:
       - name: Debian build dependencies
         run: |
           apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl
+          # WebKitGTK 4.1 for Tauri 2 is in bookworm-backports (not enabled by default).
+          echo "deb http://deb.debian.org/debian bookworm-backports main" \
+            > /etc/apt/sources.list.d/bookworm-backports.list
+          apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git pkg-config build-essential \
+            curl git pkg-config build-essential \
             libssl-dev libudev-dev \
             libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
             file wget patchelf
-          # Tauri 2 needs WebKitGTK 4.1; on bookworm it lives in backports.
           apt-get install -y --no-install-recommends -t bookworm-backports \
             libwebkit2gtk-4.1-dev
       - uses: dtolnay/rust-toolchain@stable

@@ -981,6 +981,22 @@ mod tests {
         p
     }
 
+    /// `file://` URL for a local bare repo (libgit2 on Windows needs `file:///C:/...`).
+    fn path_to_file_url(path: &Path) -> String {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut s = path.to_string_lossy().into_owned();
+        const VERBATIM: &str = r"\\?\";
+        if s.starts_with(VERBATIM) {
+            s = s[VERBATIM.len()..].to_string();
+        }
+        let s = s.replace('\\', "/");
+        if s.starts_with('/') {
+            format!("file://{s}")
+        } else {
+            format!("file:///{s}")
+        }
+    }
+
     #[tokio::test]
     async fn put_get_list_delete_roundtrip() {
         let dir = tmpdir();
@@ -1032,7 +1048,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_push_roundtrip_via_local_remote() {
         let bare = bare_remote();
-        let url = format!("file://{}", bare.display());
+        let url = path_to_file_url(&bare);
 
         // Workspace A: produce two commits, push.
         let a_dir = tmpdir();
@@ -1071,7 +1087,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_recovers_from_diverged_history() {
         let bare = bare_remote();
-        let url = format!("file://{}", bare.display());
+        let url = path_to_file_url(&bare);
 
         let a_dir = tmpdir();
         let id_a = RecordId(Uuid::new_v4());
