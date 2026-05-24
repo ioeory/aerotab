@@ -1,15 +1,21 @@
 <script lang="ts">
   // Config Sync (M11) — UI on top of the existing sync.* IPC.
   //
-  // Persists non-secret configuration in settings key `sync` so the next
-  // launch can re-show / re-apply the same backend. The master password is
-  // NEVER persisted; the user re-enters it each session to (re-)configure
-  // the engine.
+  // Persists non-secret configuration in settings key `sync`. Master password
+  // is stored in the OS keyring (not in settings); the app restores the sync
+  // engine on launch via bootstrapSyncEngine().
 
   import { onMount, onDestroy } from 'svelte';
   import { RefreshCw, Play } from '@lucide/svelte';
   import { b64decode, b64encode, type RpcClient } from '../../../lib/rpc';
+  import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
+  import {
+    applyPersistedAutoSync,
+    bootstrapSyncEngine,
+    configureSyncEngineFromSettings,
+    type PersistedSyncSettings,
+  } from '../../../lib/syncConfig';
 
   interface Props {
     rpc: RpcClient;
@@ -84,7 +90,44 @@
   let autoIntervalMs = $state<number | null>(null);
   let kindLive = $state<Backend | null>(null);
   let busy = $state(false);
-  let info = $state<string>('');
+  let info = $state('');
+  let infoTone = $state<'info' | 'ok' | 'err'>('info');
+
+  type SyncStatsPayload = { pushed?: number; pulled?: number; merged?: number; unchanged?: number };
+
+  function setSyncInfo(tone: 'info' | 'ok' | 'err', message: string) {
+    infoTone = tone;
+    info = message;
+  }
+
+  function formatSyncStats(stats: Record<string, unknown> | null | undefined): string {
+    const entries = Object.entries(stats ?? {});
+    if (entries.length === 0) {
+      return i18n.t('sync.complete', { count: 0 });
+    }
+    let pushed = 0;
+    let pulled = 0;
+    let merged = 0;
+    let unchanged = 0;
+    for (const [, raw] of entries) {
+      const s = raw as SyncStatsPayload;
+      pushed += s.pushed ?? 0;
+      pulled += s.pulled ?? 0;
+      merged += s.merged ?? 0;
+      unchanged += s.unchanged ?? 0;
+    }
+    const line = i18n.t('sync.statsLine', {
+      groups: entries.length,
+      pushed,
+      pulled,
+      merged,
+      unchanged,
+    });
+    if (pushed + pulled + merged === 0) {
+      return `${line} ${i18n.t('sync.noRecordsExchanged')}`;
+    }
+    return line;
+  }
 
   let statusTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -108,6 +151,34 @@
 
   function selectedGroups(): SyncGroup[] {
     return syncGroups.filter((group) => enabledGroups[group]);
+  }
+
+  function currentPersistedSettings(): PersistedSyncSettings {
+    return {
+      backend,
+      webdavUrl,
+      webdavUser,
+      webdavPassword,
+      gitRepoPath,
+      gitRemoteUrl,
+      gitRemoteName,
+      gitRemoteBranch,
+      gitAuthorName,
+      gitAuthorEmail,
+      gitRemoteUser,
+      gitRemotePassword,
+      gitSshKeyPath,
+      gitSshPassphrase,
+      gitAuthMode,
+      githubOAuthClientId,
+      gitlabOAuthClientId,
+      gitlabOAuthBaseUrl,
+      stateDir,
+      autoSyncEnabled,
+      autoSyncMinutes,
+      enabledGroups,
+      keyringAccount,
+    };
   }
 
   function setGroupEnabled(group: SyncGroup, checked: boolean) {
@@ -146,6 +217,7 @@
       if (typeof v.githubOAuthClientId === 'string') githubOAuthClientId = v.githubOAuthClientId;
       if (typeof v.gitlabOAuthClientId === 'string') gitlabOAuthClientId = v.gitlabOAuthClientId;
       if (typeof v.gitlabOAuthBaseUrl === 'string') gitlabOAuthBaseUrl = v.gitlabOAuthBaseUrl;
+      if (typeof v.keyringAccount === 'string') keyringAccount = v.keyringAccount;
       if (typeof v.stateDir === 'string') stateDir = v.stateDir;
       if (typeof v.autoSyncEnabled === 'boolean') autoSyncEnabled = v.autoSyncEnabled;
       if (typeof v.autoSyncMinutes === 'number') autoSyncMinutes = v.autoSyncMinutes;
@@ -176,6 +248,7 @@
         gitAuthorName, gitAuthorEmail,
         gitRemoteUser, gitRemotePassword, gitSshKeyPath, gitSshPassphrase,
         gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
+        keyringAccount,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
       },
     });
@@ -257,66 +330,72 @@
       onError(`secret read: ${(e as Error).message}`);
       return null;
     });
-    if (!passwordForConfigure) { info = 'Master password is required'; return; }
-    busy = true; info = 'Configuring…';
+    if (!passwordForConfigure) {
+      setSyncInfo('err', i18n.t('sync.masterRequired'));
+      return;
+    }
+    if (backend === 'webdav' && !webdavUrl) {
+      setSyncInfo('err', 'WebDAV URL is required');
+      return;
+    }
+    if (backend === 'git' && !gitRepoPath) {
+      setSyncInfo('err', 'Git repo path is required');
+      return;
+    }
+    busy = true;
+    setSyncInfo('info', i18n.t('sync.configuring'));
     try {
-      if (backend === 'webdav') {
-        if (!webdavUrl) { info = 'WebDAV URL is required'; return; }
-        await rpc.call('sync.configureWebdav', {
-          base_url: webdavUrl,
-          user: webdavUser || undefined,
-          password: webdavPassword || undefined,
-          master_password: passwordForConfigure,
-          state_dir: stateDir || undefined,
-        });
-      } else {
-        if (!gitRepoPath) { info = 'Git repo path is required'; return; }
-        const args: Record<string, unknown> = {
-          repo_path: gitRepoPath,
-          master_password: passwordForConfigure,
-          author_name: gitAuthorName || undefined,
-          author_email: gitAuthorEmail || undefined,
-          state_dir: stateDir || undefined,
-          remote_name: gitRemoteName,
-          remote_branch: gitRemoteBranch,
-        };
-        if (gitRemoteUrl) args.remote_url = gitRemoteUrl;
-        if (gitAuthMode === 'https') {
-          args.remote_user = gitRemoteUser;
-          args.remote_password = gitRemotePassword;
-        } else if (gitAuthMode === 'ssh') {
-          args.remote_ssh_key = gitSshKeyPath;
-          if (gitSshPassphrase) args.remote_ssh_passphrase = gitSshPassphrase;
-        } else if (gitAuthMode === 'oauth_github') {
-          args.oauth_provider = 'github';
-        } else if (gitAuthMode === 'oauth_gitlab') {
-          args.oauth_provider = 'gitlab';
-        }
-        await rpc.call('sync.configureGit', args);
+      const snapshot = currentPersistedSettings();
+      await configureSyncEngineFromSettings(rpc, snapshot, passwordForConfigure);
+      if (masterPassword.trim()) {
+        await rpc.call('secret.setMaster', { ...secretParams(), secret: masterPassword });
+        masterPassword = '';
+        await refreshSecretStatus();
       }
-      info = 'Engine configured';
+      await persist();
+      setSyncInfo('ok', i18n.t('sync.engineConfigured'));
       await refreshStatus();
-      // Apply auto-sync state per current toggle.
-      await applyAutoSync();
+      await applyPersistedAutoSync(rpc, snapshot);
     } catch (e) {
-      info = '';
-      onError(`sync configure: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      setSyncInfo('err', i18n.t('sync.configureFailed', { message }));
+      onError(`sync configure: ${message}`);
     } finally {
       busy = false;
     }
   }
 
   async function syncNow() {
+    try {
+      const boot = await bootstrapSyncEngine(rpc);
+      if (boot === 'configured' || boot === 'already_configured') {
+        await refreshStatus();
+      } else if (boot === 'no_keyring_secret') {
+        setSyncInfo('err', i18n.t('sync.masterKeyringRequired'));
+        return;
+      } else if (!configured) {
+        setSyncInfo('err', i18n.t('sync.notConfiguredHint'));
+        return;
+      }
+    } catch (e) {
+      setSyncInfo('err', (e as Error).message);
+      return;
+    }
     const groups = selectedGroups();
-    if (groups.length === 0) { info = 'Enable at least one sync group'; return; }
-    busy = true; info = 'Syncing…';
+    if (groups.length === 0) {
+      setSyncInfo('err', i18n.t('sync.noGroups'));
+      return;
+    }
+    busy = true;
+    setSyncInfo('info', i18n.t('sync.syncing'));
     try {
       const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
-      info = `Sync complete: ${Object.keys(stats).length} group(s)`;
+      setSyncInfo('ok', formatSyncStats(stats));
       await refreshStatus();
     } catch (e) {
-      info = '';
-      onError(`sync now: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      setSyncInfo('err', i18n.t('sync.failed', { message }));
+      onError(`sync now: ${message}`);
     } finally {
       busy = false;
     }
@@ -324,14 +403,7 @@
 
   async function applyAutoSync() {
     try {
-      if (autoSyncEnabled) {
-        const groups = selectedGroups();
-        if (groups.length === 0) { info = 'Enable at least one sync group'; return; }
-        const interval_ms = Math.max(1, autoSyncMinutes) * 60_000;
-        await rpc.call('sync.startAutoSync', { interval_ms, groups });
-      } else {
-        await rpc.call('sync.stopAutoSync', {});
-      }
+      await applyPersistedAutoSync(rpc, currentPersistedSettings());
       await refreshStatus();
     } catch (e) {
       onError(`auto sync: ${(e as Error).message}`);
@@ -498,9 +570,15 @@
 
   onMount(() => {
     settingsCoord.registerSaver('configsync', persist);
-    void loadPersisted();
-    void refreshStatus();
-    void refreshSecretStatus();
+    void (async () => {
+      await loadPersisted();
+      await refreshSecretStatus();
+      const boot = await bootstrapSyncEngine(rpc);
+      if (boot === 'configured') {
+        setSyncInfo('ok', i18n.t('sync.engineRestored'));
+      }
+      await refreshStatus();
+    })();
     statusTimer = setInterval(refreshStatus, 5000);
   });
   onDestroy(() => {
@@ -662,8 +740,7 @@
     <input id="cs-mp" type="password" bind:value={masterPassword} class="input"
       placeholder="Enter to (re-)configure the engine" />
     <div class="help">
-      Used to derive the encryption key for every record. AeroTab never stores
-      this password — re-enter it after each launch.
+      {i18n.t('sync.masterPasswordHelp')}
     </div>
     <label for="cs-keyring-account" class="lbl">Credential account (optional)</label>
     <input id="cs-keyring-account" bind:value={keyringAccount} class="input"
@@ -727,10 +804,12 @@
       onclick={() => void applyAutoSync()}>
       Apply auto-sync setting
     </button>
-    {#if info}
-      <span class="text-[12px] text-[var(--color-fg-muted)]">{info}</span>
-    {/if}
   </div>
+  {#if info}
+    <p class="sync-status" class:sync-status-ok={infoTone === 'ok'} class:sync-status-err={infoTone === 'err'}>
+      {info}
+    </p>
+  {/if}
 
   <div>
     <div class="section-h">Advanced local records</div>
@@ -841,5 +920,17 @@
     font-size: 12px;
     color: var(--color-fg-muted);
     line-height: 1.35;
+  }
+  .sync-status {
+    margin: 8px 0 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--color-fg-muted);
+  }
+  .sync-status-ok {
+    color: var(--color-accent);
+  }
+  .sync-status-err {
+    color: var(--color-danger, #f85149);
   }
 </style>

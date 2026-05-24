@@ -46,7 +46,13 @@ serialport = "4"
 sled = "0.34"
 
 # Git
-git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# HTTPS remotes (GitLab/GitHub) need libgit2 linked with TLS; `vendored-openssl`
+# bundles OpenSSL when cross-compiling (e.g. Windows via cargo-xwin).
+git2 = {
+  version = "0.19",
+  default-features = false,
+  features = ["vendored-libgit2", "https", "vendored-openssl", "ssh"],
+}
 
 # Keychain
 keyring = "2"

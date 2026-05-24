@@ -195,18 +195,26 @@ impl GitBackend {
     /// is configured (so engine code can call this unconditionally).
     pub async fn fetch_remote(&self) -> Result<usize, SyncError> {
         let me = self.clone();
-        tokio::task::spawn_blocking(move || me.fetch_blocking())
-            .await
-            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        tokio::time::timeout(std::time::Duration::from_secs(120), async move {
+            tokio::task::spawn_blocking(move || me.fetch_blocking())
+                .await
+                .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        })
+        .await
+        .map_err(|_| SyncError::Transport("git fetch timed out after 120s".into()))?
     }
 
     /// Pushes the current branch to the configured remote. No-op when no
     /// remote is set.
     pub async fn push_remote(&self) -> Result<(), SyncError> {
         let me = self.clone();
-        tokio::task::spawn_blocking(move || me.push_blocking())
-            .await
-            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        tokio::time::timeout(std::time::Duration::from_secs(120), async move {
+            tokio::task::spawn_blocking(move || me.push_blocking())
+                .await
+                .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        })
+        .await
+        .map_err(|_| SyncError::Transport("git push timed out after 120s".into()))?
     }
 
     fn fetch_blocking(&self) -> Result<usize, SyncError> {
@@ -543,6 +551,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&a_dir);
         let _ = std::fs::remove_dir_all(&b_dir);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn libgit2_built_with_https() {
+        let v = git2::Version::get();
+        assert!(
+            v.https(),
+            "libgit2 must be built with TLS (enable git2 features: https, vendored-openssl)"
+        );
     }
 
     #[tokio::test]

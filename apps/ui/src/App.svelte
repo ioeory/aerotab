@@ -21,6 +21,12 @@
   import { hotkeys } from './lib/hotkeys';
   import { dispatchFocusPane } from './lib/focusPane';
   import { broadcastTargetIds } from './lib/broadcast';
+  import {
+    bootstrapSyncEngine,
+    ensureSyncEngineConfigured,
+    loadPersistedSyncSettings,
+    selectedSyncGroups,
+  } from './lib/syncConfig';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
@@ -41,8 +47,6 @@
     | 'vault'
     | 'window'
     | 'configfile';
-  type SyncGroup = 'Connections' | 'Appearance' | 'Shortcuts' | 'PluginCfg' | 'Credentials';
-  const syncGroups: SyncGroup[] = ['Connections', 'Appearance', 'Shortcuts', 'PluginCfg', 'Credentials'];
   let status = $state(i18n.t('app.status.idle'));
   let coreVersion = $state<string | null>(null);
   let hostStats = $state<HostStats | null>(null);
@@ -410,27 +414,6 @@
     }
   }
 
-  function selectedSyncGroupsFromSettings(value: unknown): SyncGroup[] {
-    const raw = value && typeof value === 'object' ? (value as Record<string, unknown>).enabledGroups : null;
-    const defaultEnabled: Record<SyncGroup, boolean> = {
-      Connections: true,
-      Appearance: true,
-      Shortcuts: true,
-      PluginCfg: true,
-      Credentials: false,
-    };
-    const enabled = raw && typeof raw === 'object' ? raw as Record<string, unknown> : defaultEnabled;
-    return syncGroups.filter((group) => {
-      const value = enabled[group];
-      return typeof value === 'boolean' ? value : defaultEnabled[group];
-    });
-  }
-
-  async function loadSelectedSyncGroups(): Promise<SyncGroup[]> {
-    const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sync' });
-    return selectedSyncGroupsFromSettings(r.value);
-  }
-
   async function showSyncStatusFromPalette() {
     try {
       const s = await rpc.call<{
@@ -454,7 +437,9 @@
 
   async function syncNowFromPalette() {
     try {
-      const groups = await loadSelectedSyncGroups();
+      await ensureSyncEngineConfigured(rpc);
+      const settings = await loadPersistedSyncSettings(rpc);
+      const groups = selectedSyncGroups(settings);
       if (groups.length === 0) {
         status = i18n.t('sync.noGroups');
         return;
@@ -512,6 +497,9 @@
       }
     } catch { /* not configured yet */ }
     await loadHostStatsSettings();
+    void bootstrapSyncEngine(rpc).catch((e) => {
+      console.warn('sync bootstrap:', e);
+    });
     // Startup behaviour: restore previously-open tabs (M9) and/or auto-open
     // a fresh local terminal. Both default to ON when not configured so a
     // fresh install gives the user a working terminal on launch and remembers
