@@ -248,7 +248,8 @@ impl GitBackend {
         }
         let head_target = repo.head().ok().and_then(|h| h.target());
         if analysis.0.is_fast_forward() {
-            let n = checkout_branch_to_commit(&repo, &remote_cfg, fetch_commit.id(), "fast-forward")?;
+            let n =
+                checkout_branch_to_commit(&repo, &remote_cfg, fetch_commit.id(), "fast-forward")?;
             if let Some(old) = head_target {
                 let count = count_commits_between(&repo, old, fetch_commit.id()).unwrap_or(0);
                 return Ok(count.max(n));
@@ -828,10 +829,8 @@ fn checkout_branch_to_commit(
         }
     }
     repo.set_head(&local_branch_ref).map_err(git_err)?;
-    repo.checkout_head(Some(
-        git2::build::CheckoutBuilder::default().force(),
-    ))
-    .map_err(git_err)?;
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+        .map_err(git_err)?;
     Ok(1)
 }
 
@@ -1101,7 +1100,9 @@ mod tests {
         a2.push_remote().await.unwrap();
 
         // Diverged: B has a local-only commit; remote moved on A.
-        b.fetch_remote().await.expect("fetch should realign, not error");
+        b.fetch_remote()
+            .await
+            .expect("fetch should realign, not error");
         let listed = b.list(Group::Appearance).await.unwrap();
         assert!(
             listed.contains(&id_a) || listed.contains(&id_a2),
