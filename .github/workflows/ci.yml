@@ -86,24 +86,20 @@ jobs:
         include:
           - os: ubuntu-latest
             bundle: deb
-            artifact: 'target/release/bundle/deb/AeroTab_0.2.6_amd64.deb'
-            upload_name: AeroTab_0.2.6_amd64.deb
           - os: windows-latest
             bundle: nsis
-            artifact: 'target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_0.2.6_x64-setup.exe'
-            upload_name: AeroTab_0.2.6_x64-setup.exe
           - os: macos-13
             bundle: dmg-intel
             rust_target: x86_64-apple-darwin
-            artifact: 'target/x86_64-apple-darwin/release/bundle/dmg/AeroTab_0.2.6_x64.dmg'
-            upload_name: AeroTab_0.2.6_x64.dmg
           - os: macos-14
             bundle: dmg-arm
             rust_target: aarch64-apple-darwin
-            artifact: 'target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_0.2.6_aarch64.dmg'
-            upload_name: AeroTab_0.2.6_aarch64.dmg
     steps:
       - uses: actions/checkout@v5
+      - name: Read app version
+        id: appver
+        shell: bash
+        run: echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
       - name: Add Rust cross-compilation target
         if: matrix.rust_target != ''
@@ -152,11 +148,47 @@ jobs:
         if: matrix.bundle == 'dmg-arm'
         working-directory: src-tauri
         run: cargo tauri build --target aarch64-apple-darwin --bundles dmg
+      - name: Resolve bundle artifact path
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ steps.appver.outputs.version }}"
+          case "${{ matrix.bundle }}" in
+            deb)
+              path="target/release/bundle/deb/AeroTab_${ver}_amd64.deb"
+              name="AeroTab_${ver}_amd64.deb"
+              ;;
+            nsis)
+              # Native Windows build (not cargo-xwin cross); output is under target/release/.
+              path="target/release/bundle/nsis/AeroTab_${ver}_x64-setup.exe"
+              name="AeroTab_${ver}_x64-setup.exe"
+              ;;
+            dmg-intel)
+              path="target/x86_64-apple-darwin/release/bundle/dmg/AeroTab_${ver}_x64.dmg"
+              name="AeroTab_${ver}_x64.dmg"
+              ;;
+            dmg-arm)
+              path="target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_${ver}_aarch64.dmg"
+              name="AeroTab_${ver}_aarch64.dmg"
+              ;;
+            *)
+              echo "Unknown bundle: ${{ matrix.bundle }}" >&2
+              exit 1
+              ;;
+          esac
+          if [ ! -f "$path" ]; then
+            echo "Bundle not found: $path" >&2
+            find target -type f \( -name 'AeroTab_*' -o -name '*.deb' -o -name '*.dmg' -o -name '*setup.exe' \) 2>/dev/null || true
+            exit 1
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.upload_name }}
-          path: ${{ matrix.artifact }}
+          name: ${{ steps.bundle.outputs.name }}
+          path: ${{ steps.bundle.outputs.path }}
 
   publish:
     name: Publish Release
@@ -165,16 +197,26 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v5
+      - name: Read app version
+        id: appver
+        run: echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
       - name: Prepare release files
+        shell: bash
         run: |
+          set -euo pipefail
+          ver="${{ steps.appver.outputs.version }}"
           mkdir -p release
-          mv AeroTab_0.2.6_amd64.deb/AeroTab_0.2.6_amd64.deb release/ || true
-          mv AeroTab_0.2.6_x64-setup.exe/AeroTab_0.2.6_x64-setup.exe release/ || true
-          mv AeroTab_0.2.6_x64.dmg/AeroTab_0.2.6_x64.dmg release/ || true
-          mv AeroTab_0.2.6_aarch64.dmg/AeroTab_0.2.6_aarch64.dmg release/ || true
-          cd release && sha256sum * > CHECKSUMS.sha256 || true && ls -la
+          shopt -s nullglob
+          for dir in artifacts/*/; do
+            cp -a "$dir"* release/
+          done
+          cd release
+          sha256sum * > CHECKSUMS.sha256
+          ls -la
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -182,10 +224,10 @@ jobs:
           body: |
             See dist/RELEASE_NOTES.md for full details.
 
-            **Artifacts:**
-            - AeroTab_0.2.6_amd64.deb (Linux x86_64)
-            - AeroTab_0.2.6_x64-setup.exe (Windows x86_64)
-            - AeroTab_0.2.6_x64.dmg (macOS Intel)
-            - AeroTab_0.2.6_aarch64.dmg (macOS Apple Silicon)
+            **Artifacts (v${{ steps.appver.outputs.version }}):**
+            - AeroTab_${{ steps.appver.outputs.version }}_amd64.deb (Linux x86_64)
+            - AeroTab_${{ steps.appver.outputs.version }}_x64-setup.exe (Windows x86_64)
+            - AeroTab_${{ steps.appver.outputs.version }}_x64.dmg (macOS Intel)
+            - AeroTab_${{ steps.appver.outputs.version }}_aarch64.dmg (macOS Apple Silicon)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
