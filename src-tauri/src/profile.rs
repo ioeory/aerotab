@@ -70,8 +70,12 @@ fn default_rdp_port() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ProfileKind {
-    Ssh { ssh: SshProfile },
-    Rdp { rdp: RemoteDesktopSpec },
+    Ssh {
+        ssh: SshProfile,
+    },
+    Rdp {
+        rdp: RemoteDesktopSpec,
+    },
     Vnc {
         #[serde(rename = "vnc")]
         spec: RemoteDesktopSpec,
@@ -139,7 +143,10 @@ impl ProfileStore {
         self.inner.db.open_tree(TREE_NAME).map_err(Into::into)
     }
 
-    fn with_tree<T>(&self, f: impl FnOnce(&sled::Tree) -> Result<T, ProfileError>) -> Result<T, ProfileError> {
+    fn with_tree<T>(
+        &self,
+        f: impl FnOnce(&sled::Tree) -> Result<T, ProfileError>,
+    ) -> Result<T, ProfileError> {
         let _guard = self
             .inner
             .op_lock

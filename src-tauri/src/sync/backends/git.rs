@@ -317,9 +317,7 @@ impl GitBackend {
         }
         match self.fetch_remote_refs_libgit2(remote_cfg, refspec) {
             Ok(()) => Ok(()),
-            Err(e)
-                if is_ssh_remote_url(&remote_cfg.url) && transport_is_ssh_banner_failure(&e) =>
-            {
+            Err(e) if is_ssh_remote_url(&remote_cfg.url) && transport_is_ssh_banner_failure(&e) => {
                 run_git(
                     &self.inner.repo_path,
                     &remote_cfg.auth,
@@ -360,9 +358,7 @@ impl GitBackend {
         }
         match self.push_remote_refs_libgit2(remote_cfg, refspec) {
             Ok(()) => Ok(()),
-            Err(e)
-                if is_ssh_remote_url(&remote_cfg.url) && transport_is_ssh_banner_failure(&e) =>
-            {
+            Err(e) if is_ssh_remote_url(&remote_cfg.url) && transport_is_ssh_banner_failure(&e) => {
                 run_git(
                     &self.inner.repo_path,
                     &remote_cfg.auth,
@@ -447,7 +443,10 @@ fn ensure_ssh_remote_url(url: &str, ssh_port: Option<u16>) -> String {
         let port = parsed_port.or(ssh_port);
         return format_ssh_url(host, port, "git", &path);
     }
-    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         if let Some((host_part, path)) = rest.split_once('/') {
             let host = host_part.split(':').next().unwrap_or(host_part);
             let path = path.trim_start_matches('/');
@@ -804,7 +803,9 @@ fn run_git(
     let detail = if stderr.trim().is_empty() {
         stdout.trim().to_string()
     } else {
-        format!("{}\n{}", stderr.trim(), stdout.trim()).trim().to_string()
+        format!("{}\n{}", stderr.trim(), stdout.trim())
+            .trim()
+            .to_string()
     };
     let detail = crate::text_encoding::sanitize_transport_message(&detail);
     Err(SyncError::Transport(format!(

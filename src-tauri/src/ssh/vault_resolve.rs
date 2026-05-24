@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
+use crate::ssh::SshError;
 use crate::ssh::{AuthMethod, SshProfile};
 use crate::vault::{EntryKind, VaultError, VaultStore};
-use crate::ssh::SshError;
 
 /// Replace vault references in `profile` (including `jump_via`) with concrete auth.
 pub async fn resolve_profile_vault_auth(
@@ -48,19 +48,10 @@ async fn resolve_auth(vault: Option<&VaultStore>, auth: &mut AuthMethod) -> Resu
         ));
     }
 
-    let entry = store
-        .get(&entry_id)
-        .await
-        .map_err(vault_err)?;
+    let entry = store.get(&entry_id).await.map_err(vault_err)?;
 
     let passphrase = if let Some(pid) = passphrase_entry_id.as_ref() {
-        Some(
-            store
-                .get(pid)
-                .await
-                .map_err(vault_err)?
-                .secret,
-        )
+        Some(store.get(pid).await.map_err(vault_err)?.secret)
     } else {
         None
     };

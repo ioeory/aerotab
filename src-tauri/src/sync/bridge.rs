@@ -196,10 +196,7 @@ async fn export_shortcuts(settings: &SettingsStore, engine: &SyncEngine) -> Resu
 }
 
 async fn import_shortcuts(settings: &SettingsStore, engine: &SyncEngine) -> Result<(), SyncError> {
-    if let Some(bytes) = engine
-        .get_local(Group::Shortcuts, bundle_shortcuts())
-        .await
-    {
+    if let Some(bytes) = engine.get_local(Group::Shortcuts, bundle_shortcuts()).await {
         apply_settings_bundle(settings, &bytes)?;
     }
     Ok(())
@@ -241,9 +238,7 @@ async fn export_plugin_cfg(
 }
 
 async fn import_plugin_cfg(engine: &SyncEngine) -> Result<(), SyncError> {
-    let _ = engine
-        .get_local(Group::PluginCfg, bundle_plugincfg())
-        .await;
+    let _ = engine.get_local(Group::PluginCfg, bundle_plugincfg()).await;
     // Plugin binaries are not synced; only metadata lands in the engine for other devices.
     Ok(())
 }
@@ -331,8 +326,7 @@ fn apply_settings_bundle(settings: &SettingsStore, bytes: &[u8]) -> Result<(), S
 
 fn credential_record_id(id: &str) -> RecordId {
     RecordId(
-        Uuid::parse_str(id)
-            .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_OID, id.as_bytes())),
+        Uuid::parse_str(id).unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_OID, id.as_bytes())),
     )
 }
 

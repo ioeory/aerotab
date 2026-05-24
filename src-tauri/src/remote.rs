@@ -68,11 +68,7 @@ fn launch_vnc(address: &str) -> Result<(), RemoteError> {
             return Ok(());
         }
     }
-    if Command::new("vncviewer")
-        .arg(address)
-        .spawn()
-        .is_ok()
-    {
+    if Command::new("vncviewer").arg(address).spawn().is_ok() {
         return Ok(());
     }
     Command::new("xtightvncviewer")

@@ -11,7 +11,7 @@ use russh::{Channel, Disconnect};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -230,13 +230,14 @@ async fn spawn_local_tunnel(
     let profile = req.profile;
 
     let kh = known_hosts.clone();
-    let handle = connect_authenticated_custom(&profile, known_hosts, move |hop, _| TrustingClient {
-        host_port: format!("{}:{}", hop.host, hop.port),
-        known_hosts: kh.clone(),
-        pinned_host_key_b64: None,
-        x11_forward: false,
-    })
-    .await?;
+    let handle =
+        connect_authenticated_custom(&profile, known_hosts, move |hop, _| TrustingClient {
+            host_port: format!("{}:{}", hop.host, hop.port),
+            known_hosts: kh.clone(),
+            pinned_host_key_b64: None,
+            x11_forward: false,
+        })
+        .await?;
     let handle = Arc::new(Mutex::new(handle));
 
     Ok(tokio::spawn(async move {
@@ -318,9 +319,7 @@ async fn spawn_remote_tunnel(
     let cancel_addr = remote_bind_host.clone();
     Ok(tokio::spawn(async move {
         let _ = shutdown.changed().await;
-        let _ = handle
-            .cancel_tcpip_forward(&cancel_addr, bound_port)
-            .await;
+        let _ = handle.cancel_tcpip_forward(&cancel_addr, bound_port).await;
         let _ = handle
             .disconnect(Disconnect::ByApplication, "tunnel closed", "en")
             .await;
@@ -337,13 +336,14 @@ async fn spawn_dynamic_tunnel(
     let profile = req.profile;
 
     let kh = known_hosts.clone();
-    let handle = connect_authenticated_custom(&profile, known_hosts, move |hop, _| TrustingClient {
-        host_port: format!("{}:{}", hop.host, hop.port),
-        known_hosts: kh.clone(),
-        pinned_host_key_b64: None,
-        x11_forward: false,
-    })
-    .await?;
+    let handle =
+        connect_authenticated_custom(&profile, known_hosts, move |hop, _| TrustingClient {
+            host_port: format!("{}:{}", hop.host, hop.port),
+            known_hosts: kh.clone(),
+            pinned_host_key_b64: None,
+            x11_forward: false,
+        })
+        .await?;
     let handle = Arc::new(Mutex::new(handle));
 
     Ok(tokio::spawn(async move {

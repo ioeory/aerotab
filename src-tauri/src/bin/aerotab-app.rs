@@ -12,13 +12,13 @@ use std::{
     time::Duration,
 };
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use serde::Serialize;
 use aerotab_core::commands::{register_all, AppState};
 use aerotab_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
 use aerotab_core::settings::SettingsStore;
 use aerotab_core::CORE_VERSION;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -316,7 +316,9 @@ fn local_home_dir() -> Result<String, String> {
 
 #[tauri::command]
 async fn local_list_dir(path: String) -> Result<Vec<LocalDirEntry>, String> {
-    let mut entries = tokio::fs::read_dir(&path).await.map_err(|e| e.to_string())?;
+    let mut entries = tokio::fs::read_dir(&path)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().into_owned();

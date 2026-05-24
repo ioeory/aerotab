@@ -87,7 +87,9 @@ pub fn set_secret(account: &str, secret: &str) -> Result<(), SecretError> {
     if secret.is_empty() {
         return Err(SecretError::Keyring("empty secret".into()));
     }
-    entry(account)?.set_password(secret).map_err(SecretError::from)
+    entry(account)?
+        .set_password(secret)
+        .map_err(SecretError::from)
 }
 
 pub fn get_secret(account: &str) -> Result<String, SecretError> {

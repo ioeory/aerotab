@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rand::Rng;
 use russh::client;
 use russh::keys::{key, load_secret_key, PublicKeyBase64};
 use russh::{Channel, ChannelMsg, Disconnect};
-use rand::Rng;
 use russh_keys::agent::client::AgentClient;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -431,15 +431,14 @@ pub async fn connect_shell_with_known_hosts(
 ) -> Result<SshShell, SshError> {
     let x11_enabled = x11.as_ref().is_some_and(|o| o.enabled);
     let kh = known_hosts.clone();
-    let handle = connect_authenticated_custom(profile, known_hosts, move |hop, is_final| {
-        TrustingClient {
+    let handle =
+        connect_authenticated_custom(profile, known_hosts, move |hop, is_final| TrustingClient {
             host_port: format!("{}:{}", hop.host, hop.port),
             known_hosts: kh.clone(),
             pinned_host_key_b64: None,
             x11_forward: is_final && x11_enabled,
-        }
-    })
-    .await?;
+        })
+        .await?;
 
     let mut channel = handle
         .channel_open_session()

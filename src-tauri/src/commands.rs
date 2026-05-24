@@ -58,18 +58,18 @@ use crate::core::session_manager::{SessionId, SessionKind, SessionManager, Sessi
 use crate::ipc::{Dispatcher, ErrorCode, RpcError};
 use crate::plugins::wasm_host::WasmHost;
 use crate::profile::{Profile, ProfileKind, ProfileStore, RemoteDesktopSpec};
+use crate::remote;
 use crate::secret;
 use crate::serial::{SerialChannel, SerialProfile};
 use crate::settings::SettingsStore;
 use crate::ssh::known_hosts::KnownHosts;
 use crate::ssh::sftp::{Sftp, SftpOpenOptions};
-use crate::remote;
 use crate::ssh::tunnel::{TunnelKind, TunnelManager, TunnelOpenRequest};
 use crate::ssh::{self, SshProfile, SshShell, X11ForwardOptions};
-use crate::sync::oauth::{self, OAuthProvider};
 use crate::sync::backends::git::GitBackend;
 use crate::sync::backends::webdav::WebDavBackend;
 use crate::sync::crypto::KdfParams;
+use crate::sync::oauth::{self, OAuthProvider};
 use crate::sync::persistence::SledStore;
 use crate::sync::{Group, RecordId, SyncEngine, SyncStats};
 use crate::terminal::{PtyChannel, PtySize};
@@ -928,9 +928,7 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 }),
             )
             .await
-            .map_err(|_| {
-                internal("profile.discover timed out (check ~/.ssh/config is readable)")
-            })?
+            .map_err(|_| internal("profile.discover timed out (check ~/.ssh/config is readable)"))?
             .map_err(|e| internal(format!("profile.discover join: {e}")))?;
             let (shells, ssh_config) = result;
             Ok(json!({
@@ -1040,11 +1038,11 @@ fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
     dispatcher.register("ssh.hostStats", move |params| {
         let st = st.clone();
         async move {
-                let p: HostStatsParams =
-                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let profile = materialize_ssh_profile(&st, p.profile).await?;
-                let kh = st.known_hosts.lock().await.clone();
-                let stats = ssh::stats::probe_host_stats(&profile, kh)
+            let p: HostStatsParams =
+                serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+            let profile = materialize_ssh_profile(&st, p.profile).await?;
+            let kh = st.known_hosts.lock().await.clone();
+            let stats = ssh::stats::probe_host_stats(&profile, kh)
                 .await
                 .map_err(|e| internal(e.to_string()))?;
             serde_json::to_value(stats).map_err(|e| internal(e.to_string()))
@@ -1138,10 +1136,9 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let kh = st.known_hosts.lock().await.clone();
-                let sftp =
-                    Sftp::open_with_options(&profile, kh, SftpOpenOptions { sudo: p.sudo })
-                        .await
-                        .map_err(|e| internal(e.to_string()))?;
+                let sftp = Sftp::open_with_options(&profile, kh, SftpOpenOptions { sudo: p.sudo })
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
                 let id = Uuid::new_v4();
                 st.sftp_sessions.lock().await.insert(id, Arc::new(sftp));
                 Ok(json!({ "id": id }))
@@ -1374,7 +1371,10 @@ fn oauth_https_credentials(provider: OAuthProvider, token: String) -> (String, S
     }
 }
 
-async fn materialize_ssh_profile(st: &AppState, mut ssh: SshProfile) -> Result<SshProfile, RpcError> {
+async fn materialize_ssh_profile(
+    st: &AppState,
+    mut ssh: SshProfile,
+) -> Result<SshProfile, RpcError> {
     let vault = st.vault.lock().await.clone();
     ssh::vault_resolve::resolve_profile_vault_auth(vault.as_ref(), &mut ssh)
         .await
@@ -1410,11 +1410,7 @@ async fn open_remote_desktop(
     if let Some(pid) = spec.ssh_profile_id {
         let ssh = resolve_ssh_profile(st, pid).await?;
         let kh = st.known_hosts.lock().await.clone();
-        let bind_port = if local_port > 0 {
-            local_port
-        } else {
-            0
-        };
+        let bind_port = if local_port > 0 { local_port } else { 0 };
         let meta = st
             .tunnels
             .open(
@@ -1574,15 +1570,17 @@ fn register_oauth(dispatcher: &Dispatcher, _state: Arc<AppState>) {
         let connected = oauth::load_token(prov)
             .map_err(|e| internal(e.to_string()))?
             .is_some();
-        serde_json::to_value(oauth::OAuthStatus { provider: prov, connected })
-            .map_err(|e| internal(e.to_string()))
+        serde_json::to_value(oauth::OAuthStatus {
+            provider: prov,
+            connected,
+        })
+        .map_err(|e| internal(e.to_string()))
     });
     dispatcher.register("sync.oauthClear", move |params| async move {
         let p: OAuthProviderParams =
             serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
         let prov = parse_oauth_provider(&p.provider)?;
-        oauth::clear_token(prov)
-            .map_err(|e| internal(e.to_string()))?;
+        oauth::clear_token(prov).map_err(|e| internal(e.to_string()))?;
         Ok(json!({ "cleared": true }))
     });
 }
@@ -1632,8 +1630,8 @@ fn register_remote(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("remote.openProfile", move |params| {
             let st = st.clone();
             async move {
-                let p: RemoteOpenProfileParams = serde_json::from_value(params)
-                    .map_err(|e| invalid_params(e.to_string()))?;
+                let p: RemoteOpenProfileParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_profiles(&st).await?;
                 let profile = store
                     .get(p.profile_id)
@@ -1974,10 +1972,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         Some("ssh") => GitRemoteTransport::Ssh,
                         Some("https") => GitRemoteTransport::Https,
                         _ if p.oauth_provider.is_some()
-                            || p
-                                .remote_password
-                                .as_ref()
-                                .is_some_and(|s| !s.is_empty()) =>
+                            || p.remote_password.as_ref().is_some_and(|s| !s.is_empty()) =>
                         {
                             GitRemoteTransport::Https
                         }
@@ -1990,8 +1985,8 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         .map_err(|e| internal(e.to_string()))?;
                     if let Some(ref provider) = p.oauth_provider {
                         let prov = parse_oauth_provider(provider)?;
-                        if let Some(token) = oauth::load_token(prov)
-                            .map_err(|e| internal(e.to_string()))?
+                        if let Some(token) =
+                            oauth::load_token(prov).map_err(|e| internal(e.to_string()))?
                         {
                             let (user, pass) = oauth_https_credentials(prov, token);
                             backend = backend.with_https_auth(user, pass);
@@ -2119,8 +2114,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         account: None,
                     }
                 } else {
-                    serde_json::from_value(params)
-                        .map_err(|e| invalid_params(e.to_string()))?
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?
                 };
                 let vault = match st.vault.lock().await.clone() {
                     Some(v) => v,
@@ -2175,8 +2169,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 };
                 let groups = selected_sync_groups(p.groups);
                 let eng = require_engine(&st).await?;
-                let (results, bridge_notes) = match run_sync_now_cycle(&st, &eng, &groups).await
-                {
+                let (results, bridge_notes) = match run_sync_now_cycle(&st, &eng, &groups).await {
                     Ok(v) => {
                         record_sync_history_ok(&st, "manual", &groups, &v.0).await;
                         v
@@ -2296,7 +2289,8 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
             let st = st.clone();
             async move {
                 let store = require_settings(&st).await?;
-                let list = crate::sync::history::load(&store).map_err(|e| internal(e.to_string()))?;
+                let list =
+                    crate::sync::history::load(&store).map_err(|e| internal(e.to_string()))?;
                 serde_json::to_value(list).map_err(|e| internal(e.to_string()))
             }
         });
@@ -2388,20 +2382,12 @@ async fn run_sync_now_cycle(
         .await
         .map_err(|e| internal(e.to_string()))?;
     if let (Some(profiles), Some(settings)) = (&profiles, &settings) {
-        crate::sync::bridge::import_locals(
-            profiles,
-            settings,
-            vault.as_ref(),
-            eng,
-            groups,
-        )
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-    }
-    if let Some(g) = &git {
-        g.push_remote()
+        crate::sync::bridge::import_locals(profiles, settings, vault.as_ref(), eng, groups)
             .await
             .map_err(|e| internal(e.to_string()))?;
+    }
+    if let Some(g) = &git {
+        g.push_remote().await.map_err(|e| internal(e.to_string()))?;
     }
     Ok((results, bridge_notes))
 }

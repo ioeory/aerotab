@@ -140,10 +140,7 @@ async fn github_device_start(client_id: &str) -> Result<DeviceFlowStart, OAuthEr
     let resp: GithubDeviceStartResponse = client
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
-        .form(&[
-            ("client_id", client_id),
-            ("scope", "repo"),
-        ])
+        .form(&[("client_id", client_id), ("scope", "repo")])
         .send()
         .await?
         .error_for_status()
@@ -205,10 +202,7 @@ async fn gitlab_device_start(client_id: &str, base: &str) -> Result<DeviceFlowSt
     let url = format!("{base}/oauth/authorize_device");
     let resp: GitlabDeviceStartResponse = client
         .post(url)
-        .form(&[
-            ("client_id", client_id),
-            ("scope", "write_repository"),
-        ])
+        .form(&[("client_id", client_id), ("scope", "write_repository")])
         .send()
         .await?
         .error_for_status()
