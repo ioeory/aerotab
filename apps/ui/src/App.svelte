@@ -4,6 +4,7 @@
   import TabBar from './components/TabBar.svelte';
   import PaneGrid from './components/PaneGrid.svelte';
   import ProfileModal from './components/ProfileModal.svelte';
+  import VaultUnlockModal from './components/VaultUnlockModal.svelte';
   import SerialModal from './components/SerialModal.svelte';
   import SftpBrowser from './components/SftpBrowser.svelte';
   import SettingsLayout from './components/settings/SettingsLayout.svelte';
@@ -28,12 +29,13 @@
     loadPersistedSyncSettings,
     selectedSyncGroups,
   } from './lib/syncConfig';
+  import { bootstrapVault } from './lib/vaultBootstrap';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.0-ui-20260524';
+  const buildId = '0.2.1-ui-20260524';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -60,6 +62,7 @@
   let hostStatsUpdatedAt = $state<number | null>(null);
 
   let profileModal: { open: (existing?: StoredProfile) => void } | null = $state(null);
+  let vaultUnlockModal: { open: () => Promise<void> } | null = $state(null);
   let serialModal: { open: () => Promise<void> } | null = $state(null);
   let sidebar: { refresh: () => Promise<void> } | null = $state(null);
   let settingsOpen = $state(false);
@@ -510,6 +513,14 @@
     void bootstrapSyncEngine(rpc).catch((e) => {
       console.warn('sync bootstrap:', e);
     });
+    try {
+      const vaultBoot = await bootstrapVault(rpc);
+      if (vaultBoot === 'needs_password') {
+        await vaultUnlockModal?.open();
+      }
+    } catch (e) {
+      console.warn('vault bootstrap:', e);
+    }
     // Startup behaviour: restore previously-open tabs (M9) and/or auto-open
     // a fresh local terminal. Both default to ON when not configured so a
     // fresh install gives the user a working terminal on launch and remembers
@@ -1476,6 +1487,12 @@
   onSaved={() => { void refreshProfileList(); void sidebar?.refresh(); }}
   onClosed={() => focusActivePane()}
   {onError}
+/>
+<VaultUnlockModal
+  {rpc}
+  bind:this={vaultUnlockModal}
+  {onError}
+  onUnlocked={() => { status = i18n.t('sync.vaultUnlocked'); }}
 />
 <SerialModal {rpc} bind:this={serialModal} {onError} />
 {#if settingsOpen}

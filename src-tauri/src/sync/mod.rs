@@ -10,6 +10,7 @@ pub mod backends;
 pub mod bridge;
 pub mod crypto;
 pub mod engine;
+pub mod history;
 pub mod oauth;
 pub mod persistence;
 pub mod version_vector;

@@ -30,6 +30,8 @@ export interface PersistedSyncSettings {
   gitRemotePassword?: string;
   gitSshKeyPath?: string;
   gitSshPassphrase?: string;
+  /** SSH port for Git remote (default 22). */
+  gitSshPort?: number;
   gitAuthMode?: GitAuthMode;
   githubOAuthClientId?: string;
   gitlabOAuthClientId?: string;
@@ -74,10 +76,11 @@ export async function saveGitHttpsPassword(
   settings: PersistedSyncSettings | null,
   password: string,
 ): Promise<void> {
-  if (!password.trim()) return;
+  const secret = password.trim();
+  if (!secret) return;
   await rpc.call('secret.setMaster', {
     account: gitHttpsKeyringAccount(settings),
-    secret: password,
+    secret,
   });
 }
 
@@ -93,6 +96,15 @@ export async function hasGitHttpsPassword(
   } catch {
     return false;
   }
+}
+
+export async function clearGitHttpsPassword(
+  rpc: RpcClient,
+  settings: PersistedSyncSettings | null,
+): Promise<void> {
+  await rpc.call('secret.clearMaster', {
+    account: gitHttpsKeyringAccount(settings),
+  });
 }
 
 const SYNC_GROUPS: SyncGroup[] = [
@@ -186,14 +198,18 @@ export async function configureSyncEngineFromSettings(
   const mode = settings.gitAuthMode ?? 'none';
   if (mode === 'https') {
     const pw = await loadGitHttpsPassword(rpc, settings);
-    if (pw) {
-      args.remote_user =
-        settings.gitRemoteUser?.trim() || 'oauth2';
-      args.remote_password = pw;
+    if (!pw) {
+      throw new Error(
+        'Git HTTPS token is missing. Enter your PAT and click “Save Git token” or Configure / re-key.',
+      );
     }
+    args.remote_user = settings.gitRemoteUser?.trim() || 'oauth2';
+    args.remote_password = pw;
   } else if (mode === 'ssh') {
     args.remote_ssh_key = settings.gitSshKeyPath;
     if (settings.gitSshPassphrase) args.remote_ssh_passphrase = settings.gitSshPassphrase;
+    const port = Number(settings.gitSshPort);
+    if (port > 0 && port !== 22) args.remote_ssh_port = port;
   } else if (mode === 'oauth_github') {
     args.oauth_provider = 'github';
   } else if (mode === 'oauth_gitlab') {
@@ -217,28 +233,36 @@ export type SyncBootstrapResult =
   | 'already_configured'
   | 'configured'
   | 'no_settings'
-  | 'no_keyring_secret';
+  | 'no_keyring_secret'
+  | 'no_git_https_secret';
 
 /**
  * On app launch: if sync was set up before, re-key the engine from the OS
  * credential store so Sync now / auto-sync work without opening settings.
  */
 export async function bootstrapSyncEngine(rpc: RpcClient): Promise<SyncBootstrapResult> {
-  if (await isSyncEngineConfigured(rpc)) {
-    return 'already_configured';
-  }
   const settings = await loadPersistedSyncSettings(rpc);
   if (!settings || !hasMinimumSyncConfig(settings)) {
     return 'no_settings';
   }
+  const wasConfigured = await isSyncEngineConfigured(rpc);
   try {
     const has = await rpc.call<{ has: boolean }>('secret.hasMaster', secretParams(settings));
     if (!has.has) return 'no_keyring_secret';
+    if (settings.backend === 'git' && settings.gitAuthMode === 'https') {
+      const token = await loadGitHttpsPassword(rpc, settings);
+      if (!token) return 'no_git_https_secret';
+    }
     const r = await rpc.call<{ secret: string }>('secret.getMaster', secretParams(settings));
     await configureSyncEngineFromSettings(rpc, settings, r.secret);
     await applyPersistedAutoSync(rpc, settings);
-    return 'configured';
-  } catch {
+    if (!wasConfigured) {
+      return 'configured';
+    }
+    return 'already_configured';
+  } catch (e) {
+    const msg = (e as Error).message ?? '';
+    if (msg.includes('HTTPS token is missing')) return 'no_git_https_secret';
     return 'no_keyring_secret';
   }
 }
@@ -249,6 +273,12 @@ export async function ensureSyncEngineConfigured(rpc: RpcClient): Promise<void> 
   if (boot === 'configured' || boot === 'already_configured') return;
   if (boot === 'no_settings') {
     throw new Error('Sync is not set up. Open Config sync in settings first.');
+  }
+  if (boot === 'no_git_https_secret') {
+    throw new Error(
+      'Git HTTPS token is not in the OS credential store. '
+        + 'Enter your PAT in Config sync, click “Save Git token”, then Configure / re-key.',
+    );
   }
   throw new Error(
     'Sync master password is not in the OS credential store. '

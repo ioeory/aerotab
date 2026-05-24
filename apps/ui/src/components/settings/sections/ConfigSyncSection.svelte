@@ -14,7 +14,9 @@
     applyPersistedAutoSync,
     bootstrapSyncEngine,
     configureSyncEngineFromSettings,
+    clearGitHttpsPassword,
     hasGitHttpsPassword,
+    loadGitHttpsPassword,
     saveGitHttpsPassword,
     type PersistedSyncSettings,
   } from '../../../lib/syncConfig';
@@ -59,6 +61,7 @@
   let gitHttpsSaved = $state(false);
   let gitSshKeyPath = $state('');
   let gitSshPassphrase = $state('');
+  let gitSshPort = $state(22);
   let gitAuthMode = $state<'none' | 'https' | 'ssh' | 'oauth_github' | 'oauth_gitlab'>('none');
   let githubOAuthClientId = $state('');
   let gitlabOAuthClientId = $state('');
@@ -159,6 +162,20 @@
 
   let statusTimer: ReturnType<typeof setInterval> | null = null;
 
+  interface SyncHistoryEntry {
+    id: string;
+    at_ms: number;
+    trigger: string;
+    ok: boolean;
+    error?: string;
+    groups: string[];
+    pushed: number;
+    pulled: number;
+    merged: number;
+    unchanged: number;
+  }
+  let syncHistory = $state<SyncHistoryEntry[]>([]);
+
   function markDirty() { settingsCoord.markDirty(); }
 
   function fmtTime(ms: number | null): string {
@@ -196,6 +213,7 @@
       gitRemoteUser,
       gitSshKeyPath,
       gitSshPassphrase,
+      gitSshPort,
       gitAuthMode,
       githubOAuthClientId,
       gitlabOAuthClientId,
@@ -217,6 +235,39 @@
       gitHttpsSaved = await hasGitHttpsPassword(rpc, currentPersistedSettings());
     } catch {
       gitHttpsSaved = false;
+    }
+  }
+
+  async function saveGitHttpsSecret() {
+    if (!gitRemotePassword.trim()) {
+      setSyncInfo('err', i18n.t('sync.gitHttpsRequired'));
+      return;
+    }
+    secretBusy = true;
+    try {
+      const snapshot = currentPersistedSettings();
+      await saveGitHttpsPassword(rpc, snapshot, gitRemotePassword);
+      gitRemotePassword = '';
+      await refreshGitHttpsSecretStatus();
+      setSyncInfo('ok', i18n.t('sync.gitHttpsSavedHint'));
+    } catch (e) {
+      onError(`git token save: ${(e as Error).message}`);
+    } finally {
+      secretBusy = false;
+    }
+  }
+
+  async function clearGitHttpsSecret() {
+    if (!confirm(i18n.t('sync.gitHttpsForgetConfirm'))) return;
+    secretBusy = true;
+    try {
+      await clearGitHttpsPassword(rpc, currentPersistedSettings());
+      await refreshGitHttpsSecretStatus();
+      setSyncInfo('info', i18n.t('sync.gitHttpsCleared'));
+    } catch (e) {
+      onError(`git token clear: ${(e as Error).message}`);
+    } finally {
+      secretBusy = false;
     }
   }
 
@@ -248,6 +299,7 @@
       gitRemotePassword = '';
       if (typeof v.gitSshKeyPath === 'string') gitSshKeyPath = v.gitSshKeyPath;
       if (typeof v.gitSshPassphrase === 'string') gitSshPassphrase = v.gitSshPassphrase;
+      if (typeof v.gitSshPort === 'number' && v.gitSshPort > 0) gitSshPort = v.gitSshPort;
       if (
         v.gitAuthMode === 'none' || v.gitAuthMode === 'https' || v.gitAuthMode === 'ssh'
         || v.gitAuthMode === 'oauth_github' || v.gitAuthMode === 'oauth_gitlab'
@@ -288,7 +340,7 @@
         gitRepoPath, gitRemoteUrl, gitRemoteName, gitRemoteBranch,
         gitAuthorName, gitAuthorEmail,
         gitRemoteUser,
-        gitSshKeyPath, gitSshPassphrase,
+        gitSshKeyPath, gitSshPassphrase, gitSshPort,
         gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
         keyringAccount, vaultKeyringAccount, gitHttpsKeyringAccount: GIT_HTTPS_KEYRING,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
@@ -530,10 +582,17 @@
     setSyncInfo('info', i18n.t('sync.configuring'));
     try {
       const snapshot = currentPersistedSettings();
-      if (gitAuthMode === 'https' && gitRemotePassword.trim()) {
-        await saveGitHttpsPassword(rpc, snapshot, gitRemotePassword);
-        gitRemotePassword = '';
-        await refreshGitHttpsSecretStatus();
+      if (gitAuthMode === 'https') {
+        if (gitRemotePassword.trim()) {
+          await saveGitHttpsPassword(rpc, snapshot, gitRemotePassword);
+          gitRemotePassword = '';
+          await refreshGitHttpsSecretStatus();
+        }
+        const token = await loadGitHttpsPassword(rpc, snapshot);
+        if (!token) {
+          setSyncInfo('err', i18n.t('sync.gitHttpsRequired'));
+          return;
+        }
       }
       await configureSyncEngineFromSettings(rpc, snapshot, passwordForConfigure);
       if (masterPassword.trim()) {
@@ -542,9 +601,10 @@
         await refreshSecretStatus();
       }
       await persist();
+      await applyPersistedAutoSync(rpc, snapshot);
       setSyncInfo('ok', i18n.t('sync.engineConfigured'));
       await refreshStatus();
-      await applyPersistedAutoSync(rpc, snapshot);
+      await loadSyncHistory();
     } catch (e) {
       const message = (e as Error).message;
       setSyncInfo('err', i18n.t('sync.configureFailed', { message }));
@@ -561,6 +621,9 @@
         await refreshStatus();
       } else if (boot === 'no_keyring_secret') {
         setSyncInfo('err', i18n.t('sync.masterKeyringRequired'));
+        return;
+      } else if (boot === 'no_git_https_secret') {
+        setSyncInfo('err', i18n.t('sync.gitHttpsRequired'));
         return;
       } else if (!configured) {
         setSyncInfo('err', i18n.t('sync.notConfiguredHint'));
@@ -582,6 +645,7 @@
       const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
       setSyncInfo('ok', formatSyncStats(stats));
       await refreshStatus();
+      await loadSyncHistory();
       await onSyncApplied?.();
     } catch (e) {
       const message = (e as Error).message;
@@ -592,13 +656,39 @@
     }
   }
 
+  async function loadSyncHistory() {
+    try {
+      syncHistory = await rpc.call<SyncHistoryEntry[]>('sync.history', {});
+    } catch {
+      syncHistory = [];
+    }
+  }
+
+  async function clearSyncHistory() {
+    if (!confirm(i18n.t('sync.historyClearConfirm'))) return;
+    try {
+      await rpc.call('sync.historyClear', {});
+      syncHistory = [];
+    } catch (e) {
+      onError(`sync history clear: ${(e as Error).message}`);
+    }
+  }
+
   async function applyAutoSync() {
     try {
+      await persist();
       await applyPersistedAutoSync(rpc, currentPersistedSettings());
       await refreshStatus();
+      setSyncInfo('ok', i18n.t('sync.autoSyncApplied'));
     } catch (e) {
       onError(`auto sync: ${(e as Error).message}`);
     }
+  }
+
+  async function onAutoSyncSettingsChanged() {
+    markDirty();
+    if (!configured) return;
+    await applyAutoSync();
   }
 
   async function listSyncRecords() {
@@ -772,8 +862,12 @@
         setSyncInfo('ok', i18n.t('sync.engineRestored'));
       }
       await refreshStatus();
+      await loadSyncHistory();
     })();
-    statusTimer = setInterval(refreshStatus, 5000);
+    statusTimer = setInterval(async () => {
+      await refreshStatus();
+      await loadSyncHistory();
+    }, 5000);
   });
   onDestroy(() => {
     settingsCoord.unregisterSaver('configsync');
@@ -918,9 +1012,23 @@
           bind:value={gitRemotePassword} oninput={markDirty} class="input" />
         <div class="help">{i18n.t('sync.gitHttpsAuthHelp')}</div>
         {#if gitHttpsSaved && !gitRemotePassword}
-          <div class="help">{i18n.t('sync.gitHttpsSavedHint')}</div>
+          <div class="help text-[var(--color-success)]">{i18n.t('sync.gitHttpsSavedHint')}</div>
         {/if}
+        <div class="flex gap-2 flex-wrap pt-2">
+          <button type="button" class="btn-secondary" disabled={secretBusy}
+                  onclick={() => { void saveGitHttpsSecret(); }}>
+            {i18n.t('sync.gitHttpsSave')}
+          </button>
+          <button type="button" class="btn-secondary" disabled={secretBusy || !gitHttpsSaved}
+                  onclick={() => { void clearGitHttpsSecret(); }}>
+            {i18n.t('sync.gitHttpsClear')}
+          </button>
+        </div>
       {:else if gitAuthMode === 'ssh'}
+        <label for="cs-ssh-port" class="lbl">{i18n.t('sync.gitSshPort')}</label>
+        <input id="cs-ssh-port" type="number" min="1" max="65535" bind:value={gitSshPort} oninput={markDirty}
+          class="input" />
+        <div class="help">{i18n.t('sync.gitSshPortHelp')}</div>
         <label for="cs-ssh-key" class="lbl">SSH private-key path</label>
         <input id="cs-ssh-key" bind:value={gitSshKeyPath} oninput={markDirty}
           placeholder="/home/me/.ssh/id_ed25519" class="input" />
@@ -1042,15 +1150,72 @@
   <div>
     <div class="section-h">Auto sync</div>
     <label class="row">
-      <input type="checkbox" bind:checked={autoSyncEnabled} onchange={markDirty} />
-      Sync automatically every
+      <input type="checkbox" bind:checked={autoSyncEnabled}
+        onchange={() => { void onAutoSyncSettingsChanged(); }} />
+      {i18n.t('sync.autoSyncEvery')}
       <input
         type="number" min="1" max="1440"
-        bind:value={autoSyncMinutes} oninput={markDirty}
+        bind:value={autoSyncMinutes}
+        onchange={() => { void onAutoSyncSettingsChanged(); }}
         class="input" style="width: 70px; display: inline-block; margin: 0 4px;"
       />
-      minutes
+      {i18n.t('sync.autoSyncMinutes')}
     </label>
+    <div class="help">{i18n.t('sync.autoSyncHelp')}</div>
+    {#if configured && autoIntervalMs}
+      <div class="help text-[var(--color-accent)]">
+        {i18n.t('sync.autoSyncActive', { minutes: Math.round(autoIntervalMs / 60_000) })}
+      </div>
+    {/if}
+  </div>
+
+  <div>
+    <div class="section-h flex items-center justify-between gap-2">
+      <span>{i18n.t('sync.historyTitle')}</span>
+      <button type="button" class="btn-secondary text-[11px] py-1 px-2"
+              disabled={syncHistory.length === 0}
+              onclick={() => { void clearSyncHistory(); }}>
+        {i18n.t('sync.historyClear')}
+      </button>
+    </div>
+    {#if syncHistory.length === 0}
+      <div class="help">{i18n.t('sync.historyEmpty')}</div>
+    {:else}
+      <div class="sync-history-table">
+        <table>
+          <thead>
+            <tr>
+              <th>{i18n.t('sync.historyColTime')}</th>
+              <th>{i18n.t('sync.historyColTrigger')}</th>
+              <th>{i18n.t('sync.historyColResult')}</th>
+              <th>{i18n.t('sync.historyColStats')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each syncHistory as row (row.id)}
+              <tr class:sync-history-err={!row.ok}>
+                <td>{new Date(row.at_ms).toLocaleString()}</td>
+                <td>{row.trigger === 'auto' ? i18n.t('sync.historyTriggerAuto') : i18n.t('sync.historyTriggerManual')}</td>
+                <td>
+                  {#if row.ok}
+                    <span class="text-[var(--color-success)]">{i18n.t('sync.historyOk')}</span>
+                  {:else}
+                    <span class="text-[var(--color-danger)]" title={row.error ?? ''}>{i18n.t('sync.historyFailed')}</span>
+                  {/if}
+                </td>
+                <td class="text-[11px]">
+                  {#if row.ok}
+                    +{row.pushed} / ↓{row.pulled} / ⇄{row.merged} / ={row.unchanged}
+                  {:else}
+                    <span class="truncate max-w-[200px] inline-block align-bottom" title={row.error}>{row.error}</span>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
   </div>
 
   <div class="flex gap-2 items-center pt-2">
@@ -1063,7 +1228,7 @@
     </button>
     <button type="button" class="btn-secondary" disabled={busy || !configured}
       onclick={() => void applyAutoSync()}>
-      Apply auto-sync setting
+      {i18n.t('sync.autoSyncApply')}
     </button>
   </div>
   {#if info}
@@ -1193,5 +1358,32 @@
   }
   .sync-status-err {
     color: var(--color-danger, #f85149);
+  }
+  .sync-history-table {
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--color-border-soft);
+    border-radius: 6px;
+  }
+  .sync-history-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .sync-history-table th,
+  .sync-history-table td {
+    padding: 6px 8px;
+    text-align: left;
+    border-bottom: 1px solid var(--color-border-soft);
+  }
+  .sync-history-table th {
+    position: sticky;
+    top: 0;
+    background: var(--color-panel-2);
+    color: var(--color-fg-muted);
+    font-weight: 600;
+  }
+  .sync-history-table tr.sync-history-err td {
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
   }
 </style>

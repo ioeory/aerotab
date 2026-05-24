@@ -321,6 +321,121 @@ impl GitBackend {
     }
 }
 
+/// How the sync UI configured remote authentication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitRemoteTransport {
+    Https,
+    Ssh,
+    Unspecified,
+}
+
+/// Pick an `https://` or `ssh://git@host:port/path` URL that matches the configured auth.
+/// Using `git@…` with HTTPS/OAuth makes libgit2 open SSH and fail with
+/// "Failed getting banner" when only port 443 is reachable.
+/// Non-default SSH ports must use `ssh://` (or `gitSshPort` + Configure).
+pub(crate) fn align_git_remote_url(
+    url: &str,
+    transport: GitRemoteTransport,
+    ssh_port: Option<u16>,
+) -> String {
+    let url = normalize_git_remote_url(url);
+    match transport {
+        GitRemoteTransport::Https => scp_or_ssh_url_to_https(&url).unwrap_or(url),
+        GitRemoteTransport::Ssh => ensure_ssh_remote_url(&url, ssh_port),
+        GitRemoteTransport::Unspecified => url,
+    }
+}
+
+/// `git@host:group/repo.git` → `https://host/group/repo.git` (HTTPS always uses 443).
+fn scp_or_ssh_url_to_https(url: &str) -> Option<String> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return Some(url.to_string());
+    }
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, _port, path) = parse_git_scp_suffix(rest);
+        if path.is_empty() {
+            return None;
+        }
+        return Some(format!("https://{host}/{path}"));
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.strip_prefix("git@").unwrap_or(rest);
+        let (host_part, path) = rest.split_once('/')?;
+        let host = host_part.split(':').next()?;
+        let path = path.trim_start_matches('/');
+        return Some(format!("https://{host}/{path}"));
+    }
+    None
+}
+
+/// Normalize any remote form to `ssh://git@host[:port]/path` for libgit2.
+fn ensure_ssh_remote_url(url: &str, ssh_port: Option<u16>) -> String {
+    if url.starts_with("ssh://") {
+        return apply_ssh_port_to_ssh_url(url, ssh_port);
+    }
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, parsed_port, path) = parse_git_scp_suffix(rest);
+        let port = parsed_port.or(ssh_port);
+        return format_ssh_url(host, port, &path);
+    }
+    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+        if let Some((host_part, path)) = rest.split_once('/') {
+            let host = host_part.split(':').next().unwrap_or(host_part);
+            let path = path.trim_start_matches('/');
+            return format_ssh_url(host, ssh_port, path);
+        }
+    }
+    url.to_string()
+}
+
+fn format_ssh_url(host: &str, port: Option<u16>, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let port = port.filter(|p| *p != 22);
+    match port {
+        Some(p) => format!("ssh://git@{host}:{p}/{path}"),
+        None => format!("ssh://git@{host}/{path}"),
+    }
+}
+
+/// `git@host:2222/group/repo` → (host, Some(2222), "group/repo")
+/// `git@host:group/repo` → (host, None, "group/repo")
+fn parse_git_scp_suffix(rest: &str) -> (&str, Option<u16>, String) {
+    let Some((host_part, after_colon)) = rest.split_once(':') else {
+        return (rest, None, String::new());
+    };
+    if let Some((first, remainder)) = after_colon.split_once('/') {
+        if first.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(p) = first.parse::<u16>() {
+                if p > 0 {
+                    return (host_part, Some(p), remainder.to_string());
+                }
+            }
+        }
+    }
+    (
+        host_part,
+        None,
+        after_colon.trim_start_matches('/').to_string(),
+    )
+}
+
+fn apply_ssh_port_to_ssh_url(url: &str, ssh_port: Option<u16>) -> String {
+    let Some(rest) = url.strip_prefix("ssh://") else {
+        return url.to_string();
+    };
+    let rest = rest.strip_prefix("git@").unwrap_or(rest);
+    let Some((host_part, path)) = rest.split_once('/') else {
+        return url.to_string();
+    };
+    let host = host_part.split(':').next().unwrap_or(host_part);
+    let existing_port = host_part
+        .split(':')
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok());
+    let port = existing_port.or(ssh_port);
+    format_ssh_url(host, port, path)
+}
+
 /// Strip `https://user:pass@host/...` userinfo — embedded creds confuse libgit2 and
 /// often cause "too many redirects or authentication replays" on Windows.
 fn normalize_git_remote_url(url: &str) -> String {
@@ -382,13 +497,20 @@ fn build_creds(
         }
     }
     if allowed.contains(git2::CredentialType::SSH_KEY) {
+        let user = user_from_url
+            .filter(|u| !u.is_empty())
+            .or(auth.username.as_deref().filter(|u| !u.is_empty()))
+            .unwrap_or("git");
         if let Some(path) = &auth.ssh_key_path {
-            let user = user_from_url
-                .filter(|u| !u.is_empty())
-                .or(auth.username.as_deref().filter(|u| !u.is_empty()))
-                .unwrap_or("git");
             return Cred::ssh_key(user, None, path, auth.ssh_passphrase.as_deref());
         }
+        if let Ok(cred) = Cred::ssh_key_from_agent(user) {
+            return Ok(cred);
+        }
+        return Err(git2::Error::from_str(
+            "SSH private key path missing and ssh-agent has no key; \
+             set Auth mode SSH + key path, or use HTTPS/OAuth with an https:// remote URL",
+        ));
     }
     // Never return Cred::default() — on WinHTTP this retriggers NTLM and hits the
     // "too many redirects or authentication replays" guard after ~7 attempts.
@@ -416,6 +538,54 @@ mod url_tests {
             "https://gitlab.com/group/repo.git"
         );
     }
+
+    #[test]
+    fn scp_ssh_to_https_for_oauth() {
+        assert_eq!(
+            align_git_remote_url(
+                "git@gitlab.com:mygroup/myrepo.git",
+                GitRemoteTransport::Https,
+                None
+            ),
+            "https://gitlab.com/mygroup/myrepo.git"
+        );
+    }
+
+    #[test]
+    fn https_to_ssh_url_default_port() {
+        assert_eq!(
+            align_git_remote_url(
+                "https://gitlab.com/mygroup/myrepo.git",
+                GitRemoteTransport::Ssh,
+                None
+            ),
+            "ssh://git@gitlab.com/mygroup/myrepo.git"
+        );
+    }
+
+    #[test]
+    fn custom_ssh_port_in_scp_form() {
+        assert_eq!(
+            align_git_remote_url(
+                "git@gitlab.example.com:2222/mygroup/myrepo.git",
+                GitRemoteTransport::Ssh,
+                None
+            ),
+            "ssh://git@gitlab.example.com:2222/mygroup/myrepo.git"
+        );
+    }
+
+    #[test]
+    fn custom_ssh_port_from_settings() {
+        assert_eq!(
+            align_git_remote_url(
+                "git@gitlab.example.com:mygroup/myrepo.git",
+                GitRemoteTransport::Ssh,
+                Some(2222)
+            ),
+            "ssh://git@gitlab.example.com:2222/mygroup/myrepo.git"
+        );
+    }
 }
 
 fn count_commits_between(repo: &Repository, base: git2::Oid, head: git2::Oid) -> Option<usize> {
@@ -434,6 +604,9 @@ fn git_err(e: git2::Error) -> SyncError {
     let hint = if msg.contains("too many redirects or authentication replays") {
         " — for GitLab HTTPS use remote user `oauth2` and a Personal Access Token as password; \
          do not embed credentials in the remote URL; re-run Configure / re-key after fixing"
+    } else if msg.contains("Failed getting banner") || msg.contains("failed to start SSH session") {
+        " — check SSH port (set SSH port in sync settings or use ssh://git@host:PORT/path); \
+         for HTTPS/OAuth use https://host/group/repo.git (not git@); re-run Configure / re-key"
     } else if msg.contains("401") || msg.contains("403") || msg.contains("authentication") {
         " — check HTTPS username/PAT or complete Git OAuth sign-in"
     } else {

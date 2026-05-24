@@ -71,7 +71,7 @@ use crate::sync::backends::git::GitBackend;
 use crate::sync::backends::webdav::WebDavBackend;
 use crate::sync::crypto::KdfParams;
 use crate::sync::persistence::SledStore;
-use crate::sync::{Group, RecordId, SyncEngine};
+use crate::sync::{Group, RecordId, SyncEngine, SyncStats};
 use crate::terminal::{PtyChannel, PtySize};
 
 #[derive(Debug, Deserialize)]
@@ -702,6 +702,9 @@ struct ConfigureGitParams {
     remote_ssh_key: Option<String>,
     #[serde(default)]
     remote_ssh_passphrase: Option<String>,
+    /// SSH port when remote uses SSH (default 22). Embedded in `ssh://` remote URL.
+    #[serde(default)]
+    remote_ssh_port: Option<u16>,
     /// `github` or `gitlab` — load access token from OS keyring.
     #[serde(default)]
     oauth_provider: Option<String>,
@@ -1947,8 +1950,22 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     backend = backend.with_author(name, email);
                 }
                 if let Some(url) = p.remote_url.as_ref() {
+                    use crate::sync::backends::git::{align_git_remote_url, GitRemoteTransport};
+                    let transport = if p.oauth_provider.is_some()
+                        || p
+                            .remote_password
+                            .as_ref()
+                            .is_some_and(|s| !s.is_empty())
+                    {
+                        GitRemoteTransport::Https
+                    } else if p.remote_ssh_key.is_some() {
+                        GitRemoteTransport::Ssh
+                    } else {
+                        GitRemoteTransport::Unspecified
+                    };
+                    let url = align_git_remote_url(url, transport, p.remote_ssh_port);
                     backend = backend
-                        .with_remote(&p.remote_name, url, &p.remote_branch)
+                        .with_remote(&p.remote_name, &url, &p.remote_branch)
                         .map_err(|e| internal(e.to_string()))?;
                     if let Some(ref provider) = p.oauth_provider {
                         let prov = parse_oauth_provider(provider)?;
@@ -1969,8 +1986,10 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                             .unwrap_or_else(|| "oauth2".into());
                         backend = backend.with_https_auth(user, pw);
                     }
-                    if let Some(key) = p.remote_ssh_key {
-                        backend = backend.with_ssh_key(key, p.remote_ssh_passphrase);
+                    if let Some(key) = p.remote_ssh_key.filter(|s| !s.is_empty()) {
+                        if transport == GitRemoteTransport::Ssh {
+                            backend = backend.with_ssh_key(key, p.remote_ssh_passphrase);
+                        }
                     }
                 }
                 *st.git_backend.lock().await = Some(backend.clone());
@@ -2135,7 +2154,17 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 };
                 let groups = selected_sync_groups(p.groups);
                 let eng = require_engine(&st).await?;
-                let (results, bridge_notes) = run_sync_now_cycle(&st, &eng, &groups).await?;
+                let (results, bridge_notes) = match run_sync_now_cycle(&st, &eng, &groups).await
+                {
+                    Ok(v) => {
+                        record_sync_history_ok(&st, "manual", &groups, &v.0).await;
+                        v
+                    }
+                    Err(e) => {
+                        record_sync_history_err(&st, "manual", &groups, &e).await;
+                        return Err(e);
+                    }
+                };
                 *st.sync_last_ms.lock().await = Some(now_ms());
                 let mut obj: serde_json::Map<String, Value> = results
                     .into_iter()
@@ -2177,11 +2206,13 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     loop {
                         ticker.tick().await;
                         match run_sync_now_cycle(&st_tick, &eng, &groups).await {
-                            Ok(_) => {
+                            Ok((results, _)) => {
                                 *st_tick.sync_last_ms.lock().await = Some(now_ms());
+                                record_sync_history_ok(&st_tick, "auto", &groups, &results).await;
                             }
                             Err(e) => {
                                 tracing::warn!(error = ?e, "auto-sync tick failed");
+                                record_sync_history_err(&st_tick, "auto", &groups, &e).await;
                             }
                         }
                     }
@@ -2226,6 +2257,51 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 }))
             }
         });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sync.history", move |_params| {
+            let st = st.clone();
+            async move {
+                let store = require_settings(&st).await?;
+                let list = crate::sync::history::load(&store).map_err(|e| internal(e.to_string()))?;
+                serde_json::to_value(list).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sync.historyClear", move |_params| {
+            let st = st.clone();
+            async move {
+                let store = require_settings(&st).await?;
+                crate::sync::history::clear(&store).map_err(|e| internal(e.to_string()))?;
+                Ok(Value::Null)
+            }
+        });
+    }
+}
+
+async fn record_sync_history_ok(
+    st: &AppState,
+    trigger: &str,
+    groups: &[Group],
+    results: &[(Group, SyncStats)],
+) {
+    if let Ok(store) = require_settings(st).await {
+        if let Err(e) = crate::sync::history::append_success(&store, trigger, groups, results) {
+            tracing::warn!(error = %e, "sync history append failed");
+        }
+    }
+}
+
+async fn record_sync_history_err(st: &AppState, trigger: &str, groups: &[Group], err: &RpcError) {
+    if let Ok(store) = require_settings(st).await {
+        if let Err(e) =
+            crate::sync::history::append_failure(&store, trigger, groups, err.message.clone())
+        {
+            tracing::warn!(error = %e, "sync history append failed");
+        }
     }
 }
 
