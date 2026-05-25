@@ -299,8 +299,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(unix)]
-    fn detect_returns_some_entries_on_unix() {
+    fn detect_returns_well_formed_entries() {
         let list = detect();
         for e in &list {
             assert!(!e.command.is_empty());
