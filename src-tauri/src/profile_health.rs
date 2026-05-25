@@ -41,9 +41,7 @@ pub async fn check_profiles(
 ) -> Vec<ProfileHealthResult> {
     let mut results = Vec::with_capacity(profiles.len());
     for profile in profiles {
-        results.push(
-            check_profile(profile, known_hosts.clone(), connect, vault.clone()).await,
-        );
+        results.push(check_profile(profile, known_hosts.clone(), connect, vault.clone()).await);
     }
     results
 }

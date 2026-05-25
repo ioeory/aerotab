@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { X } from '@lucide/svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { isSshPane } from '../lib/broadcast';
@@ -23,11 +23,8 @@
   let scope = $state<'active-tab' | 'all-tabs'>('active-tab');
   let selectedIds = $state<Set<string>>(new Set());
   let busy = $state(false);
-  let dialogEl = $state<HTMLDivElement | null>(null);
+  let commandInput = $state<HTMLTextAreaElement | null>(null);
 
-  onMount(() => {
-    dialogEl?.focus();
-  });
   const paneOptions = $derived.by((): BatchPaneOption[] => {
     const out: BatchPaneOption[] = [];
     for (const tab of tabList) {
@@ -59,6 +56,11 @@
     if (next.size !== selectedIds.size) selectedIds = next;
   });
 
+  onMount(async () => {
+    await tick();
+    commandInput?.focus();
+  });
+
   function togglePane(id: string) {
     const next = new Set(selectedIds);
     if (next.has(id)) next.delete(id);
@@ -78,8 +80,7 @@
     selectedIds = next;
   }
 
-  async function submit(ev: Event) {
-    ev.preventDefault();
+  async function sendCommand() {
     const text = command;
     if (!text.trim() || selectedIds.size === 0 || busy) return;
     busy = true;
@@ -90,21 +91,48 @@
       busy = false;
     }
   }
+
+  async function submit(ev: Event) {
+    ev.preventDefault();
+    await sendCommand();
+  }
+
+  function onDialogKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      void sendCommand();
+    }
+  }
+
+  function onCommandKeydown(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      void sendCommand();
+    }
+  }
 </script>
 
 <div
-  bind:this={dialogEl}
+  data-aerotab-batch-command=""
   class="fixed inset-0 z-[70] bg-black/55 grid place-items-center p-6"
   role="dialog"
   aria-modal="true"
   aria-labelledby="batch-cmd-title"
   tabindex="-1"
-  onkeydown={(e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose();
-    }
-  }}
+  onkeydown={onDialogKeydown}
 >
   <form
     class="panel w-full max-w-[520px] max-h-[min(640px,90vh)] flex flex-col overflow-hidden"
@@ -120,13 +148,21 @@
     </header>
 
     <div class="p-4 flex flex-col gap-3 overflow-y-auto min-h-0">
-      <label class="block text-[11px] text-[var(--color-fg-muted)]">{i18n.t('batchCommand.command')}</label>
+      <label class="block text-[11px] text-[var(--color-fg-muted)]" for="batch-cmd-input">
+        {i18n.t('batchCommand.command')}
+      </label>
       <textarea
+        id="batch-cmd-input"
+        bind:this={commandInput}
         class="input w-full min-h-[88px] font-mono text-[12px] resize-y"
         bind:value={command}
         placeholder={i18n.t('batchCommand.placeholder')}
         spellcheck="false"
+        onkeydown={onCommandKeydown}
       ></textarea>
+      <p class="text-[10px] text-[var(--color-fg-muted)] -mt-2">
+        {i18n.t('batchCommand.sendShortcut')}
+      </p>
 
       <fieldset class="flex flex-wrap gap-3 text-[12px]">
         <label class="inline-flex items-center gap-1.5 cursor-pointer">

@@ -3,7 +3,7 @@
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import { tabs, type PaneDropSide, type PaneNode, type Tab } from '../lib/tabs.svelte';
-  import { dispatchFitPane, dispatchFocusPane } from '../lib/focusPane';
+  import { dispatchFitAllPanes, dispatchFitPane, dispatchFocusPane } from '../lib/focusPane';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
@@ -57,7 +57,7 @@
     ev.stopPropagation();
     focusPane(sessionId);
     tabs.toggleMaximize(tab.id, sessionId);
-    requestAnimationFrame(() => dispatchFitPane(sessionId));
+    dispatchFitAllPanes(tab.panes.map((p) => p.id));
   }
 
   function dragPayload(ev: DragEvent): { tabId: string; paneId: string } | null {
@@ -184,7 +184,8 @@
     <TerminalPane
       {rpc}
       session={node.pane}
-      active={focused && !hiddenByMaximize}
+      active={focused}
+      layoutVisible={!hiddenByMaximize}
       {tabVisible}
       {settingsRev}
       onClosePane={() => closePane(node.pane.id, new Event('close'))}

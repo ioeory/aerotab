@@ -94,6 +94,7 @@ const en: Messages = {
   'batchCommand.noSshPanes': 'No SSH panes in this scope.',
   'batchCommand.send': 'Send',
   'batchCommand.sending': 'Sending…',
+  'batchCommand.sendShortcut': 'Ctrl+Enter to send, Esc to close',
 
   'commandPalette.aria': 'Command palette',
   'commandPalette.placeholder': 'Type a command...',
@@ -646,6 +647,7 @@ const zhCN: Messages = {
   'batchCommand.noSshPanes': '该范围内没有 SSH 窗格。',
   'batchCommand.send': '发送',
   'batchCommand.sending': '发送中…',
+  'batchCommand.sendShortcut': 'Ctrl+Enter 发送，Esc 关闭',
 
   'commandPalette.aria': '命令面板',
   'commandPalette.placeholder': '输入命令...',

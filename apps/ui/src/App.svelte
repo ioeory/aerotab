@@ -24,7 +24,7 @@
   import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
-  import { dispatchFocusPane } from './lib/focusPane';
+  import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
   import { b64encode } from './lib/rpc';
   import { broadcastTargetIds } from './lib/broadcast';
   import {
@@ -834,6 +834,7 @@
     const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
     if (!tab) return;
     tabs.toggleMaximize(tab.id, tab.activePaneId);
+    dispatchFitAllPanes(tab.panes.map((p) => p.id));
   }
 
   async function closeTabSessions(tab: Tab) {
@@ -1306,6 +1307,7 @@
     })();
 
     kbdHandler = (e: KeyboardEvent) => {
+      if (document.querySelector('[data-aerotab-batch-command]')) return;
       if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'r' || e.key === 'R'))) {
         e.preventDefault();
         return;

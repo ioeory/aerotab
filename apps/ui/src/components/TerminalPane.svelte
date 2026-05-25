@@ -30,6 +30,8 @@
     rpc: RpcClient;
     session: SessionMeta;
     active: boolean;
+    /** False while pane is hidden by maximize (display:none); avoids fit() at zero size. */
+    layoutVisible?: boolean;
     /** False when this pane's tab is not the active tab (stops output polling). */
     tabVisible?: boolean;
     /** Bumped by parent whenever persisted settings change. */
@@ -49,6 +51,7 @@
     rpc,
     session,
     active,
+    layoutVisible = true,
     tabVisible = true,
     settingsRev = 0,
     onClosePane,
@@ -137,12 +140,33 @@
     return hotkeys.getBindings(actionId)[0] ?? '';
   }
 
+  function hostHasLayout(): boolean {
+    return !!host && host.offsetWidth >= 2 && host.offsetHeight >= 2;
+  }
+
+  /** Skip fit while display:none (maximize hide) — zero-size fit clears canvas terminals. */
+  function safeFit(redraw = false) {
+    if (!fit || !term || !layoutVisible || !hostHasLayout()) return;
+    try {
+      fit.fit();
+    } catch {
+      /* renderer not ready */
+    }
+    if (redraw) {
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   function adjustFontSize(delta: number) {
     if (!term || !delta) return;
     sessionFontDelta += delta;
     const next = Math.min(32, Math.max(8, (term.options.fontSize ?? 13) + delta));
     term.options.fontSize = next;
-    requestAnimationFrame(() => fit?.fit());
+    requestAnimationFrame(() => safeFit());
   }
 
   function onExitedKeydown(ev: KeyboardEvent) {
@@ -587,7 +611,7 @@
     term.loadAddon(new WebLinksAddon(linkHandler));
     term.open(host);
     await applyRenderer(cfg.renderer);
-    requestAnimationFrame(() => fit?.fit());
+    requestAnimationFrame(() => safeFit());
 
     // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
     term.attachCustomKeyEventHandler((ev) => {
@@ -621,8 +645,8 @@
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
       if (detail?.sessionId && detail.sessionId !== session.id) return;
       requestAnimationFrame(() => {
-        fit?.fit();
-        requestAnimationFrame(() => fit?.fit());
+        safeFit(true);
+        requestAnimationFrame(() => safeFit(true));
       });
     };
     const copyListener = () => { if (active) void doCopy(); };
@@ -681,7 +705,7 @@
       triggerBell();
     });
 
-    const ro = new ResizeObserver(() => fit?.fit());
+    const ro = new ResizeObserver(() => safeFit());
     if (host) ro.observe(host);
 
     await configureTransferFilter(cfg.experimentalTransferDetection);
@@ -701,12 +725,20 @@
   });
 
   $effect(() => {
+    void layoutVisible;
+    if (!layoutVisible) return;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => safeFit(true));
+    });
+  });
+
+  $effect(() => {
     if (!active) return;
     tabs.clearActivity(session.id);
     requestAnimationFrame(() => {
-      fit?.fit();
+      safeFit();
       requestAnimationFrame(() => {
-        fit?.fit();
+        safeFit();
         term?.focus();
       });
     });
@@ -739,7 +771,7 @@
     // atlas and pick up the new palette / font metrics. xterm only repaints
     // changed cells otherwise, which leaves stale colors on screen.
     try { term.refresh(0, term.rows - 1); } catch { /* renderer not ready */ }
-    requestAnimationFrame(() => fit?.fit());
+    requestAnimationFrame(() => safeFit());
   }
 
   $effect(() => {

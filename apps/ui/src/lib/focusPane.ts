@@ -11,3 +11,12 @@ export function dispatchFitPane(sessionId?: string) {
     new CustomEvent('aerotab:fit-pane', { detail: { sessionId } }),
   );
 }
+
+/** Refit every pane in a tab after maximize/restore (hidden panes need a second pass). */
+export function dispatchFitAllPanes(sessionIds: string[]) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      for (const id of sessionIds) dispatchFitPane(id);
+    });
+  });
+}

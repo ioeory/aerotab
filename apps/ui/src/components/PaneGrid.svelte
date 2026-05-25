@@ -1,7 +1,7 @@
 <script lang="ts">
   import PaneNodeView from './PaneNodeView.svelte';
   import { tabs, type Tab } from '../lib/tabs.svelte';
-  import { dispatchFitPane } from '../lib/focusPane';
+  import { dispatchFitAllPanes } from '../lib/focusPane';
   import type { RpcClient } from '../lib/rpc';
 
   interface Props {
@@ -31,10 +31,8 @@
   $effect(() => {
     void tab.maximizedPaneId;
     void tab.activePaneId;
-    const id = tab.activePaneId;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => dispatchFitPane(id));
-    });
+    const ids = tab.panes.map((p) => p.id);
+    dispatchFitAllPanes(ids);
   });
 </script>
 
