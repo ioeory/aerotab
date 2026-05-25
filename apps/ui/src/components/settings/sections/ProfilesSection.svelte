@@ -8,6 +8,7 @@
   import type { RpcClient } from '../../../lib/rpc';
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
+  import { appConfirm } from '../../../lib/confirm.svelte';
   import { tabs } from '../../../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
   import { PROFILES_CHANGED } from '../../../lib/profileEvents';
@@ -156,7 +157,7 @@
   }
 
   async function remove(p: StoredProfile) {
-    if (!confirm(`Delete profile "${p.name}"?`)) return;
+    if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
       await load();

@@ -3,7 +3,9 @@
   import Sidebar from './components/Sidebar.svelte';
   import TabBar from './components/TabBar.svelte';
   import PaneGrid from './components/PaneGrid.svelte';
+  import AppConfirmDialog from './components/AppConfirmDialog.svelte';
   import ProfileModal from './components/ProfileModal.svelte';
+  import { appConfirm, appPrompt } from './lib/confirm.svelte';
   import VaultUnlockModal from './components/VaultUnlockModal.svelte';
   import SerialModal from './components/SerialModal.svelte';
   import SftpBrowser from './components/SftpBrowser.svelte';
@@ -362,7 +364,7 @@
       return;
     }
     const fallbackName = i18n.t('workspace.defaultName', { count: sessionWorkspaces.length + 1 });
-    const name = prompt(i18n.t('workspace.namePrompt'), fallbackName)?.trim();
+    const name = (await appPrompt(i18n.t('workspace.namePrompt'), { defaultValue: fallbackName }))?.trim();
     if (!name) return;
     const snapshot = snapshotCurrentWorkspace(name);
     if (!snapshot) {
@@ -411,7 +413,7 @@
   }
 
   async function deleteSessionWorkspace(workspace: SessionWorkspace) {
-    if (!confirm(i18n.t('workspace.deleteConfirm', { name: workspace.name }))) return;
+    if (!(await appConfirm(i18n.t('workspace.deleteConfirm', { name: workspace.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     await saveSessionWorkspaces(sessionWorkspaces.filter((item) => item.id !== workspace.id));
     status = i18n.t('workspace.deleted', { name: workspace.name });
   }
@@ -1508,6 +1510,7 @@
   onUnlocked={() => { status = i18n.t('sync.vaultUnlocked'); }}
 />
 <SerialModal {rpc} bind:this={serialModal} {onError} />
+<AppConfirmDialog />
 {#if settingsOpen}
   <SettingsLayout
     {rpc}

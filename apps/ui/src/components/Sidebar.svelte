@@ -23,6 +23,7 @@
   import { PROFILES_CHANGED } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import { portal } from '../lib/portal';
+  import { appConfirm } from '../lib/confirm.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
   import logoUrl from '../assets/logo.png';
 
@@ -248,7 +249,7 @@
   }
 
   async function deleteProfile(p: StoredProfile) {
-    if (!confirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }))) return;
+    if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
       if (focusedProfileId === p.id) focusedProfileId = null;

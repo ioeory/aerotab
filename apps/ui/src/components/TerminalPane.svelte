@@ -13,6 +13,7 @@
   import { applyLigatures } from '../lib/customCss';
   import { tabs } from '../lib/tabs.svelte';
   import { i18n } from '../lib/i18n.svelte';
+  import { appConfirm } from '../lib/confirm.svelte';
   import { TerminalTransferDetector, type TerminalTransferDetection } from '../lib/terminalTransfer';
   import {
     createTrzszFilter,
@@ -739,7 +740,7 @@
     if (pasteTrimWhitespace) text = text.replace(/[ \t]+$/gm, '');
     if (pasteFlattenNewlines) text = text.replace(/\r?\n/g, ' ');
     if (pasteMultilineWarn && text.includes('\n') && text.length > 200) {
-      if (!confirm(i18n.t('terminal.pasteConfirm', { count: text.length }))) return;
+      if (!(await appConfirm(i18n.t('terminal.pasteConfirm', { count: text.length })))) return;
     }
     if (bracketedPaste) {
       term?.paste(text);

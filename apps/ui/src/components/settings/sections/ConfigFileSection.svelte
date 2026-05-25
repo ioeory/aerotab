@@ -3,6 +3,8 @@
   import { Copy, FileText, Save, RotateCcw, Download, Upload, Trash2 } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import type { SettingEntry } from '../../../lib/types';
+  import { i18n } from '../../../lib/i18n.svelte';
+  import { appConfirm } from '../../../lib/confirm.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -117,7 +119,7 @@
   }
 
   async function removeSetting(entry: SettingEntry) {
-    if (!confirm(`Remove setting key "${entry.key}"?`)) return;
+    if (!(await appConfirm(i18n.t('configFile.removeKeyConfirm', { key: entry.key }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     keysBusy = true;
     try {
       const r = await rpc.call<{ removed: boolean }>('settings.remove', { key: entry.key });

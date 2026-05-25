@@ -4,6 +4,7 @@
   import { dispatchFocusPane } from '../lib/focusPane';
   import { getWindowSettings } from '../lib/windowSettings';
   import { i18n } from '../lib/i18n.svelte';
+  import { appConfirm } from '../lib/confirm.svelte';
   import type { RpcClient } from '../lib/rpc';
 
   interface Props {
@@ -44,7 +45,7 @@
     ev?.stopPropagation();
     const ws = getWindowSettings();
     if (ws.confirmCloseWithMultipleTabs !== false && tab.panes.length > 1) {
-      if (!confirm(i18n.t('tabbar.closeMultiPaneConfirm', { count: tab.panes.length }))) return;
+      if (!(await appConfirm(i18n.t('tabbar.closeMultiPaneConfirm', { count: tab.panes.length })))) return;
     }
     const pane_ids = tab.panes.map((p) => p.id);
     tabs.remove(tab.id);

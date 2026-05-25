@@ -9,6 +9,7 @@
   import { RefreshCw, Play } from '@lucide/svelte';
   import { b64decode, b64encode, type RpcClient } from '../../../lib/rpc';
   import { i18n } from '../../../lib/i18n.svelte';
+  import { appConfirm } from '../../../lib/confirm.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import {
     applyPersistedAutoSync,
@@ -258,7 +259,7 @@
   }
 
   async function clearGitHttpsSecret() {
-    if (!confirm(i18n.t('sync.gitHttpsForgetConfirm'))) return;
+    if (!(await appConfirm(i18n.t('sync.gitHttpsForgetConfirm')))) return;
     secretBusy = true;
     try {
       await clearGitHttpsPassword(rpc, currentPersistedSettings());
@@ -271,10 +272,10 @@
     }
   }
 
-  function setGroupEnabled(group: SyncGroup, checked: boolean) {
+  async function setGroupEnabled(group: SyncGroup, checked: boolean) {
     let nextChecked = checked;
     if (group === 'Credentials' && checked) {
-      nextChecked = confirm('Enable credential sync? Passwords and private key material will be encrypted before upload, but they may leave this device.');
+      nextChecked = await appConfirm(i18n.t('sync.credentialSyncEnableConfirm'));
     }
     enabledGroups = { ...enabledGroups, [group]: nextChecked };
     markDirty();
@@ -443,7 +444,7 @@
   }
 
   async function clearVaultSecret() {
-    if (!confirm(i18n.t('sync.vaultForgetConfirm'))) return;
+    if (!(await appConfirm(i18n.t('sync.vaultForgetConfirm')))) return;
     vaultBusy = true;
     try {
       await rpc.call('secret.clearMaster', vaultSecretParams());
@@ -542,7 +543,7 @@
   }
 
   async function clearMasterSecret() {
-    if (!confirm('Forget the saved sync master password from the OS credential store?')) return;
+    if (!(await appConfirm(i18n.t('sync.masterPasswordForgetConfirm')))) return;
     secretBusy = true;
     try {
       await rpc.call('secret.clearMaster', secretParams());
@@ -665,7 +666,7 @@
   }
 
   async function clearSyncHistory() {
-    if (!confirm(i18n.t('sync.historyClearConfirm'))) return;
+    if (!(await appConfirm(i18n.t('sync.historyClearConfirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     try {
       await rpc.call('sync.historyClear', {});
       syncHistory = [];
@@ -727,7 +728,7 @@
 
   async function writeSyncRecord() {
     if (!inspectorId.trim()) { inspectorStatus = 'Record id is required'; return; }
-    if (!confirm('Write this local sync record? This is an advanced recovery operation.')) return;
+    if (!(await appConfirm(i18n.t('sync.recordWriteConfirm')))) return;
     inspectorBusy = true;
     try {
       await rpc.call('sync.put', {
@@ -835,7 +836,7 @@
 
   async function deleteSyncRecord(id = inspectorId) {
     if (!id) return;
-    if (!confirm(`Delete local sync record ${id}?`)) return;
+    if (!(await appConfirm(i18n.t('sync.recordDeleteConfirm', { id }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     inspectorBusy = true;
     try {
       await rpc.call('sync.delete', { group: inspectorGroup, id });
@@ -911,7 +912,7 @@
           <input
             type="checkbox"
             checked={enabledGroups[group]}
-            onchange={(e) => setGroupEnabled(group, (e.currentTarget as HTMLInputElement).checked)}
+            onchange={(e) => { void setGroupEnabled(group, (e.currentTarget as HTMLInputElement).checked); }}
           />
           <span class="group-main">
             <span class="group-title">{group}</span>

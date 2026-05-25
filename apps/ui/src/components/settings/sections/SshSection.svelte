@@ -7,6 +7,7 @@
   import type { KnownHostEntry, StoredProfile, TunnelKind, TunnelMeta } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
+  import { appConfirm } from '../../../lib/confirm.svelte';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -183,7 +184,7 @@
   }
 
   async function removeKnownHost(host: string) {
-    if (!confirm(i18n.t('ssh.removeKnownHostConfirm', { host }))) return;
+    if (!(await appConfirm(i18n.t('ssh.removeKnownHostConfirm', { host }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     knownHostsBusy = true;
     try {
       const r = await rpc.call<{ removed: boolean }>('ssh.knownHosts.remove', { host });

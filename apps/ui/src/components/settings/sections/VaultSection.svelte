@@ -5,6 +5,8 @@
   import { onMount } from 'svelte';
   import { KeyRound, Lock, Unlock, Plus, Trash2, Eye, EyeOff, Pencil } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
+  import { i18n } from '../../../lib/i18n.svelte';
+  import { appConfirm } from '../../../lib/confirm.svelte';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -122,7 +124,7 @@
   }
 
   async function deleteEntry(id: string) {
-    if (!confirm('Delete this vault entry? This cannot be undone.')) return;
+    if (!(await appConfirm(i18n.t('vault.deleteEntryConfirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     try {
       await rpc.call('vault.remove', { id });
       if (revealedId === id) { revealedId = null; revealedSecret = ''; }

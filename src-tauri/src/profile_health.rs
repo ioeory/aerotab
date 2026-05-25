@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::profile::{Profile, ProfileKind};
 use crate::ssh::known_hosts::KnownHosts;
-use crate::ssh::{self, AuthMethod, SshProfile};
+use crate::ssh::{self, vault_resolve, AuthMethod, SshProfile};
+use crate::vault::VaultStore;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -36,10 +37,13 @@ pub async fn check_profiles(
     profiles: Vec<Profile>,
     known_hosts: Option<KnownHosts>,
     connect: bool,
+    vault: Option<VaultStore>,
 ) -> Vec<ProfileHealthResult> {
     let mut results = Vec::with_capacity(profiles.len());
     for profile in profiles {
-        results.push(check_profile(profile, known_hosts.clone(), connect).await);
+        results.push(
+            check_profile(profile, known_hosts.clone(), connect, vault.clone()).await,
+        );
     }
     results
 }
@@ -48,13 +52,14 @@ async fn check_profile(
     profile: Profile,
     known_hosts: Option<KnownHosts>,
     connect: bool,
+    vault: Option<VaultStore>,
 ) -> ProfileHealthResult {
     let mut checks = Vec::new();
-    match &profile.spec {
+    match profile.spec {
         ProfileKind::Ssh { ssh } => {
-            inspect_ssh_profile("Target", ssh, &known_hosts, &mut checks);
+            inspect_ssh_profile("Target", &ssh, &known_hosts, &mut checks);
             if connect {
-                run_connection_check(ssh, known_hosts.clone(), &mut checks).await;
+                run_connection_check(&ssh, known_hosts.clone(), vault.as_ref(), &mut checks).await;
             }
         }
         ProfileKind::Rdp { rdp } | ProfileKind::Vnc { spec: rdp } => {
@@ -234,11 +239,17 @@ fn inspect_known_host(
 async fn run_connection_check(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
+    vault: Option<&VaultStore>,
     checks: &mut Vec<ProfileHealthCheck>,
 ) {
+    let mut probe_profile = profile.clone();
+    if let Err(err) = vault_resolve::resolve_profile_vault_auth(vault, &mut probe_profile).await {
+        push_check(checks, "Connection", HealthStatus::Error, err.to_string());
+        return;
+    }
     let probe = timeout(
         Duration::from_secs(12),
-        ssh::connect_authenticated(profile, known_hosts),
+        ssh::connect_authenticated(&probe_profile, known_hosts),
     )
     .await;
     match probe {
@@ -323,6 +334,7 @@ mod tests {
             }),
             None,
             false,
+            None,
         )
         .await;
         assert_eq!(result.status, HealthStatus::Error);
@@ -334,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_agent_auth_configuration() {
-        let result = check_profile(profile(AuthMethod::Agent), None, false).await;
+        let result = check_profile(profile(AuthMethod::Agent), None, false, None).await;
         assert_eq!(result.status, HealthStatus::Warning);
         assert!(result
             .checks

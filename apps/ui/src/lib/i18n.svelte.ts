@@ -7,6 +7,7 @@ type Messages = Record<string, string>;
 
 const en: Messages = {
   'common.cancel': 'Cancel',
+  'common.ok': 'OK',
   'common.clearFinished': 'Clear finished',
   'common.close': 'Close',
   'common.copy': 'Copy',
@@ -168,6 +169,14 @@ const en: Messages = {
   'sync.vaultPasswordRequired': 'Enter the vault master password',
   'sync.vaultPasswordMismatch': 'Passwords do not match',
   'sync.vaultForgetConfirm': 'Forget the saved vault password from the OS credential store?',
+  'sync.credentialSyncEnableConfirm':
+    'Enable credential sync? Passwords and private key material will be encrypted before upload, but they may leave this device.',
+  'sync.masterPasswordForgetConfirm':
+    'Forget the saved sync master password from the OS credential store?',
+  'sync.recordWriteConfirm': 'Write this local sync record? This is an advanced recovery operation.',
+  'sync.recordDeleteConfirm': 'Delete local sync record {id}?',
+  'configFile.removeKeyConfirm': 'Remove setting key "{key}"?',
+  'vault.deleteEntryConfirm': 'Delete this vault entry? This cannot be undone.',
   'sync.vaultKeyringAutoHint': 'Sync now will auto-unlock the vault from the OS credential store.',
   'vault.unlockPromptTitle': 'Unlock credential vault',
   'vault.unlockPromptBody':
@@ -502,10 +511,14 @@ const en: Messages = {
   'sftp.transferDone': 'Done',
   'sftp.transferCanceled': 'Canceled',
   'sftp.transferFailed': 'Failed',
+  'sftp.deleteConfirm': 'Delete {name}?',
+  'sftp.renamePrompt': 'Rename to',
+  'sftp.mkdirPrompt': 'New folder name',
 };
 
 const zhCN: Messages = {
   'common.cancel': '取消',
+  'common.ok': '确定',
   'common.clearFinished': '清除已完成',
   'common.close': '关闭',
   'common.copy': '复制',
@@ -666,6 +679,13 @@ const zhCN: Messages = {
   'sync.vaultPasswordRequired': '请输入凭据库主密码',
   'sync.vaultPasswordMismatch': '两次输入的密码不一致',
   'sync.vaultForgetConfirm': '从系统凭据库中清除已保存的凭据库密码？',
+  'sync.credentialSyncEnableConfirm':
+    '启用 Credentials 同步？密码与私钥材料会在上传前加密，但仍可能离开本设备。',
+  'sync.masterPasswordForgetConfirm': '从系统凭据库中清除已保存的同步主密码？',
+  'sync.recordWriteConfirm': '写入此本地同步记录？这是高级恢复操作。',
+  'sync.recordDeleteConfirm': '删除本地同步记录 {id}？',
+  'configFile.removeKeyConfirm': '移除设置项 "{key}"？',
+  'vault.deleteEntryConfirm': '删除此凭据条目？此操作无法撤销。',
   'sync.vaultKeyringAutoHint': '点击 Sync now 时会从系统凭据库自动解锁凭据库。',
   'vault.unlockPromptTitle': '解锁凭据库',
   'vault.unlockPromptBody':
@@ -1000,6 +1020,9 @@ const zhCN: Messages = {
   'sftp.transferDone': '完成',
   'sftp.transferCanceled': '已取消',
   'sftp.transferFailed': '失败',
+  'sftp.deleteConfirm': '删除 {name}？',
+  'sftp.renamePrompt': '重命名为',
+  'sftp.mkdirPrompt': '新建文件夹名称',
 };
 
 const messages: Record<ResolvedLocale, Messages> = {

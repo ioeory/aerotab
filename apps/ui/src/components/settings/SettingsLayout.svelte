@@ -7,6 +7,7 @@
   import type { RpcClient } from '../../lib/rpc';
   import { i18n } from '../../lib/i18n.svelte';
   import { settingsCoord } from '../../lib/settingsStore.svelte';
+  import { appConfirm } from '../../lib/confirm.svelte';
 
   import ApplicationSection from './sections/ApplicationSection.svelte';
   import AppearanceSection from './sections/AppearanceSection.svelte';
@@ -97,7 +98,7 @@
   }
 
   async function reset() {
-    if (!confirm(i18n.t('settings.resetConfirm'))) return;
+    if (!(await appConfirm(i18n.t('settings.resetConfirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     try {
       await rpc.call('settings.reset');
       settingsCoord.markClean();

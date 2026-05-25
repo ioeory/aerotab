@@ -7,6 +7,7 @@
   import { diagnostics, exportDiagnosticPack } from '../../../lib/diagnostics.svelte';
   import { i18n, type LocaleSetting } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
+  import { appConfirm } from '../../../lib/confirm.svelte';
   import type { SessionMeta } from '../../../lib/types';
 
   interface Props {
@@ -59,7 +60,7 @@
   }
 
   async function closeSession(id: string) {
-    if (!confirm(i18n.t('application.closeBackendSessionConfirm'))) return;
+    if (!(await appConfirm(i18n.t('application.closeBackendSessionConfirm')))) return;
     sessionsBusy = true;
     try {
       await rpc.call('session.close', { id });
@@ -127,8 +128,8 @@
     }
   }
 
-  function clearDiagnostics() {
-    if (!confirm(i18n.t('application.diagnostics.clearConfirm'))) return;
+  async function clearDiagnostics() {
+    if (!(await appConfirm(i18n.t('application.diagnostics.clearConfirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     diagnostics.clear();
     diagnosticsStatus = i18n.t('application.diagnostics.cleared');
   }

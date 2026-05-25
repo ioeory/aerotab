@@ -950,7 +950,9 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     profiles.retain(|profile| p.ids.contains(&profile.id));
                 }
                 let kh = st.known_hosts.lock().await.clone();
-                let results = crate::profile_health::check_profiles(profiles, kh, p.connect).await;
+                let vault = st.vault.lock().await.clone();
+                let results =
+                    crate::profile_health::check_profiles(profiles, kh, p.connect, vault).await;
                 serde_json::to_value(results).map_err(|e| internal(e.to_string()))
             }
         });

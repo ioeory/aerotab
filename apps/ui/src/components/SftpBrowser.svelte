@@ -8,6 +8,7 @@
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode, tauriInvoke } from '../lib/rpc';
   import { i18n } from '../lib/i18n.svelte';
+  import { appConfirm, appPrompt } from '../lib/confirm.svelte';
   import type { LocalEntry, SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
   import SftpLocalPane from './SftpLocalPane.svelte';
   import {
@@ -516,7 +517,7 @@
 
   async function removeEntry(e: SftpEntry) {
     if (!sessionId) return;
-    if (!confirm(`Delete ${e.name}?`)) return;
+    if (!(await appConfirm(i18n.t('sftp.deleteConfirm', { name: e.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     const path = joinPath(cwd, e.name);
     try {
       if (e.kind === 'Dir') {
@@ -770,7 +771,7 @@
 
   async function renameEntry(e: SftpEntry) {
     if (!sessionId) return;
-    const nextName = prompt('Rename to', e.name)?.trim();
+    const nextName = (await appPrompt(i18n.t('sftp.renamePrompt'), { defaultValue: e.name }))?.trim();
     if (!nextName || nextName === e.name) return;
     if (nextName.includes('/')) {
       onError('rename: name must not contain /');
@@ -790,7 +791,7 @@
 
   async function mkdirHere() {
     if (!sessionId) return;
-    const name = prompt('New folder name');
+    const name = await appPrompt(i18n.t('sftp.mkdirPrompt'));
     if (!name) return;
     try {
       await rpc.call('sftp.mkdir', { id: sessionId, path: joinPath(cwd, name) });
