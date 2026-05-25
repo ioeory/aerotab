@@ -13,6 +13,7 @@
     onSplitDown?: () => void;
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
+    tabVisible?: boolean;
   }
 
   let {
@@ -24,6 +25,7 @@
     onSplitDown,
     broadcastEnabled = false,
     broadcastTargetIds = [],
+    tabVisible = true,
   }: Props = $props();
 
   const maximizedPaneId = $derived(tab.maximizedPaneId ?? null);
@@ -43,8 +45,8 @@
 
 <div class="absolute inset-0 min-w-0 min-h-0">
   {#if maximizedLeaf}
-    <PaneNodeView {rpc} {tab} node={maximizedLeaf} {settingsRev} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
+    <PaneNodeView {rpc} {tab} node={maximizedLeaf} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
   {:else}
-    <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
+    <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
   {/if}
 </div>

@@ -57,8 +57,47 @@ impl From<FileType> for SftpKind {
 /// An open SFTP session. Drops automatically when the handle is gone.
 pub struct Sftp {
     inner: SftpSession,
-    /// Underlying SSH session, retained so the connection stays alive.
-    _handle: russh::client::Handle<TrustingClient>,
+    /// Standalone SFTP connections own the SSH link; sessions opened on an existing
+    /// terminal reuse that shell's connection (`None` here).
+    _owned_handle: Option<russh::client::Handle<TrustingClient>>,
+}
+
+/// Open the SFTP subsystem on an already-authenticated SSH handle (no extra TCP dial).
+pub async fn open_subsystem_on_handle(
+    handle: &russh::client::Handle<TrustingClient>,
+    options: SftpOpenOptions,
+) -> Result<Sftp, SshError> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| SshError::Channel(e.to_string()))?;
+
+    if options.sudo {
+        let command = "sudo -n sh -c 'if command -v sftp-server >/dev/null 2>&1; then exec sftp-server; elif [ -x /usr/lib/openssh/sftp-server ]; then exec /usr/lib/openssh/sftp-server; elif [ -x /usr/lib/ssh/sftp-server ]; then exec /usr/lib/ssh/sftp-server; else echo sftp-server-not-found >&2; exit 127; fi'";
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| SshError::Channel(format!("sudo sftp exec: {e}")))?;
+    } else {
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| SshError::Channel(format!("sftp subsystem: {e}")))?;
+    }
+
+    let inner = SftpSession::new(channel.into_stream()).await.map_err(|e| {
+        if options.sudo {
+            SshError::Channel(format!(
+                "sudo sftp session: {e}; target must allow passwordless sudo for sftp-server"
+            ))
+        } else {
+            SshError::Channel(format!("sftp session: {e}"))
+        }
+    })?;
+    Ok(Sftp {
+        inner,
+        _owned_handle: None,
+    })
 }
 
 impl Sftp {
@@ -76,37 +115,9 @@ impl Sftp {
         options: SftpOpenOptions,
     ) -> Result<Self, SshError> {
         let handle = connect_authenticated(profile, known_hosts).await?;
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::Channel(e.to_string()))?;
-
-        if options.sudo {
-            let command = "sudo -n sh -c 'if command -v sftp-server >/dev/null 2>&1; then exec sftp-server; elif [ -x /usr/lib/openssh/sftp-server ]; then exec /usr/lib/openssh/sftp-server; elif [ -x /usr/lib/ssh/sftp-server ]; then exec /usr/lib/ssh/sftp-server; else echo sftp-server-not-found >&2; exit 127; fi'";
-            channel
-                .exec(true, command)
-                .await
-                .map_err(|e| SshError::Channel(format!("sudo sftp exec: {e}")))?;
-        } else {
-            channel
-                .request_subsystem(true, "sftp")
-                .await
-                .map_err(|e| SshError::Channel(format!("sftp subsystem: {e}")))?;
-        }
-
-        let inner = SftpSession::new(channel.into_stream()).await.map_err(|e| {
-            if options.sudo {
-                SshError::Channel(format!(
-                    "sudo sftp session: {e}; target must allow passwordless sudo for sftp-server"
-                ))
-            } else {
-                SshError::Channel(format!("sftp session: {e}"))
-            }
-        })?;
-        Ok(Self {
-            inner,
-            _handle: handle,
-        })
+        let mut sftp = open_subsystem_on_handle(&handle, options).await?;
+        sftp._owned_handle = Some(handle);
+        Ok(sftp)
     }
 
     pub async fn read_dir(&self, path: &str) -> Result<Vec<SftpEntry>, SshError> {

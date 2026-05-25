@@ -36,12 +36,25 @@
     source?: SftpSource;
     mode?: 'modal' | 'dock';
     registryId?: string;
+    /** Reuse the active SSH terminal connection instead of dialing again. */
+    terminalSessionId?: string | null;
     onClose: () => void;
     onCollapse?: () => void;
     onPopOut?: (sudo: boolean) => void;
     onError: (msg: string) => void;
   }
-  let { rpc, profile, source, mode = 'modal', registryId: registryIdProp, onClose, onCollapse, onPopOut, onError }: Props = $props();
+  let {
+    rpc,
+    profile,
+    source,
+    mode = 'modal',
+    registryId: registryIdProp,
+    terminalSessionId = null,
+    onClose,
+    onCollapse,
+    onPopOut,
+    onError,
+  }: Props = $props();
   const target = $derived.by((): SftpSource | null => {
     if (source) return source;
     if (profile?.kind === 'ssh') return { name: profile.name, ssh: profile.ssh };
@@ -92,6 +105,12 @@
   let remoteMenuEl = $state<HTMLDivElement | null>(null);
 
   let selectedTransferIds = $state<Set<string>>(new Set());
+  let transferUiFlushScheduled = false;
+  let registrySnapshot = '';
+  let connectSeq = 0;
+  /** Last connect key we attempted; blocks auto-reconnect loops on failure. */
+  let appliedConnectKey = '';
+  let connectInFlight = false;
 
   type TransferKind = 'upload' | 'download';
   type TransferStatus = 'queued' | 'running' | 'paused' | 'done' | 'error' | 'canceled';
@@ -341,16 +360,33 @@
     }
   }
 
+  function sftpConnectKey(): string {
+    if (!target) return '';
+    const h = target.ssh;
+    return `${h.host}|${h.port}|${h.user}|${sudoMode ? 1 : 0}`;
+  }
+
+  async function openSftpBackend(): Promise<string> {
+    if (!target) throw new Error('SFTP target is not set');
+    // Always use a dedicated SFTP SSH connection. Reusing the interactive shell
+    // session (openForSession) can reset the link on some servers (Windows 10054).
+    const r = await rpc.call<{ id: string }>('sftp.open', { profile: target.ssh, sudo: sudoMode });
+    return r.id;
+  }
+
   async function connect() {
     if (!target) return;
+    const prev = sessionId;
+    sessionId = null;
+    if (prev) await rpc.call('sftp.close', { id: prev }).catch(() => {});
     loading = true;
     listError = null;
     try {
-      const r = await rpc.call<{ id: string }>('sftp.open', { profile: target.ssh, sudo: sudoMode });
-      sessionId = r.id;
+      const id = await openSftpBackend();
+      sessionId = id;
       knownRemoteDirs.clear();
       // Resolve home (".") to an absolute path so navigation is predictable.
-      const real = await rpc.call<{ path: string }>('sftp.realpath', { id: r.id, path: '.' });
+      const real = await rpc.call<{ path: string }>('sftp.realpath', { id, path: '.' });
       cwd = real.path || '.';
       await refresh();
     } catch (e) {
@@ -363,40 +399,33 @@
     }
   }
 
-  async function reconnect(nextSudo = sudoMode) {
-    const current = sessionId;
-    const prevCwd = cwd;
-    sessionId = null;
-    entries = [];
-    listError = null;
-    knownRemoteDirs.clear();
-    if (current) await rpc.call('sftp.close', { id: current }).catch(() => {});
-    sudoMode = nextSudo;
-    loading = true;
+  async function forceReconnect() {
+    const key = sftpConnectKey();
+    appliedConnectKey = '';
+    connectSeq += 1;
+    const seq = connectSeq;
+    connectInFlight = true;
     try {
-      const r = await rpc.call<{ id: string }>('sftp.open', { profile: target!.ssh, sudo: sudoMode });
-      sessionId = r.id;
-      knownRemoteDirs.clear();
-      let nextCwd = prevCwd;
-      try {
-        const real = await rpc.call<{ path: string }>('sftp.realpath', { id: r.id, path: prevCwd });
-        nextCwd = real.path || prevCwd;
-        await rpc.call<SftpEntry[]>('sftp.list', { id: r.id, path: nextCwd });
-        cwd = nextCwd;
-      } catch {
-        const home = await rpc.call<{ path: string }>('sftp.realpath', { id: r.id, path: '.' });
-        cwd = home.path || '/';
-        onError(i18n.t('sftp.cwdFallback'));
-      }
-      await refresh();
-    } catch (e) {
-      sessionId = null;
-      entries = [];
-      listError = (e as Error).message;
-      onError(`sftp: ${(e as Error).message}`);
+      if (seq === connectSeq) await connect();
     } finally {
-      loading = false;
+      if (seq === connectSeq) {
+        connectInFlight = false;
+        appliedConnectKey = key;
+      }
     }
+  }
+
+  async function reconnect(nextSudo = sudoMode) {
+    sudoMode = nextSudo;
+    await forceReconnect();
+  }
+
+  function retryRemoteList() {
+    if (!sessionId) {
+      void forceReconnect();
+      return;
+    }
+    void refresh();
   }
 
   async function refresh() {
@@ -412,7 +441,6 @@
       if (seq !== listSeq) return;
       listError = (e as Error).message;
       entries = [];
-      onError(`list: ${(e as Error).message}`);
     } finally {
       if (seq === listSeq) loading = false;
     }
@@ -548,11 +576,20 @@
     return `sftp-transfer-${Date.now()}-${transferSeq}`;
   }
 
+  function flushTransfersUi() {
+    if (transferUiFlushScheduled) return;
+    transferUiFlushScheduled = true;
+    requestAnimationFrame(() => {
+      transferUiFlushScheduled = false;
+      transfers = [...transfers];
+    });
+  }
+
   function updateTransfer(id: string, patch: Partial<TransferTask>) {
     const transfer = transfers.find((candidate) => candidate.id === id);
     if (!transfer) return;
     Object.assign(transfer, patch);
-    transfers = [...transfers];
+    flushTransfersUi();
   }
 
   function isCanceled(id: string): boolean {
@@ -585,6 +622,7 @@
 
   function enqueueTransfer(task: TransferTask) {
     transfers = [...transfers, task];
+    flushTransfersUi();
     void processTransfers();
   }
 
@@ -685,9 +723,36 @@
     const sid = sessionId;
     const path = cwd;
     const label = target?.name ?? i18n.t('sftp.sshSession');
-    if (sid) {
+    const snap = `${sid ?? ''}:${path}:${label}`;
+    if (sid && snap !== registrySnapshot) {
+      registrySnapshot = snap;
       sftpSessionRegistry.register({ registryId, label, sessionId: sid, cwd: path });
     }
+  });
+
+  $effect(() => {
+    void target?.name;
+    void target?.ssh.host;
+    void target?.ssh.user;
+    void target?.ssh.port;
+    void sudoMode;
+    if (!target) {
+      appliedConnectKey = '';
+      return;
+    }
+    const key = sftpConnectKey();
+    if (!key || key === appliedConnectKey || connectInFlight) return;
+    appliedConnectKey = key;
+    const seq = ++connectSeq;
+    connectInFlight = true;
+    void (async () => {
+      try {
+        if (seq !== connectSeq) return;
+        await connect();
+      } finally {
+        if (seq === connectSeq) connectInFlight = false;
+      }
+    })();
   });
 
   function clampMenuToViewport(x: number, y: number, el: HTMLDivElement | null): { x: number; y: number } {
@@ -1187,7 +1252,6 @@
     void (async () => {
       await loadSftpSettings();
       await initLocalPane();
-      await connect();
     })();
   });
 
@@ -1294,7 +1358,7 @@
       <div class="mx-3 mt-2 px-3 py-2 rounded border border-[var(--color-danger)]/40 bg-[var(--color-danger)]/10
                   text-[12px] text-[var(--color-fg)] flex items-center gap-2">
         <span class="min-w-0 truncate">{i18n.t('sftp.listFailed', { message: listError })}</span>
-        <button type="button" class="btn-secondary shrink-0 text-[11px] px-2 py-0.5" onclick={() => { void refresh(); }}>
+        <button type="button" class="btn-secondary shrink-0 text-[11px] px-2 py-0.5" onclick={retryRemoteList}>
           {i18n.t('sftp.retryList')}
         </button>
       </div>

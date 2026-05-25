@@ -12,6 +12,7 @@
   import { colorSchemeByName, toXtermTheme } from '../lib/colorSchemes';
   import { applyLigatures } from '../lib/customCss';
   import { tabs } from '../lib/tabs.svelte';
+  import { terminalPollIntervalMs } from '../lib/terminalPoll';
   import { i18n } from '../lib/i18n.svelte';
   import { appConfirm } from '../lib/confirm.svelte';
   import { hotkeys } from '../lib/hotkeys';
@@ -29,6 +30,8 @@
     rpc: RpcClient;
     session: SessionMeta;
     active: boolean;
+    /** False when this pane's tab is not the active tab (stops output polling). */
+    tabVisible?: boolean;
     /** Bumped by parent whenever persisted settings change. */
     settingsRev?: number;
     /** Invoked when the user clicks the pane's close button from inside (e.g. exited overlay). */
@@ -46,6 +49,7 @@
     rpc,
     session,
     active,
+    tabVisible = true,
     settingsRev = 0,
     onClosePane,
     onOpenSftp,
@@ -63,6 +67,8 @@
   let rendererAddon: { dispose: () => void } | null = null;
   let activeRenderer: 'dom' | 'canvas' | 'webgl' = 'dom';
   let pollHandle: number | null = null;
+  let pollIntervalMs = 0;
+  let documentHidden = $state(false);
   const encoder = new TextEncoder();
   const decoder = new TextDecoder('utf-8');
 
@@ -197,42 +203,63 @@
     }
   }
 
-  function startPolling() {
-    if (pollHandle != null) return;
-    pollHandle = window.setInterval(async () => {
-      if (!term) return;
-      try {
-        const r = await rpc.call<PollResult>('session.poll', {
-          id: session.id,
-          max_chunks: 64,
-        });
-        for (const c of r.chunks) {
-          const bytes = b64decode(c);
-          const text = decoder.decode(bytes);
-          inspectTransferOutput(text);
-          processSessionOutput(bytes, text);
-        }
-        if (r.chunks.length > 0 && !active) tabs.markActivity(session.id, 'output');
-        if (!r.alive && !exited) {
-          markExited();
-          stopPolling();
-        }
-      } catch (e) {
-        // The session vanished from the backend — treat as exited.
-        const msg = (e as Error).message ?? String(e);
-        if (msg.toLowerCase().includes('not found')) {
-          if (!exited) { markExited(); stopPolling(); }
-        } else {
-          console.warn('poll', session.id, e);
-        }
+  async function pollOnce() {
+    if (!term) return;
+    try {
+      const r = await rpc.call<PollResult>('session.poll', {
+        id: session.id,
+        max_chunks: 64,
+      });
+      for (const c of r.chunks) {
+        const bytes = b64decode(c);
+        const text = decoder.decode(bytes);
+        inspectTransferOutput(text);
+        processSessionOutput(bytes, text);
       }
-    }, 30);
+      if (r.chunks.length > 0 && !active) tabs.markActivity(session.id, 'output');
+      if (!r.alive && !exited) {
+        markExited();
+        stopPolling();
+      }
+    } catch (e) {
+      const msg = (e as Error).message ?? String(e);
+      if (msg.toLowerCase().includes('not found')) {
+        if (!exited) { markExited(); stopPolling(); }
+      } else {
+        console.warn('poll', session.id, e);
+      }
+    }
   }
+
+  function startPolling(intervalMs: number) {
+    if (intervalMs <= 0) {
+      stopPolling();
+      return;
+    }
+    if (pollHandle != null && pollIntervalMs === intervalMs) return;
+    stopPolling();
+    pollIntervalMs = intervalMs;
+    pollHandle = window.setInterval(() => {
+      void pollOnce();
+    }, intervalMs);
+  }
+
   function stopPolling() {
     if (pollHandle != null) {
       window.clearInterval(pollHandle);
       pollHandle = null;
     }
+    pollIntervalMs = 0;
+  }
+
+  function syncPolling() {
+    const ms = terminalPollIntervalMs({
+      active,
+      tabVisible,
+      documentHidden,
+    });
+    if (ms <= 0) stopPolling();
+    else startPolling(ms);
   }
 
   // If the user selected a terminal color scheme (M4), use it as the final
@@ -579,7 +606,10 @@
     // when any settings section calls settingsCoord.bumpRev(). Forces a
     // palette/font reload directly so live-apply works even if the prop
     // chain is somehow stale.
-    const settingsListener = () => { void reloadSettingsLive(); };
+    const settingsListener = () => {
+      if (!active || !tabVisible) return;
+      void reloadSettingsLive();
+    };
     document.addEventListener('aerotab:settings-changed', settingsListener);
     const focusListener = (ev: Event) => {
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
@@ -612,6 +642,12 @@
     document.addEventListener('aerotab:session-ended-action', endedListener);
     document.addEventListener('aerotab:focus-pane', focusListener);
     document.addEventListener('aerotab:fit-pane', fitListener);
+    const onVis = () => {
+      documentHidden = document.hidden;
+      syncPolling();
+    };
+    documentHidden = document.hidden;
+    document.addEventListener('visibilitychange', onVis);
     cleanupSearchListener = () => {
       document.removeEventListener('aerotab:search', searchListener);
       document.removeEventListener('aerotab:settings-changed', settingsListener);
@@ -620,6 +656,7 @@
       document.removeEventListener('aerotab:session-ended-action', endedListener);
       document.removeEventListener('aerotab:focus-pane', focusListener);
       document.removeEventListener('aerotab:fit-pane', fitListener);
+      document.removeEventListener('visibilitychange', onVis);
     };
 
     term.onData((data) => {
@@ -648,7 +685,7 @@
     if (host) ro.observe(host);
 
     await configureTransferFilter(cfg.experimentalTransferDetection);
-    startPolling();
+    syncPolling();
 
     cleanupHost = () => ro.disconnect();
   });
@@ -656,20 +693,23 @@
   let cleanupHost: (() => void) | null = null;
   let cleanupSearchListener: (() => void) | null = null;
 
-  // Pause polling when tab not visible, resume when active.
   $effect(() => {
-    if (active) {
-      startPolling();
-      tabs.clearActivity(session.id);
+    void active;
+    void tabVisible;
+    void documentHidden;
+    syncPolling();
+  });
+
+  $effect(() => {
+    if (!active) return;
+    tabs.clearActivity(session.id);
+    requestAnimationFrame(() => {
+      fit?.fit();
       requestAnimationFrame(() => {
         fit?.fit();
-        requestAnimationFrame(() => {
-          fit?.fit();
-          term?.focus();
-        });
+        term?.focus();
       });
-    }
-    // Inactive panes keep polling so output stays visible in split layouts.
+    });
   });
 
   // Live-apply settings changes (font / theme / scrollback) without re-mounting
@@ -703,9 +743,8 @@
   }
 
   $effect(() => {
-    // touch settingsRev so this effect re-runs when the parent bumps it.
     void settingsRev;
-    if (!term) return;
+    if (!term || !active) return;
     void reloadSettingsLive();
   });
 

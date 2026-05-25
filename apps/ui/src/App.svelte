@@ -124,7 +124,7 @@
       return;
     }
     const pane = activeTab ? tabs.activePane(activeTab) : undefined;
-    if (!pane?.profileId) {
+    if (!pane?.profileId || pane.sshProfile) {
       paneSftpTarget = null;
       return;
     }
@@ -153,10 +153,8 @@
     return sftpDockPinned[key] ?? null;
   });
   const currentSftpCollapsed = $derived(sftpDockCollapsed[activeSftpKey] ?? false);
-  const sftpBrowserKey = $derived(
-    currentSftpDock
-      ? `${activeSftpKey}:${activePane?.id ?? 'none'}:${currentSftpDock.ssh.user}@${currentSftpDock.ssh.host}:${currentSftpDock.ssh.port}`
-      : '',
+  const sftpDockSessionId = $derived(
+    activePane?.kind === 'ssh' || activePane?.sshProfile ? activePane?.id ?? null : null,
   );
 
   // ── M9 — session restore ────────────────────────────────────────────────
@@ -1418,6 +1416,7 @@
               {rpc}
               {tab}
               settingsRev={settingsRev}
+              tabVisible={tabs.activeId === tab.id}
               broadcastEnabled={broadcastOn}
               broadcastTargetIds={broadcastTargets}
               onOpenSftp={() => { void openSftpForActivePane(); }}
@@ -1470,10 +1469,11 @@
             class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
             style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
           >
-            {#key sftpBrowserKey}
+            {#if currentSftpDock}
               <SftpBrowser
                 {rpc}
-                registryId={sftpBrowserKey || `dock-${activeSftpKey}`}
+                registryId={`dock-${activeSftpKey}`}
+                terminalSessionId={sftpDockSessionId}
                 source={currentSftpDock}
                 mode="dock"
                 onClose={() => closeSftpDock()}
@@ -1481,7 +1481,7 @@
                 onPopOut={(sudo) => openSftpWindow({ ...currentSftpDock, sudo })}
                 {onError}
               />
-            {/key}
+            {/if}
           </div>
         {/if}
       {/if}

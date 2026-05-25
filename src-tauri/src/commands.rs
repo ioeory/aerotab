@@ -17,6 +17,7 @@
 //! | `serial.listPorts`      | none                                | `[string]`        |
 //! | `ssh.hostStats`         | `{ profile }`                       | `HostStats`       |
 //! | `sftp.open`             | `{ profile, sudo? }`                | `{ id }`          |
+//! | `sftp.openForSession`   | `{ session_id, sudo? }`             | `{ id }`          |
 //! | `sftp.close`            | `{ id }`                            | `null`            |
 //! | `sftp.list`             | `{ id, path }`                      | `[SftpEntry]`     |
 //! | `sftp.read`             | `{ id, path }`                      | `{ data: b64 }`   |
@@ -201,7 +202,7 @@ pub struct LocalPty {
 }
 
 pub struct SshSessionEntry {
-    pub shell: SshShell,
+    pub shell: Arc<SshShell>,
     pub rx: Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
@@ -330,7 +331,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 st.channels.lock().await.insert(
                     meta.id,
                     SessionChannel::Ssh(SshSessionEntry {
-                        shell,
+                        shell: Arc::new(shell),
                         rx: Mutex::new(rx),
                     }),
                 );
@@ -386,7 +387,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 st.channels.lock().await.insert(
                     meta.id,
                     SessionChannel::Ssh(SshSessionEntry {
-                        shell,
+                        shell: Arc::new(shell),
                         rx: Mutex::new(rx),
                     }),
                 );
@@ -512,7 +513,9 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                             let _ = pty.channel.kill();
                         }
                         SessionChannel::Ssh(s) => {
-                            let _ = s.shell.close().await;
+                            if let Ok(shell) = Arc::try_unwrap(s.shell) {
+                                let _ = shell.close().await;
+                            }
                         }
                         SessionChannel::Serial(_) => {
                             // Dropping the channel closes the underlying port and ends the reader thread.
@@ -1062,6 +1065,13 @@ struct SftpOpenParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SftpOpenForSessionParams {
+    session_id: String,
+    #[serde(default)]
+    sudo: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct SftpIdParams {
     id: Uuid,
 }
@@ -1139,6 +1149,35 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let kh = st.known_hosts.lock().await.clone();
                 let sftp = Sftp::open_with_options(&profile, kh, SftpOpenOptions { sudo: p.sudo })
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+                let id = Uuid::new_v4();
+                st.sftp_sessions.lock().await.insert(id, Arc::new(sftp));
+                Ok(json!({ "id": id }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sftp.openForSession", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpOpenForSessionParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let sid = Uuid::parse_str(&p.session_id)
+                    .map_err(|e| invalid_params(format!("invalid session_id: {e}")))?;
+                let session_id = SessionId(sid);
+                let shell = {
+                    let chans = st.channels.lock().await;
+                    let Some(SessionChannel::Ssh(entry)) = chans.get(&session_id) else {
+                        return Err(invalid_params(
+                            "session is not an open SSH terminal; use sftp.open instead",
+                        ));
+                    };
+                    entry.shell.clone()
+                };
+                let sftp = shell
+                    .open_sftp(SftpOpenOptions { sudo: p.sudo })
                     .await
                     .map_err(|e| internal(e.to_string()))?;
                 let id = Uuid::new_v4();

@@ -16,6 +16,7 @@
     onSplitDown?: () => void;
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
+    tabVisible?: boolean;
   }
 
   let {
@@ -28,6 +29,7 @@
     onSplitDown,
     broadcastEnabled = false,
     broadcastTargetIds = [],
+    tabVisible = true,
   }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
@@ -175,6 +177,7 @@
       {rpc}
       session={node.pane}
       active={focused && !hiddenByMaximize}
+      {tabVisible}
       {settingsRev}
       onClosePane={() => closePane(node.pane.id, new Event('close'))}
       {onOpenSftp}
@@ -244,6 +247,7 @@
           {tab}
           node={child}
           {settingsRev}
+          {tabVisible}
           {onOpenSftp}
           {onSplitRight}
           {onSplitDown}

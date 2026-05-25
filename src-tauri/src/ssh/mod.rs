@@ -227,6 +227,14 @@ impl SshShell {
             .await
             .map_err(SshError::from)
     }
+
+    /// Opens SFTP on the same SSH connection as this shell (no second `connect_authenticated`).
+    pub async fn open_sftp(
+        &self,
+        options: crate::ssh::sftp::SftpOpenOptions,
+    ) -> Result<crate::ssh::sftp::Sftp, SshError> {
+        crate::ssh::sftp::open_subsystem_on_handle(&self._handle, options).await
+    }
 }
 
 /// Connects to `profile.host:port`, authenticates, and opens an interactive
