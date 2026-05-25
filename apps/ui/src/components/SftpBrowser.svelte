@@ -20,6 +20,8 @@
     parentLocalPath,
     parseLocalDrag,
     parseRemoteDrag,
+    readSftpDragData,
+    setSftpDragData,
     type LocalDragPayload,
     type RemoteDragPayload,
   } from '../lib/sftpLocal';
@@ -103,6 +105,8 @@
   let remoteMenuY = $state(0);
   let remoteMenuEntry = $state<SftpEntry | null>(null);
   let remoteMenuEl = $state<HTMLDivElement | null>(null);
+  let renamingName = $state<string | null>(null);
+  let renameDraft = $state('');
 
   let selectedTransferIds = $state<Set<string>>(new Set());
   let transferUiFlushScheduled = false;
@@ -183,7 +187,7 @@
 
   async function handleRemotePaneDrop(e: DragEvent) {
     e.preventDefault();
-    const localRaw = e.dataTransfer?.getData(SFTP_DRAG_LOCAL);
+    const localRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_LOCAL);
     if (localRaw) {
       const payload = parseLocalDrag(localRaw);
       if (payload) await enqueueUploadFromLocal(payload);
@@ -209,7 +213,7 @@
 
   async function handleLocalPaneDrop(e: DragEvent) {
     e.preventDefault();
-    const remoteRaw = e.dataTransfer?.getData(SFTP_DRAG_REMOTE);
+    const remoteRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE);
     if (!remoteRaw || !sessionId) return;
     const payload = parseRemoteDrag(remoteRaw);
     if (!payload) return;
@@ -305,8 +309,7 @@
       kind: entry.kind === 'Dir' ? 'Dir' : 'File',
       size: entry.size,
     };
-    e.dataTransfer?.setData(SFTP_DRAG_REMOTE, JSON.stringify(payload));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+    setSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE, JSON.stringify(payload));
   }
 
   async function openTextEditor(e: SftpEntry) {
@@ -387,8 +390,10 @@
       knownRemoteDirs.clear();
       // Resolve home (".") to an absolute path so navigation is predictable.
       const real = await rpc.call<{ path: string }>('sftp.realpath', { id, path: '.' });
-      cwd = real.path || '.';
-      await refresh();
+      const nextCwd = real.path || '.';
+      const list = await rpc.call<SftpEntry[]>('sftp.list', { id, path: nextCwd });
+      cwd = nextCwd;
+      entries = sortEntries(list);
     } catch (e) {
       sessionId = null;
       entries = [];
@@ -1025,10 +1030,20 @@
     transfers = transfers.filter((transfer) => !finished.has(transfer.id));
   }
 
-  async function renameEntry(e: SftpEntry) {
-    if (!sessionId) return;
-    const nextName = (await appPrompt(i18n.t('sftp.renamePrompt'), { defaultValue: e.name }))?.trim();
-    if (!nextName || nextName === e.name) return;
+  function startInlineRename(e: SftpEntry) {
+    renamingName = e.name;
+    renameDraft = e.name;
+  }
+
+  function cancelInlineRename() {
+    renamingName = null;
+    renameDraft = '';
+  }
+
+  async function commitInlineRename(prevName: string) {
+    const nextName = renameDraft.trim();
+    renamingName = null;
+    if (!sessionId || !nextName || nextName === prevName) return;
     if (nextName.includes('/')) {
       onError('rename: name must not contain /');
       return;
@@ -1036,13 +1051,23 @@
     try {
       await rpc.call('sftp.rename', {
         id: sessionId,
-        from: joinPath(cwd, e.name),
+        from: joinPath(cwd, prevName),
         to: joinPath(cwd, nextName),
       });
       await refresh();
     } catch (err) {
       onError(`rename: ${(err as Error).message}`);
     }
+  }
+
+  function runRemoteMenuAction(fn: (entry: SftpEntry) => void) {
+    return (ev: MouseEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const entry = remoteMenuEntry;
+      closeRemoteMenu();
+      if (entry) fn(entry);
+    };
   }
 
   async function mkdirHere() {
@@ -1407,7 +1432,13 @@
                   <th class="w-[96px]"></th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody
+                ondragover={preventDragDefaults}
+                ondrop={(e) => {
+                  e.stopPropagation();
+                  void handleRemotePaneDrop(e);
+                }}
+              >
                 {#each entries as e (e.name)}
                   <tr
                     class="hover:bg-[var(--color-panel-2)] group"
@@ -1416,19 +1447,43 @@
                     oncontextmenu={(ev) => { void openRemoteMenu(e, ev); }}
                   >
                     <td class="px-3 py-1 truncate">
-                      <button
-                        type="button"
-                        class="flex items-center gap-2 w-full text-left"
-                        ondblclick={() => enter(e)}
-                        onclick={() => e.kind === 'Dir' && enter(e)}
-                      >
-                        {#if e.kind === 'Dir'}
-                          <Folder size={13} class="text-[var(--color-accent)]" />
-                        {:else}
-                          <FileText size={13} class="text-[var(--color-fg-muted)]" />
-                        {/if}
-                        <span class="truncate text-[var(--color-fg)]">{e.name}</span>
-                      </button>
+                      {#if renamingName === e.name}
+                        <form
+                          class="flex items-center gap-1"
+                          onsubmit={(ev) => {
+                            ev.preventDefault();
+                            void commitInlineRename(e.name);
+                          }}
+                        >
+                          {#if e.kind === 'Dir'}
+                            <Folder size={13} class="text-[var(--color-accent)] shrink-0" />
+                          {:else}
+                            <FileText size={13} class="text-[var(--color-fg-muted)] shrink-0" />
+                          {/if}
+                          <input
+                            class="input flex-1 min-w-0 py-0.5 text-[12px] font-mono"
+                            bind:value={renameDraft}
+                            onkeydown={(ev) => {
+                              if (ev.key === 'Escape') cancelInlineRename();
+                            }}
+                            onblur={() => { void commitInlineRename(e.name); }}
+                          />
+                        </form>
+                      {:else}
+                        <button
+                          type="button"
+                          class="flex items-center gap-2 w-full text-left"
+                          ondblclick={() => enter(e)}
+                          onclick={() => e.kind === 'Dir' && enter(e)}
+                        >
+                          {#if e.kind === 'Dir'}
+                            <Folder size={13} class="text-[var(--color-accent)]" />
+                          {:else}
+                            <FileText size={13} class="text-[var(--color-fg-muted)]" />
+                          {/if}
+                          <span class="truncate text-[var(--color-fg)]">{e.name}</span>
+                        </button>
+                      {/if}
                     </td>
                     <td class="px-3 py-1 text-right text-[var(--color-fg-muted)]">
                       {e.kind === 'File' ? formatSize(e.size) : ''}
@@ -1462,7 +1517,7 @@
                       <button
                         type="button"
                         class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                        onclick={() => renameEntry(e)}
+                        onclick={() => startInlineRename(e)}
                         title={i18n.t('common.rename')}
                         aria-label={i18n.t('common.rename')}
                       >
@@ -1489,11 +1544,15 @@
 
     <div class="border-t border-[var(--color-border-soft)] px-3 py-1.5 text-[11px] text-[var(--color-fg-muted)]
                 flex items-center gap-2 min-h-[28px]">
-      {#if lastDownloadPath}
-        <span class="truncate min-w-0" title={lastDownloadPath}>
+      <span class="truncate min-w-0" title={lastDownloadPath ?? defaultDownloadDir ?? ''}>
+        {#if lastDownloadPath}
           {i18n.t('sftp.downloadDir', { path: lastDownloadPath })}
-        </span>
-      {/if}
+        {:else if defaultDownloadDir}
+          {i18n.t('sftp.defaultDownloadDir', { path: defaultDownloadDir })}
+        {:else}
+          {i18n.t('sftp.downloadDirUnset')}
+        {/if}
+      </span>
       <button
         type="button"
         class="ml-auto shrink-0 text-[var(--color-accent)] hover:underline"
@@ -1615,7 +1674,7 @@
     <div
       role="presentation"
       class="fixed inset-0 z-[58]"
-      onclick={closeRemoteMenu}
+      onmousedown={closeRemoteMenu}
       oncontextmenu={(e) => {
         e.preventDefault();
         closeRemoteMenu();
@@ -1627,23 +1686,23 @@
       tabindex="-1"
       class="panel fixed z-[59] min-w-[200px] py-1 text-[12.5px]"
       style="left: {remoteMenuX}px; top: {remoteMenuY}px;"
-      onclick={(e) => e.stopPropagation()}
+      onmousedown={(e) => e.stopPropagation()}
     >
       {#if entry.kind === 'Dir'}
-        <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); void enter(entry); }}>
+        <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { void enter(en); })}>
           {i18n.t('sftp.contextOpen')}
         </button>
       {:else if entry.kind === 'File'}
-        <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); void openTextEditor(entry); }}>
+        <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { void openTextEditor(en); })}>
           {i18n.t('sftp.contextEdit')}
         </button>
       {/if}
       {#if entry.kind === 'File' || entry.kind === 'Dir'}
-        <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); downloadEntry(entry); }}>
+        <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { downloadEntry(en); })}>
           {entry.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('sftp.contextDownload')}
         </button>
       {/if}
-      <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); void renameEntry(entry); }}>
+      <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { startInlineRename(en); })}>
         {i18n.t('sftp.contextRename')}
       </button>
       {#if otherSftpSessions.length > 0}
@@ -1652,13 +1711,13 @@
           {i18n.t('sftp.sendToSessionTitle')}
         </div>
         {#each otherSftpSessions as dest (dest.registryId)}
-          <button type="button" class="menu-item" onclick={() => { void sendEntryToSession(entry, dest); }}>
+          <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { void sendEntryToSession(en, dest); })}>
             {i18n.t('sftp.sendToSession', { label: dest.label })}
           </button>
         {/each}
       {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item text-[var(--color-danger)]" onclick={() => { closeRemoteMenu(); void removeEntry(entry); }}>
+      <button type="button" class="menu-item text-[var(--color-danger)]" onmousedown={runRemoteMenuAction((en) => { void removeEntry(en); })}>
         {i18n.t('sftp.contextDelete')}
       </button>
     </div>

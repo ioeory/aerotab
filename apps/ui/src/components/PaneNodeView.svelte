@@ -3,6 +3,7 @@
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import { tabs, type PaneDropSide, type PaneNode, type Tab } from '../lib/tabs.svelte';
+  import { dispatchFitPane, dispatchFocusPane } from '../lib/focusPane';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
@@ -47,9 +48,16 @@
     try { await rpc.call('session.close', { id: sessionId }); } catch (e) { console.warn(e); }
   }
 
+  function focusPane(sessionId: string) {
+    tabs.focusPane(tab.id, sessionId);
+    requestAnimationFrame(() => dispatchFocusPane(sessionId));
+  }
+
   function toggleMaximize(sessionId: string, ev: Event) {
     ev.stopPropagation();
+    focusPane(sessionId);
     tabs.toggleMaximize(tab.id, sessionId);
+    requestAnimationFrame(() => dispatchFitPane(sessionId));
   }
 
   function dragPayload(ev: DragEvent): { tabId: string; paneId: string } | null {
@@ -168,7 +176,7 @@
     tabindex="-1"
     style="display: {hiddenByMaximize ? 'none' : 'block'};"
     class="relative h-full w-full min-w-0 min-h-0 bg-[var(--color-bg)] {focused ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
-    onpointerdown={() => tabs.focusPane(tab.id, node.pane.id)}
+    onpointerdown={() => focusPane(node.pane.id)}
     ondragover={(e) => onPaneDragOver(node.pane.id, e)}
     ondragleave={onPaneDragLeave}
     ondrop={(e) => onPaneDrop(node.pane.id, e)}

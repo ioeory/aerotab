@@ -3,7 +3,7 @@
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
-  import { dispatchFocusPane } from '../lib/focusPane';
+  import { focusProfileInTabs } from '../lib/focusProfileSession';
   import { matchesProfileQuery } from '../lib/profileMeta';
   import type { ProfileModalOpenOptions } from './ProfileModal.svelte';
   import {
@@ -337,17 +337,7 @@
   }
 
   async function editProfile(p: StoredProfile) {
-    const tab = tabs.tabs.find((candidate) =>
-      candidate.panes.some((pane) => pane.profileId === p.id),
-    );
-    if (tab) {
-      tabs.activate(tab.id);
-      const pane = tab.panes.find((candidate) => candidate.profileId === p.id);
-      if (pane) {
-        tabs.focusPane(tab.id, pane.id);
-        requestAnimationFrame(() => dispatchFocusPane(pane.id));
-      }
-    }
+    focusProfileInTabs(p.id);
     openProfileModal(await latestProfile(p));
   }
 

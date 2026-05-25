@@ -2,7 +2,13 @@
   import { Folder, FileText, RefreshCw, ChevronRight, Home, ArrowUp } from '@lucide/svelte';
   import type { LocalEntry } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
-  import { SFTP_DRAG_LOCAL, joinLocalPath, localBreadcrumbs, type LocalDragPayload } from '../lib/sftpLocal';
+  import {
+    SFTP_DRAG_LOCAL,
+    joinLocalPath,
+    localBreadcrumbs,
+    setSftpDragData,
+    type LocalDragPayload,
+  } from '../lib/sftpLocal';
 
   interface Props {
     cwd: string;
@@ -45,8 +51,7 @@
   }
 
   function onDragStartLocal(e: DragEvent, entry: LocalEntry, path: string) {
-    e.dataTransfer?.setData(SFTP_DRAG_LOCAL, JSON.stringify(dragPayload(entry, path)));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+    setSftpDragData(e.dataTransfer, SFTP_DRAG_LOCAL, JSON.stringify(dragPayload(entry, path)));
   }
 </script>
 
@@ -95,7 +100,15 @@
             <th class="text-right px-2 py-1 font-normal w-[72px]">{i18n.t('sftp.size')}</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody
+          ondragover={onDragOverPane}
+          ondrop={(e) => {
+            e.stopPropagation();
+            if (e.dataTransfer?.types.includes(SFTP_DRAG_LOCAL)) return;
+            onDropRemote(e);
+            onDropFiles(e);
+          }}
+        >
           {#each entries as e (e.name)}
             {@const fullPath = joinLocalPath(cwd, e.name)}
             <tr

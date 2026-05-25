@@ -122,21 +122,47 @@ pub struct ProfileStore {
 
 struct Inner {
     db: Db,
+    read_only: bool,
     /// Serialize sled access — concurrent `spawn_blocking` callers can deadlock on Windows.
     op_lock: Mutex<()>,
 }
 
 impl ProfileStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProfileError> {
-        let db = sled::open(path.as_ref())?;
-        // Touch the tree to make sure it exists.
+        Self::open_with_mode(path, false)
+    }
+
+    /// Opens the store read-only (for a second AeroTab process while another holds the lock).
+    pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self, ProfileError> {
+        Self::open_with_mode(path, true)
+    }
+
+    fn open_with_mode(path: impl AsRef<Path>, read_only: bool) -> Result<Self, ProfileError> {
+        let open_path = if read_only {
+            crate::sled_snapshot::temp_snapshot(path.as_ref(), "profiles")
+                .map_err(|e| ProfileError::Sled(format!("profile snapshot: {e}")))?
+        } else {
+            path.as_ref().to_path_buf()
+        };
+        let db = sled::open(&open_path)?;
         let _ = db.open_tree(TREE_NAME)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
+                read_only,
                 op_lock: Mutex::new(()),
             }),
         })
+    }
+
+    fn ensure_writable(&self) -> Result<(), ProfileError> {
+        if self.inner.read_only {
+            return Err(ProfileError::Sled(
+                "profile store is read-only (another AeroTab instance holds the database lock)"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     fn tree(&self) -> Result<sled::Tree, ProfileError> {
@@ -211,6 +237,7 @@ impl ProfileStore {
     }
 
     pub async fn upsert(&self, profile: Profile) -> Result<(), ProfileError> {
+        self.ensure_writable()?;
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
             me.with_tree(|tree| {
@@ -225,6 +252,7 @@ impl ProfileStore {
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<bool, ProfileError> {
+        self.ensure_writable()?;
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
             me.with_tree(|tree| {

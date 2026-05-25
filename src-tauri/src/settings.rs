@@ -32,17 +32,36 @@ pub struct SettingsStore {
 
 struct Inner {
     tree: sled::Tree,
+    read_only: bool,
 }
 
 impl SettingsStore {
     /// Opens (or creates) the settings sled tree under `dir`.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, SettingsError> {
+        Self::open_with_mode(dir, false)
+    }
+
+    /// Read-only open when another process holds the settings DB lock.
+    pub fn open_readonly(dir: impl AsRef<Path>) -> Result<Self, SettingsError> {
+        Self::open_with_mode(dir, true)
+    }
+
+    fn open_with_mode(dir: impl AsRef<Path>, read_only: bool) -> Result<Self, SettingsError> {
         let dir = dir.as_ref();
-        std::fs::create_dir_all(dir).map_err(sled::Error::Io)?;
-        let db = sled::open(dir.join("settings.sled"))?;
+        if !read_only {
+            std::fs::create_dir_all(dir).map_err(sled::Error::Io)?;
+        }
+        let settings_path = dir.join("settings.sled");
+        let open_path = if read_only {
+            crate::sled_snapshot::temp_snapshot(&settings_path, "settings")
+                .map_err(|e| SettingsError::Sled(sled::Error::Io(e)))?
+        } else {
+            settings_path
+        };
+        let db = sled::open(&open_path)?;
         let tree = db.open_tree("settings")?;
         Ok(Self {
-            inner: Arc::new(Inner { tree }),
+            inner: Arc::new(Inner { tree, read_only }),
         })
     }
 
@@ -54,13 +73,29 @@ impl SettingsStore {
     }
 
     pub fn set(&self, key: &str, value: &Value) -> Result<(), SettingsError> {
+        if self.inner.read_only {
+            return Err(SettingsError::Sled(sled::Error::Unsupported(
+                "settings store is read-only (another AeroTab instance holds the database lock)"
+                    .into(),
+            )));
+        }
         let bytes = serde_json::to_vec(value)?;
         self.inner.tree.insert(key, bytes)?;
         self.inner.tree.flush()?;
         Ok(())
     }
 
+    pub fn is_read_only(&self) -> bool {
+        self.inner.read_only
+    }
+
     pub fn remove(&self, key: &str) -> Result<bool, SettingsError> {
+        if self.inner.read_only {
+            return Err(SettingsError::Sled(sled::Error::Unsupported(
+                "settings store is read-only (another AeroTab instance holds the database lock)"
+                    .into(),
+            )));
+        }
         let prev = self.inner.tree.remove(key)?;
         self.inner.tree.flush()?;
         Ok(prev.is_some())

@@ -22,6 +22,7 @@ pub mod remote;
 pub mod secret;
 pub mod serial;
 pub mod settings;
+mod sled_snapshot;
 pub mod shell_detect;
 pub mod ssh;
 pub mod ssh_config;

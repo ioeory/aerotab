@@ -559,7 +559,21 @@ fn main() {
                 aerotab_core::migrate::migrate_app_data_if_needed(&data_dir);
                 let profiles_path = data_dir.join("profiles.sled");
                 let open_profiles = || aerotab_core::profile::ProfileStore::open(&profiles_path);
-                match open_profiles() {
+                let profile_locked = open_profiles()
+                    .or_else(|e| {
+                        let msg = e.to_string().to_lowercase();
+                        let locked = msg.contains("lock")
+                            || msg.contains("busy")
+                            || msg.contains("resource")
+                            || msg.contains("would block");
+                        if locked {
+                            tracing::info!("profile store locked; opening read-only for secondary instance");
+                            aerotab_core::profile::ProfileStore::open_readonly(&profiles_path)
+                        } else {
+                            Err(e)
+                        }
+                    });
+                match profile_locked {
                     Ok(s) => *state.profiles.lock().await = Some(s),
                     Err(e) => {
                         tracing::warn!(error = %e, "profile store open failed; trying recovery");
@@ -583,7 +597,16 @@ fn main() {
                     }
                 }
                 let mut desktop_settings_store = None;
-                match SettingsStore::open(&data_dir) {
+                let settings_open = SettingsStore::open(&data_dir).or_else(|e| {
+                    let msg = e.to_string().to_lowercase();
+                    if msg.contains("lock") || msg.contains("busy") || msg.contains("resource") {
+                        tracing::info!("settings store locked; opening read-only");
+                        SettingsStore::open_readonly(&data_dir)
+                    } else {
+                        Err(e)
+                    }
+                });
+                match settings_open {
                     Ok(s) => {
                         desktop_settings_store = Some(s.clone());
                         *state.settings.lock().await = Some(s);

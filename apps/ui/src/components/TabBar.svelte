@@ -162,7 +162,9 @@
       ondrop={(e) => onDrop(i, tab.id, e)}
       class:ring-1={paneDropTabId === tab.id}
       class:ring-[var(--color-accent)]={paneDropTabId === tab.id}
-      onclick={() => activateTab(tab.id)}
+      onpointerdown={(e) => {
+        if (e.button === 0) activateTab(tab.id);
+      }}
       oncontextmenu={(e) => showTabMenu(tab, i, e)}
       onpointerenter={() => onTabHover(tab)}
       onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') activateTab(tab.id); }}

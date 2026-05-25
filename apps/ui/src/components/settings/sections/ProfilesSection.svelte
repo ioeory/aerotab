@@ -20,6 +20,7 @@
   } from '../../../lib/profileSelection';
   import { PROFILES_CHANGED } from '../../../lib/profileEvents';
   import { withRpcTimeout } from '../../../lib/rpcTimeout';
+  import { focusProfileInTabs } from '../../../lib/focusProfileSession';
   import ProfileModal from '../../ProfileModal.svelte';
   import ProfileIcon from '../../ProfileIcon.svelte';
 
@@ -181,6 +182,7 @@
   }
 
   async function editProfile(p: StoredProfile) {
+    focusProfileInTabs(p.id);
     try {
       const latest = await rpc.call<StoredProfile>('profile.get', { id: p.id });
       profileModal?.open(latest);

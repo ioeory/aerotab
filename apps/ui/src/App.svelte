@@ -25,6 +25,7 @@
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys } from './lib/hotkeys';
   import { dispatchFocusPane } from './lib/focusPane';
+  import { b64encode } from './lib/rpc';
   import { broadcastTargetIds } from './lib/broadcast';
   import {
     bootstrapSyncEngine,
@@ -1311,7 +1312,7 @@
       }
       hotkeys.dispatch(e);
     };
-    window.addEventListener('keydown', kbdHandler);
+    window.addEventListener('keydown', kbdHandler, true);
     const onSessionReplaced = (ev: Event) => {
       const detail = (ev as CustomEvent<{ oldId: string; session: SessionMeta }>).detail;
       if (!detail?.oldId || !detail.session) return;
@@ -1329,7 +1330,7 @@
     };
   });
   onDestroy(() => {
-    if (kbdHandler) window.removeEventListener('keydown', kbdHandler);
+    if (kbdHandler) window.removeEventListener('keydown', kbdHandler, true);
     document.removeEventListener('aerotab:settings-changed', onAppSettingsChanged);
     clearHostStatsPoll();
   });
@@ -1564,7 +1565,8 @@
     tabs={tabs.tabs}
     activeTabId={tabs.activeId}
     onSend={async (sessionIds, command) => {
-      await rpc.call('session.writeMany', { ids: sessionIds, data: command });
+      const data = b64encode(new TextEncoder().encode(command));
+      await rpc.call('session.writeMany', { ids: sessionIds, data });
     }}
     onClose={() => {
       batchCommandOpen = false;

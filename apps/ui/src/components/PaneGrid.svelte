@@ -28,11 +28,6 @@
     tabVisible = true,
   }: Props = $props();
 
-  const maximizedPaneId = $derived(tab.maximizedPaneId ?? null);
-  const maximizedLeaf = $derived(
-    maximizedPaneId ? tabs.findLeaf(tab, maximizedPaneId) : null,
-  );
-
   $effect(() => {
     void tab.maximizedPaneId;
     void tab.activePaneId;
@@ -44,9 +39,5 @@
 </script>
 
 <div class="absolute inset-0 min-w-0 min-h-0">
-  {#if maximizedLeaf}
-    <PaneNodeView {rpc} {tab} node={maximizedLeaf} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
-  {:else}
-    <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
-  {/if}
+  <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
 </div>

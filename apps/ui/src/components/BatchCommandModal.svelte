@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { isSshPane } from '../lib/broadcast';
@@ -22,6 +23,11 @@
   let scope = $state<'active-tab' | 'all-tabs'>('active-tab');
   let selectedIds = $state<Set<string>>(new Set());
   let busy = $state(false);
+  let dialogEl = $state<HTMLDivElement | null>(null);
+
+  onMount(() => {
+    dialogEl?.focus();
+  });
   const paneOptions = $derived.by((): BatchPaneOption[] => {
     const out: BatchPaneOption[] = [];
     for (const tab of tabList) {
@@ -87,10 +93,18 @@
 </script>
 
 <div
+  bind:this={dialogEl}
   class="fixed inset-0 z-[70] bg-black/55 grid place-items-center p-6"
   role="dialog"
   aria-modal="true"
   aria-labelledby="batch-cmd-title"
+  tabindex="-1"
+  onkeydown={(e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+    }
+  }}
 >
   <form
     class="panel w-full max-w-[520px] max-h-[min(640px,90vh)] flex flex-col overflow-hidden"

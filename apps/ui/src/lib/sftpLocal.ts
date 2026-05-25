@@ -3,6 +3,29 @@ import type { LocalEntry } from './types';
 export const SFTP_DRAG_LOCAL = 'application/x-aerotab-sftp-local';
 export const SFTP_DRAG_REMOTE = 'application/x-aerotab-sftp-remote';
 
+const LOCAL_PLAIN_PREFIX = 'aerotab-sftp-local:';
+const REMOTE_PLAIN_PREFIX = 'aerotab-sftp-remote:';
+
+/** Set drag payload (custom MIME + text/plain fallback for WebView2). */
+export function setSftpDragData(dt: DataTransfer | null, mime: string, payload: string): void {
+  if (!dt) return;
+  dt.setData(mime, payload);
+  const prefix = mime === SFTP_DRAG_LOCAL ? LOCAL_PLAIN_PREFIX : REMOTE_PLAIN_PREFIX;
+  dt.setData('text/plain', `${prefix}${payload}`);
+  dt.effectAllowed = 'copy';
+}
+
+/** Read drag payload written by {@link setSftpDragData}. */
+export function readSftpDragData(dt: DataTransfer | null, mime: string): string {
+  if (!dt) return '';
+  const direct = dt.getData(mime);
+  if (direct) return direct;
+  const prefix = mime === SFTP_DRAG_LOCAL ? LOCAL_PLAIN_PREFIX : REMOTE_PLAIN_PREFIX;
+  const plain = dt.getData('text/plain');
+  if (plain.startsWith(prefix)) return plain.slice(prefix.length);
+  return '';
+}
+
 export interface LocalDragPayload {
   path: string;
   name: string;
