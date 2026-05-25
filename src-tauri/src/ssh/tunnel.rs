@@ -16,7 +16,9 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::known_hosts::KnownHosts;
-use super::{connect_authenticated_custom, SshError, SshProfile, SshTransportSettings, TrustingClient};
+use super::{
+    connect_authenticated_custom, SshError, SshProfile, SshTransportSettings, TrustingClient,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -230,19 +232,18 @@ async fn spawn_local_tunnel(
     let profile = req.profile;
 
     let kh = known_hosts.clone();
-    let handle =
-        connect_authenticated_custom(
-            &profile,
-            known_hosts,
-            SshTransportSettings::default(),
-            move |hop, _| TrustingClient {
-                host_port: format!("{}:{}", hop.host, hop.port),
-                known_hosts: kh.clone(),
-                pinned_host_key_b64: None,
-                x11_forward: false,
-            },
-        )
-        .await?;
+    let handle = connect_authenticated_custom(
+        &profile,
+        known_hosts,
+        SshTransportSettings::default(),
+        move |hop, _| TrustingClient {
+            host_port: format!("{}:{}", hop.host, hop.port),
+            known_hosts: kh.clone(),
+            pinned_host_key_b64: None,
+            x11_forward: false,
+        },
+    )
+    .await?;
     let handle = Arc::new(Mutex::new(handle));
 
     Ok(tokio::spawn(async move {
@@ -300,20 +301,20 @@ async fn spawn_remote_tunnel(
         known_hosts,
         SshTransportSettings::default(),
         |hop, is_final| {
-        let trusting = TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: false,
-        };
-        ForwardingClient {
-            trusting,
-            local_target: if is_final {
-                Some((local_host.clone(), local_port))
-            } else {
-                None
-            },
-        }
+            let trusting = TrustingClient {
+                host_port: format!("{}:{}", hop.host, hop.port),
+                known_hosts: kh.clone(),
+                pinned_host_key_b64: None,
+                x11_forward: false,
+            };
+            ForwardingClient {
+                trusting,
+                local_target: if is_final {
+                    Some((local_host.clone(), local_port))
+                } else {
+                    None
+                },
+            }
         },
     )
     .await?;
@@ -346,19 +347,18 @@ async fn spawn_dynamic_tunnel(
     let profile = req.profile;
 
     let kh = known_hosts.clone();
-    let handle =
-        connect_authenticated_custom(
-            &profile,
-            known_hosts,
-            SshTransportSettings::default(),
-            move |hop, _| TrustingClient {
-                host_port: format!("{}:{}", hop.host, hop.port),
-                known_hosts: kh.clone(),
-                pinned_host_key_b64: None,
-                x11_forward: false,
-            },
-        )
-        .await?;
+    let handle = connect_authenticated_custom(
+        &profile,
+        known_hosts,
+        SshTransportSettings::default(),
+        move |hop, _| TrustingClient {
+            host_port: format!("{}:{}", hop.host, hop.port),
+            known_hosts: kh.clone(),
+            pinned_host_key_b64: None,
+            x11_forward: false,
+        },
+    )
+    .await?;
     let handle = Arc::new(Mutex::new(handle));
 
     Ok(tokio::spawn(async move {

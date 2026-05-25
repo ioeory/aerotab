@@ -247,7 +247,11 @@ async fn run_connection_check(
     }
     let probe = timeout(
         Duration::from_secs(12),
-        ssh::connect_authenticated(&probe_profile, known_hosts, ssh::SshTransportSettings::default()),
+        ssh::connect_authenticated(
+            &probe_profile,
+            known_hosts,
+            ssh::SshTransportSettings::default(),
+        ),
     )
     .await;
     match probe {

@@ -244,7 +244,15 @@ pub async fn connect_shell(
     cols: u32,
     rows: u32,
 ) -> Result<SshShell, SshError> {
-    connect_shell_with_known_hosts(profile, cols, rows, None, None, SshTransportSettings::default()).await
+    connect_shell_with_known_hosts(
+        profile,
+        cols,
+        rows,
+        None,
+        None,
+        SshTransportSettings::default(),
+    )
+    .await
 }
 
 /// TCP/SSH timing applied to every new SSH dial (terminal, SFTP, tunnels).
@@ -446,11 +454,13 @@ pub async fn connect_authenticated(
     transport: SshTransportSettings,
 ) -> Result<client::Handle<TrustingClient>, SshError> {
     let kh = known_hosts.clone();
-    connect_authenticated_custom(profile, known_hosts, transport, move |hop, _| TrustingClient {
-        host_port: format!("{}:{}", hop.host, hop.port),
-        known_hosts: kh.clone(),
-        pinned_host_key_b64: None,
-        x11_forward: false,
+    connect_authenticated_custom(profile, known_hosts, transport, move |hop, _| {
+        TrustingClient {
+            host_port: format!("{}:{}", hop.host, hop.port),
+            known_hosts: kh.clone(),
+            pinned_host_key_b64: None,
+            x11_forward: false,
+        }
     })
     .await
 }
@@ -466,18 +476,16 @@ pub async fn connect_shell_with_known_hosts(
 ) -> Result<SshShell, SshError> {
     let x11_enabled = x11.as_ref().is_some_and(|o| o.enabled);
     let kh = known_hosts.clone();
-    let handle = connect_authenticated_custom(
-        profile,
-        known_hosts,
-        transport,
-        move |hop, is_final| TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: is_final && x11_enabled,
-        },
-    )
-    .await?;
+    let handle =
+        connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
+            TrustingClient {
+                host_port: format!("{}:{}", hop.host, hop.port),
+                known_hosts: kh.clone(),
+                pinned_host_key_b64: None,
+                x11_forward: is_final && x11_enabled,
+            }
+        })
+        .await?;
 
     let mut channel = handle
         .channel_open_session()

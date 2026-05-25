@@ -67,7 +67,8 @@ pub async fn probe_host_stats(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
 ) -> Result<HostStats, SshError> {
-    let handle = connect_authenticated(profile, known_hosts, SshTransportSettings::default()).await?;
+    let handle =
+        connect_authenticated(profile, known_hosts, SshTransportSettings::default()).await?;
     let mut channel = handle
         .channel_open_session()
         .await
