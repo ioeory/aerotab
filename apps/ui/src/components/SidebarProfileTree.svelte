@@ -13,8 +13,12 @@
     collapsed: Set<string>;
     forceExpanded: Set<string>;
     focusedProfileId?: string | null;
+    selectedProfileIds?: Set<string>;
+    showSelection?: boolean;
     onToggleFolder: (path: string) => void;
     onOpenProfile: (p: StoredProfile) => void;
+    onProfileClick?: (p: StoredProfile, ev: MouseEvent) => void;
+    onProfileCheckboxToggle?: (p: StoredProfile) => void;
     onProfileFocus: (p: StoredProfile) => void;
     onProfileKeydown: (p: StoredProfile, ev: KeyboardEvent) => void;
     onProfileContextMenu: (p: StoredProfile, ev: MouseEvent) => void;
@@ -29,8 +33,12 @@
     collapsed,
     forceExpanded,
     focusedProfileId = null,
+    selectedProfileIds = new Set(),
+    showSelection = false,
     onToggleFolder,
     onOpenProfile,
+    onProfileClick,
+    onProfileCheckboxToggle,
     onProfileFocus,
     onProfileKeydown,
     onProfileContextMenu,
@@ -84,8 +92,12 @@
           {collapsed}
           {forceExpanded}
           {focusedProfileId}
+          {selectedProfileIds}
+          {showSelection}
           {onToggleFolder}
           {onOpenProfile}
+          {onProfileClick}
+          {onProfileCheckboxToggle}
           {onProfileFocus}
           {onProfileKeydown}
           {onProfileContextMenu}
@@ -105,12 +117,13 @@
 {#each folder.profiles as p (p.id)}
   <div
     class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer
-           {focusedProfileId === p.id ? 'profile-row--focused' : ''}"
+           {focusedProfileId === p.id ? 'profile-row--focused' : ''}
+           {selectedProfileIds.has(p.id) ? 'profile-row--selected' : ''}"
     style="--depth: {depth}"
     role="button"
     tabindex="0"
     title="{profileEndpointLabel(p)} — {i18n.t('sidebar.profileRowHint')}"
-    onclick={() => onProfileFocus(p)}
+    onclick={(ev) => (onProfileClick ? onProfileClick(p, ev) : onProfileFocus(p))}
     onfocus={() => onProfileFocus(p)}
     ondblclick={() => onOpenProfile(p)}
     onkeydown={(e) => {
@@ -123,6 +136,16 @@
     oncontextmenu={(e) => onProfileContextMenu(p, e)}
   >
     <div class="profile-row-indent shrink-0"></div>
+    <input
+      type="checkbox"
+      class="shrink-0 opacity-60 group-hover:opacity-100 {selectedProfileIds.has(p.id) || showSelection ? 'opacity-100' : ''}"
+      checked={selectedProfileIds.has(p.id)}
+      onclick={(ev) => {
+        ev.stopPropagation();
+        onProfileCheckboxToggle?.(p);
+      }}
+      aria-label={p.name}
+    />
     <ProfileIcon icon={p.icon} name={p.name} size={13} />
     <div class="flex-1 min-w-0 text-left py-1.5 text-[12px]">
       <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
@@ -170,5 +193,8 @@
     background: var(--color-panel-2);
     outline: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
     outline-offset: -1px;
+  }
+  .profile-row--selected {
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
   }
 </style>

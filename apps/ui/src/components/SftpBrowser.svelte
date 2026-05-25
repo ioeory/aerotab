@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import {
     X, Folder, FileText, RefreshCw, ChevronRight, Home, ArrowUp,
     Upload, Download, Trash2, FolderPlus, Pencil, PanelRightClose, FolderUp,
@@ -11,6 +11,8 @@
   import { appConfirm, appPrompt } from '../lib/confirm.svelte';
   import type { LocalEntry, SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
   import SftpLocalPane from './SftpLocalPane.svelte';
+  import { sftpSessionRegistry, type RegisteredSftpSession } from '../lib/sftpSessionRegistry.svelte';
+  import { portal } from '../lib/portal';
   import {
     SFTP_DRAG_LOCAL,
     SFTP_DRAG_REMOTE,
@@ -33,17 +35,19 @@
     profile?: StoredProfile;
     source?: SftpSource;
     mode?: 'modal' | 'dock';
+    registryId?: string;
     onClose: () => void;
     onCollapse?: () => void;
     onPopOut?: (sudo: boolean) => void;
     onError: (msg: string) => void;
   }
-  let { rpc, profile, source, mode = 'modal', onClose, onCollapse, onPopOut, onError }: Props = $props();
+  let { rpc, profile, source, mode = 'modal', registryId: registryIdProp, onClose, onCollapse, onPopOut, onError }: Props = $props();
   const target = $derived.by((): SftpSource | null => {
     if (source) return source;
     if (profile?.kind === 'ssh') return { name: profile.name, ssh: profile.ssh };
     return null;
   });
+  const registryId = $derived(registryIdProp ?? `sftp-${target?.name ?? 'session'}-${mode}`);
 
   function initialSudoMode(): boolean {
     return Boolean(source?.sudo);
@@ -80,6 +84,14 @@
   let editRemotePath = $state('');
   let editContent = $state('');
   let editSaving = $state(false);
+
+  let remoteMenuOpen = $state(false);
+  let remoteMenuX = $state(0);
+  let remoteMenuY = $state(0);
+  let remoteMenuEntry = $state<SftpEntry | null>(null);
+  let remoteMenuEl = $state<HTMLDivElement | null>(null);
+
+  let selectedTransferIds = $state<Set<string>>(new Set());
 
   type TransferKind = 'upload' | 'download';
   type TransferStatus = 'queued' | 'running' | 'paused' | 'done' | 'error' | 'canceled';
@@ -669,6 +681,185 @@
     needsRefreshAfterTransfers = true;
   }
 
+  $effect(() => {
+    const sid = sessionId;
+    const path = cwd;
+    const label = target?.name ?? i18n.t('sftp.sshSession');
+    if (sid) {
+      sftpSessionRegistry.register({ registryId, label, sessionId: sid, cwd: path });
+    }
+  });
+
+  function clampMenuToViewport(x: number, y: number, el: HTMLDivElement | null): { x: number; y: number } {
+    if (!el) return { x, y };
+    const pad = 8;
+    const maxX = Math.max(pad, window.innerWidth - el.offsetWidth - pad);
+    const maxY = Math.max(pad, window.innerHeight - el.offsetHeight - pad);
+    return {
+      x: Math.min(Math.max(pad, x), maxX),
+      y: Math.min(Math.max(pad, y), maxY),
+    };
+  }
+
+  async function openRemoteMenu(entry: SftpEntry, ev: MouseEvent) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    remoteMenuEntry = entry;
+    remoteMenuX = ev.clientX;
+    remoteMenuY = ev.clientY;
+    remoteMenuOpen = true;
+    await tick();
+    const clamped = clampMenuToViewport(remoteMenuX, remoteMenuY, remoteMenuEl);
+    remoteMenuX = clamped.x;
+    remoteMenuY = clamped.y;
+  }
+
+  function closeRemoteMenu() {
+    remoteMenuOpen = false;
+    remoteMenuEntry = null;
+  }
+
+  const otherSftpSessions = $derived(sftpSessionRegistry.others(registryId));
+
+  async function ensureRemoteDirOn(sid: string, path: string, dirCache: Set<string>) {
+    const normalized = normalizeRemotePath(path);
+    if (normalized === '/' || normalized === '.') return;
+    const absolute = normalized.startsWith('/');
+    const segments = normalized.split('/').filter(Boolean);
+    let cursor = absolute ? '/' : '.';
+    for (const segment of segments) {
+      cursor = joinPath(cursor, segment);
+      if (dirCache.has(cursor)) continue;
+      try {
+        const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor });
+        if (entry.kind !== 'Dir') throw new Error(`${cursor} exists and is not a directory`);
+      } catch (e) {
+        try {
+          await rpc.call('sftp.mkdir', { id: sid, path: cursor });
+        } catch (mkdirError) {
+          const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor }).catch(() => null);
+          if (entry?.kind !== 'Dir') throw mkdirError;
+        }
+      }
+      dirCache.add(cursor);
+    }
+  }
+
+  async function copyRemoteFileBetweenSessions(
+    srcSid: string,
+    srcPath: string,
+    destSid: string,
+    destPath: string,
+    size: number,
+  ) {
+    if (size === 0) {
+      await rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true });
+      return;
+    }
+    let offset = 0;
+    while (offset < size) {
+      const len = Math.min(CHUNK_SIZE, size - offset);
+      const r = await rpc.call<{ data: string }>('sftp.readChunk', {
+        id: srcSid,
+        path: srcPath,
+        offset,
+        len,
+      });
+      const bytes = b64decode(r.data);
+      if (bytes.byteLength === 0) break;
+      await rpc.call('sftp.writeChunk', {
+        id: destSid,
+        path: destPath,
+        offset,
+        data: b64encode(bytes),
+        create: offset === 0,
+      });
+      offset += bytes.byteLength;
+    }
+  }
+
+  async function copyRemoteDirBetweenSessions(
+    srcSid: string,
+    srcPath: string,
+    destSid: string,
+    destPath: string,
+    dirCache: Set<string>,
+  ) {
+    await ensureRemoteDirOn(destSid, destPath, dirCache);
+    const list = sortEntries(await rpc.call<SftpEntry[]>('sftp.list', { id: srcSid, path: srcPath }));
+    for (const entry of list) {
+      const childSrc = joinPath(srcPath, entry.name);
+      const childDest = joinPath(destPath, entry.name);
+      if (entry.kind === 'Dir') {
+        await copyRemoteDirBetweenSessions(srcSid, childSrc, destSid, childDest, dirCache);
+      } else if (entry.kind === 'File') {
+        await copyRemoteFileBetweenSessions(srcSid, childSrc, destSid, childDest, entry.size);
+      }
+    }
+  }
+
+  async function sendEntryToSession(entry: SftpEntry, dest: RegisteredSftpSession) {
+    if (!sessionId) return;
+    closeRemoteMenu();
+    const srcPath = joinPath(cwd, entry.name);
+    const destPath = joinPath(dest.cwd, entry.name);
+    const dirCache = new Set<string>();
+    try {
+      if (entry.kind === 'Dir') {
+        await copyRemoteDirBetweenSessions(sessionId, srcPath, dest.sessionId, destPath, dirCache);
+      } else if (entry.kind === 'File') {
+        const destDir = parentPath(destPath);
+        if (destDir !== '/' && destDir !== '.') {
+          await ensureRemoteDirOn(dest.sessionId, destDir, dirCache);
+        }
+        await copyRemoteFileBetweenSessions(sessionId, srcPath, dest.sessionId, destPath, entry.size);
+      }
+    } catch (e) {
+      onError(i18n.t('sftp.crossTransferFailed', { message: (e as Error).message }));
+    }
+  }
+
+  function toggleTransferSelection(id: string) {
+    const next = new Set(selectedTransferIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedTransferIds = next;
+  }
+
+  function selectAllTransfers() {
+    selectedTransferIds = new Set(transfers.map((t) => t.id));
+  }
+
+  function invertTransferSelection() {
+    const next = new Set<string>();
+    for (const t of transfers) {
+      if (!selectedTransferIds.has(t.id)) next.add(t.id);
+    }
+    selectedTransferIds = next;
+  }
+
+  function clearTransferSelection() {
+    selectedTransferIds = new Set();
+  }
+
+  function removeSelectedTransfers() {
+    const remove = selectedTransferIds;
+    for (const id of remove) {
+      uploadFiles.delete(id);
+      downloadEntries.delete(id);
+    }
+    transfers = transfers.filter((t) => !remove.has(t.id));
+    clearTransferSelection();
+  }
+
+  function clearAllTransfers() {
+    cancelActiveTransfers();
+    uploadFiles.clear();
+    downloadEntries.clear();
+    transfers = [];
+    clearTransferSelection();
+  }
+
   async function ensureRemoteDir(path: string) {
     if (!sessionId) throw new Error('SFTP session is not open');
     const normalized = normalizeRemotePath(path);
@@ -1001,6 +1192,7 @@
   });
 
   onDestroy(() => {
+    sftpSessionRegistry.unregister(registryId);
     if (sessionId) {
       void rpc.call('sftp.close', { id: sessionId }).catch(() => {});
     }
@@ -1157,6 +1349,7 @@
                     class="hover:bg-[var(--color-panel-2)] group"
                     draggable={e.kind === 'File' || e.kind === 'Dir'}
                     ondragstart={(ev) => onRemoteDragStart(ev, e)}
+                    oncontextmenu={(ev) => { void openRemoteMenu(e, ev); }}
                   >
                     <td class="px-3 py-1 truncate">
                       <button
@@ -1248,9 +1441,19 @@
 
     {#if transfers.length > 0}
       <div class="border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] max-h-[180px] overflow-y-auto">
-        <div class="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-[var(--color-panel)] border-b border-[var(--color-border-soft)]">
+        <div class="sticky top-0 z-10 flex flex-wrap items-center gap-2 px-3 py-1.5 bg-[var(--color-panel)] border-b border-[var(--color-border-soft)]">
           <div class="text-[11px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">{i18n.t('sftp.transfers')}</div>
           <div class="text-[11px] text-[var(--color-fg-muted)]">{transfers.length}</div>
+          <button type="button" class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+                  onclick={selectAllTransfers}>{i18n.t('sftp.transferSelectAll')}</button>
+          <button type="button" class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+                  onclick={invertTransferSelection}>{i18n.t('sftp.transferInvert')}</button>
+          {#if selectedTransferIds.size > 0}
+            <button type="button" class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+                    onclick={clearTransferSelection}>{i18n.t('sftp.transferClearSelection')}</button>
+            <button type="button" class="text-[11px] text-[var(--color-danger)] hover:underline"
+                    onclick={removeSelectedTransfers}>{i18n.t('sftp.transferRemoveSelected')}</button>
+          {/if}
           <button
             type="button"
             class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
@@ -1261,12 +1464,24 @@
             class="ml-auto text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={clearFinishedTransfers}
           >{i18n.t('common.clearFinished')}</button>
+          <button
+            type="button"
+            class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+            onclick={clearAllTransfers}
+          >{i18n.t('sftp.transferClearAll')}</button>
         </div>
         <div class="divide-y divide-[var(--color-border-soft)]">
           {#each transfers as task (task.id)}
             {@const pct = transferPercent(task)}
-            <div class="px-3 py-2 text-[11.5px]">
+            <div class="px-3 py-2 text-[11.5px] {selectedTransferIds.has(task.id) ? 'bg-[var(--color-panel-2)]' : ''}">
               <div class="flex items-center gap-2 min-w-0">
+                <input
+                  type="checkbox"
+                  class="shrink-0"
+                  checked={selectedTransferIds.has(task.id)}
+                  onchange={() => toggleTransferSelection(task.id)}
+                  aria-label={task.name}
+                />
                 {#if task.status === 'queued'}
                   <Clock3 size={13} class="text-[var(--color-fg-muted)] shrink-0" />
                 {:else if task.status === 'paused'}
@@ -1329,6 +1544,62 @@
     {/if}
   </div>
 </div>
+
+{#if remoteMenuOpen && remoteMenuEntry}
+  {@const entry = remoteMenuEntry}
+  <div use:portal class="contents">
+    <div
+      role="presentation"
+      class="fixed inset-0 z-[58]"
+      onclick={closeRemoteMenu}
+      oncontextmenu={(e) => {
+        e.preventDefault();
+        closeRemoteMenu();
+      }}
+    ></div>
+    <div
+      bind:this={remoteMenuEl}
+      role="menu"
+      tabindex="-1"
+      class="panel fixed z-[59] min-w-[200px] py-1 text-[12.5px]"
+      style="left: {remoteMenuX}px; top: {remoteMenuY}px;"
+      onclick={(e) => e.stopPropagation()}
+    >
+      {#if entry.kind === 'Dir'}
+        <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); void enter(entry); }}>
+          {i18n.t('sftp.contextOpen')}
+        </button>
+      {:else if entry.kind === 'File'}
+        <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); void openTextEditor(entry); }}>
+          {i18n.t('sftp.contextEdit')}
+        </button>
+      {/if}
+      {#if entry.kind === 'File' || entry.kind === 'Dir'}
+        <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); downloadEntry(entry); }}>
+          {entry.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('sftp.contextDownload')}
+        </button>
+      {/if}
+      <button type="button" class="menu-item" onclick={() => { closeRemoteMenu(); void renameEntry(entry); }}>
+        {i18n.t('sftp.contextRename')}
+      </button>
+      {#if otherSftpSessions.length > 0}
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        <div class="px-3 py-1 text-[10px] uppercase tracking-wide text-[var(--color-fg-muted)]">
+          {i18n.t('sftp.sendToSessionTitle')}
+        </div>
+        {#each otherSftpSessions as dest (dest.registryId)}
+          <button type="button" class="menu-item" onclick={() => { void sendEntryToSession(entry, dest); }}>
+            {i18n.t('sftp.sendToSession', { label: dest.label })}
+          </button>
+        {/each}
+      {/if}
+      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      <button type="button" class="menu-item text-[var(--color-danger)]" onclick={() => { closeRemoteMenu(); void removeEntry(entry); }}>
+        {i18n.t('sftp.contextDelete')}
+      </button>
+    </div>
+  </div>
+{/if}
 
 {#if editOpen}
   <div class="fixed inset-0 z-[60] bg-black/50 grid place-items-center p-6" role="dialog" aria-modal="true">

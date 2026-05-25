@@ -11,6 +11,13 @@
   import { appConfirm } from '../../../lib/confirm.svelte';
   import { tabs } from '../../../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
+  import {
+    invertProfileSelection,
+    profilesFromSelection,
+    rangeSelectProfiles,
+    selectAllProfiles,
+    toggleProfileInSelection,
+  } from '../../../lib/profileSelection';
   import { PROFILES_CHANGED } from '../../../lib/profileEvents';
   import { withRpcTimeout } from '../../../lib/rpcTimeout';
   import ProfileModal from '../../ProfileModal.svelte';
@@ -38,6 +45,15 @@
   let loadGen = 0;
   let healthRunning = $state(false);
   let health = $state<Record<string, ProfileHealthResult>>({});
+  let selectedProfileIds = $state<Set<string>>(new Set());
+  let selectionAnchorId = $state<string | null>(null);
+  let bulkBusy = $state(false);
+
+  const visibleProfiles = $derived(
+    sortProfiles(saved).filter((profile) => matchesProfileQuery(profile, query)),
+  );
+  const selectedProfiles = $derived(profilesFromSelection(visibleProfiles, selectedProfileIds));
+  const hasProfileSelection = $derived(selectedProfileIds.size > 0);
   let profileModal: {
     open: (existing?: StoredProfile, options?: { group?: string }) => void;
   } | null = $state(null);
@@ -174,19 +190,75 @@
     }
   }
 
-  async function runHealthCheck() {
-    if (saved.length === 0 || healthRunning) return;
+  function clearProfileSelection() {
+    selectedProfileIds = new Set();
+    selectionAnchorId = null;
+  }
+
+  function onProfileRowClick(p: StoredProfile, ev: MouseEvent) {
+    if (ev.shiftKey && selectionAnchorId) {
+      selectedProfileIds = rangeSelectProfiles(visibleProfiles, selectionAnchorId, p.id);
+    } else if (ev.ctrlKey || ev.metaKey) {
+      selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
+      selectionAnchorId = p.id;
+    } else {
+      selectionAnchorId = p.id;
+    }
+  }
+
+  function toggleProfileCheckbox(p: StoredProfile) {
+    selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
+    selectionAnchorId = p.id;
+  }
+
+  async function runHealthCheck(ids?: string[]) {
+    const targetIds = ids ?? saved.map((profile) => profile.id);
+    if (targetIds.length === 0 || healthRunning) return;
     healthRunning = true;
     try {
       const results = await rpc.call<ProfileHealthResult[]>('profile.healthCheck', {
-        ids: saved.map((profile) => profile.id),
+        ids: targetIds,
         connect: true,
       });
-      health = Object.fromEntries(results.map((result) => [result.id, result]));
+      health = { ...health, ...Object.fromEntries(results.map((result) => [result.id, result])) };
     } catch (e) {
       onError(`profile health: ${(e as Error).message}`);
     } finally {
       healthRunning = false;
+    }
+  }
+
+  async function bulkConnectSelected() {
+    const list = selectedProfiles.filter((p) => p.kind === 'ssh' || p.kind === 'rdp' || p.kind === 'vnc');
+    if (list.length === 0) return;
+    bulkBusy = true;
+    try {
+      for (const p of list) {
+        await connect(p);
+      }
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function bulkDeleteSelected() {
+    const list = selectedProfiles;
+    if (list.length === 0) return;
+    if (!(await appConfirm(i18n.t('profiles.bulkDeleteConfirm', { count: list.length }), {
+      danger: true,
+      confirmLabel: i18n.t('common.delete'),
+    }))) return;
+    bulkBusy = true;
+    try {
+      for (const p of list) {
+        await rpc.call('profile.delete', { id: p.id });
+      }
+      clearProfileSelection();
+      await load();
+    } catch (e) {
+      onError(`delete: ${(e as Error).message}`);
+    } finally {
+      bulkBusy = false;
     }
   }
 
@@ -220,7 +292,7 @@
     <h2 class="!mb-0">{i18n.t('profiles.title')}</h2>
     <div class="flex items-center gap-2">
       <button type="button" class="btn-secondary flex items-center gap-1.5"
-              onclick={runHealthCheck} disabled={healthRunning || saved.length === 0}>
+              onclick={() => { void runHealthCheck(); }} disabled={healthRunning || saved.length === 0}>
         <Activity size={12} /> {healthRunning ? i18n.t('profiles.healthChecking') : i18n.t('profiles.healthCheck')}
       </button>
       <button type="button" class="btn-primary flex items-center gap-1.5"
@@ -237,6 +309,36 @@
       class="input pl-7"
     />
   </div>
+
+  {#if hasProfileSelection}
+    <div class="flex flex-wrap items-center gap-2 py-1">
+      <span class="text-[11px] text-[var(--color-fg-muted)]">{i18n.t('profiles.selectedCount', { count: selectedProfileIds.size })}</span>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy || healthRunning}
+              onclick={() => { selectedProfileIds = selectAllProfiles(visibleProfiles); }}>
+        {i18n.t('profiles.selectAll')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy || healthRunning}
+              onclick={() => { selectedProfileIds = invertProfileSelection(selectedProfileIds, visibleProfiles); }}>
+        {i18n.t('profiles.invertSelection')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy}
+              onclick={clearProfileSelection}>
+        {i18n.t('profiles.clearSelection')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy}
+              onclick={() => { void bulkConnectSelected(); }}>
+        {i18n.t('profiles.bulkConnect')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy || healthRunning}
+              onclick={() => { void runHealthCheck(selectedProfiles.map((p) => p.id)); }}>
+        {i18n.t('profiles.bulkHealthCheck')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2 text-[var(--color-danger)]" disabled={bulkBusy}
+              onclick={() => { void bulkDeleteSelected(); }}>
+        {i18n.t('profiles.bulkDelete')}
+      </button>
+    </div>
+  {/if}
 
   <div class="summary-strip">
     <span>{i18n.t('profiles.groups', { count: summary().groups })}</span>
@@ -269,7 +371,22 @@
             <div class="group-name">{groupName}</div>
             {#each items as p (p.id)}
               {@const h = health[p.id]}
-              <div class="profile-row">
+              <div
+                class="profile-row {selectedProfileIds.has(p.id) ? 'profile-row--selected' : ''}"
+                onclick={(ev) => onProfileRowClick(p, ev)}
+                onkeydown={() => {}}
+                role="presentation"
+              >
+                <input
+                  type="checkbox"
+                  class="shrink-0"
+                  checked={selectedProfileIds.has(p.id)}
+                  onclick={(ev) => {
+                    ev.stopPropagation();
+                    toggleProfileCheckbox(p);
+                  }}
+                  aria-label={p.name}
+                />
                 <ProfileIcon icon={p.icon} name={p.name} size={14} />
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-1 text-[12.5px] font-medium truncate">
@@ -354,6 +471,11 @@
     border: 1px solid var(--color-border-soft);
     background: var(--color-panel-2);
     margin-bottom: 4px;
+    cursor: pointer;
+  }
+  .profile-row--selected {
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
+    border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border-soft));
   }
   .summary-strip {
     display: flex;

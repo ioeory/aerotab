@@ -9,6 +9,7 @@
   import VaultUnlockModal from './components/VaultUnlockModal.svelte';
   import SerialModal from './components/SerialModal.svelte';
   import SftpBrowser from './components/SftpBrowser.svelte';
+  import BatchCommandModal from './components/BatchCommandModal.svelte';
   import SettingsLayout from './components/settings/SettingsLayout.svelte';
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
@@ -77,6 +78,7 @@
   let settingsInitialSection = $state<SettingsSectionId>('appearance');
   let settingsRev = $state(0);
   let paletteOpen = $state(false);
+  let batchCommandOpen = $state(false);
   let pickerOpen = $state(false);
   let savedProfiles = $state<StoredProfile[]>([]);
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
@@ -1193,6 +1195,14 @@
       });
     }
     acts.push({
+      id: 'batch-command',
+      title: i18n.t('action.batchCommand'),
+      subtitle: i18n.t('batchCommand.scopeActiveTab'),
+      keywords: ['batch', 'command', 'writeMany', 'multiplex'],
+      shortcut: 'Ctrl+Shift+Enter',
+      run: () => { batchCommandOpen = true; },
+    });
+    acts.push({
       id: 'toggle-broadcast',
       title: broadcastOn ? i18n.t('action.broadcastOff') : i18n.t('action.broadcastOn'),
       subtitle: i18n.t('action.broadcastHint'),
@@ -1255,6 +1265,7 @@
     hotkeys.registerHandler('open-sftp', () => { void openSftpForActivePane(); });
     hotkeys.registerHandler('toggle-sftp-dock', () => toggleCurrentSftpDock());
     hotkeys.registerHandler('toggle-broadcast', () => toggleBroadcast());
+    hotkeys.registerHandler('batch-command', () => { batchCommandOpen = true; });
     hotkeys.registerHandler('focus-left',  () => focusPaneDirection('left'));
     hotkeys.registerHandler('focus-right', () => focusPaneDirection('right'));
     hotkeys.registerHandler('focus-up',    () => focusPaneDirection('up'));
@@ -1462,6 +1473,7 @@
             {#key sftpBrowserKey}
               <SftpBrowser
                 {rpc}
+                registryId={sftpBrowserKey || `dock-${activeSftpKey}`}
                 source={currentSftpDock}
                 mode="dock"
                 onClose={() => closeSftpDock()}
@@ -1547,6 +1559,19 @@
     }}
   />
 {/if}
+{#if batchCommandOpen}
+  <BatchCommandModal
+    tabs={tabs.tabs}
+    activeTabId={tabs.activeId}
+    onSend={async (sessionIds, command) => {
+      await rpc.call('session.writeMany', { ids: sessionIds, data: command });
+    }}
+    onClose={() => {
+      batchCommandOpen = false;
+      requestAnimationFrame(() => focusActivePane());
+    }}
+  />
+{/if}
 {#if pickerOpen}
   <ProfileSelector
     {rpc}
@@ -1560,6 +1585,7 @@
 {#each sftpWindows as win (win.id)}
   <SftpBrowser
     {rpc}
+    registryId={`win-${win.id}`}
     source={win.target}
     mode="modal"
     onClose={() => closeSftpWindow(win.id)}

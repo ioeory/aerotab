@@ -24,6 +24,14 @@
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import { portal } from '../lib/portal';
   import { appConfirm } from '../lib/confirm.svelte';
+  import {
+    invertProfileSelection,
+    profilesFromSelection,
+    rangeSelectProfiles,
+    selectAllProfiles,
+    toggleProfileInSelection,
+  } from '../lib/profileSelection';
+  import type { ProfileHealthResult } from '../lib/types';
   import { onMount, onDestroy, tick } from 'svelte';
   import logoUrl from '../assets/logo.png';
 
@@ -140,6 +148,12 @@
   let menuTarget = $state<SidebarMenu | null>(null);
   let menuEl = $state<HTMLDivElement | null>(null);
   let focusedProfileId = $state<string | null>(null);
+  let selectedProfileIds = $state<Set<string>>(new Set());
+  let selectionAnchorId = $state<string | null>(null);
+  let bulkBusy = $state(false);
+
+  const selectedProfiles = $derived(profilesFromSelection(filteredProfiles, selectedProfileIds));
+  const hasProfileSelection = $derived(selectedProfileIds.size > 0);
 
   function clampMenuToViewport(x: number, y: number, el: HTMLDivElement | null): { x: number; y: number } {
     if (!el) return { x, y };
@@ -167,6 +181,95 @@
 
   function focusProfile(p: StoredProfile) {
     focusedProfileId = p.id;
+  }
+
+  function clearProfileSelection() {
+    selectedProfileIds = new Set();
+    selectionAnchorId = null;
+  }
+
+  function onProfileRowClick(p: StoredProfile, ev: MouseEvent) {
+    if (ev.shiftKey && selectionAnchorId) {
+      selectedProfileIds = rangeSelectProfiles(filteredProfiles, selectionAnchorId, p.id);
+    } else if (ev.ctrlKey || ev.metaKey) {
+      selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
+      selectionAnchorId = p.id;
+    } else {
+      focusProfile(p);
+      selectionAnchorId = p.id;
+    }
+  }
+
+  function toggleProfileCheckbox(p: StoredProfile) {
+    selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
+    selectionAnchorId = p.id;
+    focusProfile(p);
+  }
+
+  async function bulkConnectSelected() {
+    const list = selectedProfiles.filter((p) => p.kind === 'ssh');
+    if (list.length === 0) return;
+    bulkBusy = true;
+    let opened = 0;
+    try {
+      for (const p of list) {
+        try {
+          await openProfile(p, 'new-tab');
+          opened += 1;
+        } catch {
+          /* onError already called in openProfile */
+        }
+      }
+      void opened;
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function bulkHealthCheckSelected() {
+    const ids = selectedProfiles.map((p) => p.id);
+    if (ids.length === 0 || bulkBusy) return;
+    bulkBusy = true;
+    try {
+      const results = await withRpcTimeout(
+        rpc.call<ProfileHealthResult[]>('profile.healthCheck', { ids, connect: true }),
+        60_000,
+        'profile.healthCheck',
+      );
+      const failed = results.filter((r) => r.status === 'error').length;
+      if (failed > 0) {
+        onError(i18n.t('profiles.healthSummary', {
+          ok: results.filter((r) => r.status === 'ok').length,
+          warning: results.filter((r) => r.status === 'warning').length,
+          error: failed,
+        }));
+      }
+    } catch (e) {
+      onError(`profile health: ${(e as Error).message}`);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function bulkDeleteSelected() {
+    const list = selectedProfiles;
+    if (list.length === 0) return;
+    if (!(await appConfirm(i18n.t('profiles.bulkDeleteConfirm', { count: list.length }), {
+      danger: true,
+      confirmLabel: i18n.t('common.delete'),
+    }))) return;
+    bulkBusy = true;
+    try {
+      for (const p of list) {
+        await rpc.call('profile.delete', { id: p.id });
+      }
+      clearProfileSelection();
+      await refresh();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      bulkBusy = false;
+    }
   }
 
   function showProfileMenu(p: StoredProfile, ev: MouseEvent) {
@@ -351,6 +454,35 @@
       {/if}
     </div>
     <div class="help px-1 text-[10px] leading-snug">{i18n.t('sidebar.groupPathHint')}</div>
+    {#if hasProfileSelection}
+      <div class="flex flex-wrap items-center gap-1 px-1 py-1 border border-[var(--color-border-soft)] rounded-md bg-[var(--color-panel-2)]">
+        <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profiles.selectedCount', { count: selectedProfileIds.size })}</span>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { selectedProfileIds = selectAllProfiles(filteredProfiles); }}>
+          {i18n.t('profiles.selectAll')}
+        </button>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { selectedProfileIds = invertProfileSelection(selectedProfileIds, filteredProfiles); }}>
+          {i18n.t('profiles.invertSelection')}
+        </button>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={clearProfileSelection}>
+          {i18n.t('profiles.clearSelection')}
+        </button>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { void bulkConnectSelected(); }}>
+          {i18n.t('profiles.bulkConnect')}
+        </button>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { void bulkHealthCheckSelected(); }}>
+          {i18n.t('profiles.bulkHealthCheck')}
+        </button>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5 text-[var(--color-danger)]" disabled={bulkBusy}
+                onclick={() => { void bulkDeleteSelected(); }}>
+          {i18n.t('profiles.bulkDelete')}
+        </button>
+      </div>
+    {/if}
   </div>
   <div class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0">
     {#if !hasVisibleProfiles}
@@ -363,8 +495,12 @@
         collapsed={collapsedPaths}
         forceExpanded={forceExpandedPaths}
         focusedProfileId={focusedProfileId}
+        selectedProfileIds={selectedProfileIds}
+        showSelection={hasProfileSelection}
         onToggleFolder={toggleFolder}
         onOpenProfile={(p) => openProfile(p)}
+        onProfileClick={onProfileRowClick}
+        onProfileCheckboxToggle={toggleProfileCheckbox}
         onProfileFocus={focusProfile}
         onProfileKeydown={onProfileKeydown}
         onProfileContextMenu={showProfileMenu}
