@@ -23,7 +23,7 @@
   import { i18n } from './lib/i18n.svelte';
   import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
-  import { hotkeys } from './lib/hotkeys';
+  import { hotkeys, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
   import { b64encode } from './lib/rpc';
   import { broadcastTargetIds } from './lib/broadcast';
@@ -1312,6 +1312,7 @@
         e.preventDefault();
         return;
       }
+      if (shouldDeferToTextInput(e)) return;
       hotkeys.dispatch(e);
     };
     window.addEventListener('keydown', kbdHandler, true);

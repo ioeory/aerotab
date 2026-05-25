@@ -19,6 +19,9 @@ The README status text may lag behind active implementation work. Prefer the cur
 
 Run from the repository root unless noted.
 
+**Before every commit/push to GitHub** (CI fails if skipped): `cargo fmt --all` then `cargo fmt --all -- --check`. Unformatted Rust is the most common CI failure on all three `rust-*` jobs; `cargo check` alone is not enough.
+
+- Rust format (apply): `cargo fmt --all`
 - Rust format check: `cargo fmt --all -- --check`
 - Rust lint: `cargo clippy --workspace --all-targets --features desktop -- -D warnings`
 - Rust tests: `cargo test --lib --features desktop -- --test-threads=1`
@@ -111,6 +114,11 @@ rustup target add x86_64-pc-windows-msvc
 
 ## Validation Expectations
 
-Scale validation to the risk of the change. For UI changes, at least run `cd apps/ui && npm run check` or `npm run build`. For backend/RPC changes, run `cargo check --features desktop` and relevant tests. For release or Windows-facing changes: `./tools/build-windows-xwin.sh` then `./tools/install-windows-smoke.sh` (无需再向用户确认是否安装冒烟).
+Scale validation to the risk of the change.
+
+- **Any Rust edit**: `cargo fmt --all` + `cargo fmt --all -- --check` before commit/push (required — matches CI).
+- UI changes: at least `cd apps/ui && npm run check` or `npm run build`.
+- Backend/RPC changes: `cargo check --features desktop`, `cargo clippy`, and relevant tests.
+- Release or Windows-facing changes: `./tools/build-windows-xwin.sh` then `./tools/install-windows-smoke.sh` (无需再向用户确认是否安装冒烟).
 
 Do not commit or create branches unless the user explicitly asks.

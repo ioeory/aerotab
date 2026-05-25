@@ -105,6 +105,23 @@ function matches(ev: KeyboardEvent, b: ParsedBinding): boolean {
   return ev.key === b.key;
 }
 
+/** True when the event target is a field where the user is typing. */
+export function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target instanceof Element ? target : null;
+  if (!el) return false;
+  return (
+    el.closest(
+      'input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]), textarea, select, [contenteditable="true"], [contenteditable=""]',
+    ) !== null
+  );
+}
+
+/** Skip global hotkeys so plain keys reach inputs (e.g. `r` in vault labels). */
+export function shouldDeferToTextInput(ev: KeyboardEvent): boolean {
+  if (!isEditableTarget(ev.target)) return false;
+  return !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+}
+
 /** Format an event back into a binding string (used by the recorder UI). */
 export function formatEvent(ev: KeyboardEvent): string | null {
   const parts: string[] = [];
