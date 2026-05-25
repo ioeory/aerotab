@@ -27,9 +27,17 @@ export function shouldHandleMacBackspace(ev: KeyboardEvent): boolean {
   );
 }
 
-/** Bytes to send for erase: ^? (DEL) by default, ^H when Ctrl held. */
+/**
+ * Bytes to send for erase on macOS.
+ *
+ * zsh (and xterm terminfo `kbs`) expect ^H; sending ^? often does not run
+ * `backward-delete-char` and a stray WKWebView space then appears as a literal
+ * space. bash/readline usually accept both — the “only zsh” report matches this.
+ */
 export function macBackspaceEraseByte(ctrlKey: boolean): string {
-  return ctrlKey ? '\x08' : '\x7f';
+  // Ctrl+Backspace: send DEL for word-kill style on some setups.
+  if (ctrlKey) return '\x7f';
+  return '\x08';
 }
 
 export function markMacBackspaceHandled(): void {
