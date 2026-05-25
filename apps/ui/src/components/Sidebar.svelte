@@ -22,6 +22,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { PROFILES_CHANGED } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
+  import { portal } from '../lib/portal';
   import { onMount, onDestroy, tick } from 'svelte';
   import logoUrl from '../assets/logo.png';
 
@@ -374,24 +375,26 @@
 </aside>
 
 {#if menuOpen && menuTarget}
+  <div use:portal class="contents">
   <div
     role="presentation"
-    data-aerotab-context-menu=""
     class="fixed inset-0 z-[55]"
     onclick={closeMenu}
     oncontextmenu={(e) => {
       e.preventDefault();
       closeMenu();
     }}
+  ></div>
+  <div
+    bind:this={menuEl}
+    role="menu"
+    tabindex="-1"
+    data-aerotab-context-menu=""
+    class="panel fixed z-[56] min-w-[200px] py-1 text-[12.5px] text-[var(--color-fg)]"
+    style="left: {menuX}px; top: {menuY}px;"
+    onkeydown={(e) => e.stopPropagation()}
+    onclick={(e) => e.stopPropagation()}
   >
-    <div
-      role="menu"
-      tabindex="-1"
-      class="absolute min-w-[200px] panel py-1 text-[12.5px] text-[var(--color-fg)]"
-      style="left:{menuX}px; top:{menuY}px;"
-      onkeydown={(e) => e.stopPropagation()}
-      onclick={(e) => e.stopPropagation()}
-    >
       {#if menuTarget.kind === 'group'}
         {@const groupPath = menuTarget.groupPath}
         <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
@@ -432,6 +435,6 @@
           </button>
         {/if}
       {/if}
-    </div>
+  </div>
   </div>
 {/if}
