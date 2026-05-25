@@ -1,8 +1,8 @@
 /** Workarounds for xterm.js + WKWebView on macOS (Tauri desktop). */
 
-const SUPPRESS_SPURIOUS_SPACE_MS = 100;
+const SUPPRESS_SPURIOUS_INPUT_MS = 200;
 
-let suppressSpuriousSpaceUntil = 0;
+let suppressSpuriousInputUntil = 0;
 
 /** True on macOS desktop (including Apple Silicon). */
 export function isMacDesktop(): boolean {
@@ -17,49 +17,38 @@ export function isMacDesktop(): boolean {
   );
 }
 
-/** Backspace keydown on macOS should be handled explicitly (return false to xterm). */
-export function shouldHandleMacBackspace(ev: KeyboardEvent): boolean {
-  return (
-    isMacDesktop()
-    && ev.type === 'keydown'
-    && ev.key === 'Backspace'
-    && !ev.metaKey
-  );
+/** Track Backspace; do not block xterm — it must emit the real erase sequence for vim/zsh. */
+export function trackMacBackspaceKeydown(ev: KeyboardEvent): void {
+  if (!isMacDesktop() || ev.type !== 'keydown' || ev.key !== 'Backspace' || ev.metaKey) return;
+  suppressSpuriousInputUntil = Date.now() + SUPPRESS_SPURIOUS_INPUT_MS;
+}
+
+function inSuppressWindow(): boolean {
+  return Date.now() <= suppressSpuriousInputUntil;
+}
+
+/** WKWebView may emit a stray space after Backspace — drop it in onData/onBinary. */
+export function shouldSuppressMacSpuriousInput(data: string): boolean {
+  if (!isMacDesktop() || !inSuppressWindow()) return false;
+  if (data === ' ') {
+    suppressSpuriousInputUntil = 0;
+    return true;
+  }
+  return false;
 }
 
 /**
- * Bytes to send for erase on macOS.
- *
- * zsh (and xterm terminfo `kbs`) expect ^H; sending ^? often does not run
- * `backward-delete-char` and a stray WKWebView space then appears as a literal
- * space. bash/readline usually accept both — the “only zsh” report matches this.
+ * Block textarea `insertText(' ')` leaks while xterm still handles Backspace keydown.
+ * Do not block deleteContentBackward — that breaks xterm/vim key encoding.
  */
-export function macBackspaceEraseByte(ctrlKey: boolean): string {
-  // Ctrl+Backspace: send DEL for word-kill style on some setups.
-  if (ctrlKey) return '\x7f';
-  return '\x08';
-}
-
-export function markMacBackspaceHandled(): void {
-  suppressSpuriousSpaceUntil = Date.now() + SUPPRESS_SPURIOUS_SPACE_MS;
-}
-
-/** WKWebView may emit a stray space `input` after Backspace — drop it. */
-export function shouldSuppressMacSpuriousSpace(data: string): boolean {
-  if (!isMacDesktop() || data !== ' ') return false;
-  if (Date.now() > suppressSpuriousSpaceUntil) return false;
-  suppressSpuriousSpaceUntil = 0;
-  return true;
-}
-
-/** Block native textarea delete paths that fight our explicit Backspace handling. */
-export function installMacTextareaBackspaceGuard(
+export function installMacTextareaInputGuard(
   textarea: HTMLTextAreaElement | undefined,
 ): () => void {
   if (!isMacDesktop() || !textarea) return () => {};
   const onBeforeInput = (ev: Event) => {
+    if (!inSuppressWindow()) return;
     const ie = ev as InputEvent;
-    if (ie.inputType === 'deleteContentBackward') {
+    if (ie.inputType === 'insertText' && ie.data === ' ') {
       ev.preventDefault();
       ev.stopImmediatePropagation();
     }

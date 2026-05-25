@@ -57,10 +57,103 @@ pub struct PtyChannel {
     output_rx: Option<mpsc::Receiver<Vec<u8>>>,
 }
 
+/// Build a shell [`CommandBuilder`], adding login/interactive flags when appropriate.
+///
+/// GUI apps on macOS inherit a minimal `PATH` from launchd. Terminal.app starts a
+/// **login** shell so `/etc/zprofile` and `~/.zprofile` run (Homebrew, nvm, etc.).
+/// AeroTab must do the same (`zsh -l`, `bash -l`, `fish --login`).
+pub fn build_shell_command(program: &str, args: &[String]) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(program);
+    if let Some(flag) = login_shell_flag(program) {
+        if should_prepend_login_flag(args) {
+            cmd.arg(flag);
+        }
+    }
+    for a in args {
+        cmd.arg(a);
+    }
+    cmd
+}
+
+#[cfg(unix)]
+fn login_shell_flag(program: &str) -> Option<&'static str> {
+    let base = std::path::Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())?;
+    match base {
+        "zsh" | "bash" => Some("-l"),
+        "fish" => Some("--login"),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn login_shell_flag(_program: &str) -> Option<&'static str> {
+    None
+}
+
+#[cfg(unix)]
+fn should_prepend_login_flag(args: &[String]) -> bool {
+    if args.iter().any(|a| a == "-l" || a == "--login") {
+        return false;
+    }
+    // One-shot / non-interactive invocations must not force login mode.
+    if args
+        .iter()
+        .any(|a| a == "-c" || a == "--command" || a.starts_with("-c"))
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn should_prepend_login_flag(_args: &[String]) -> bool {
+    false
+}
+
+/// Merge macOS system paths via `path_helper` into this process environment.
+///
+/// Child PTYs inherit the parent env; fixing PATH here helps shells and tools
+/// (git, ssh) even before login-shell startup files run.
+#[cfg(target_os = "macos")]
+pub fn prepare_process_environment() {
+    use std::process::Command;
+
+    let Ok(output) = Command::new("/usr/libexec/path_helper").arg("-s").output() else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key != "PATH" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_end_matches(';');
+        if !value.is_empty() {
+            // SAFETY: called from main/setup before worker threads use env.
+            unsafe {
+                std::env::set_var("PATH", value);
+            }
+        }
+        break;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prepare_process_environment() {}
+
 impl PtyChannel {
     pub fn spawn_default_shell(size: PtySize) -> Result<Self, PtyError> {
         let program = default_shell();
-        let cmd = CommandBuilder::new(program);
+        let cmd = build_shell_command(&program, &[]);
         Self::spawn(cmd, size)
     }
 
@@ -153,8 +246,48 @@ fn default_shell() -> String {
 }
 
 pub async fn init() -> crate::Result<()> {
+    prepare_process_environment();
     tracing::debug!("terminal::init");
     Ok(())
+}
+
+#[cfg(test)]
+mod login_shell_tests {
+    use super::*;
+
+    #[test]
+    fn zsh_and_bash_use_dash_l() {
+        assert_eq!(login_shell_flag("/bin/zsh"), Some("-l"));
+        assert_eq!(login_shell_flag("/opt/homebrew/bin/bash"), Some("-l"));
+    }
+
+    #[test]
+    fn fish_uses_login_long_flag() {
+        assert_eq!(login_shell_flag("/usr/bin/fish"), Some("--login"));
+    }
+
+    #[test]
+    fn sh_has_no_login_flag() {
+        assert_eq!(login_shell_flag("/bin/sh"), None);
+    }
+
+    #[test]
+    fn skips_duplicate_or_script_args() {
+        assert!(!should_prepend_login_flag(&["-l".into()]));
+        assert!(!should_prepend_login_flag(&["--login".into()]));
+        assert!(!should_prepend_login_flag(&["-c".into(), "echo".into()]));
+    }
+
+    #[test]
+    fn build_shell_command_inserts_login_once() {
+        let cmd = build_shell_command("/bin/zsh", &[]);
+        let args: Vec<String> = cmd
+            .get_argv()
+            .into_iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["/bin/zsh", "-l"]));
+    }
 }
 
 #[cfg(all(test, unix))]

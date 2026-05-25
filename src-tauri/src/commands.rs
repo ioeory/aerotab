@@ -266,10 +266,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     cols: p.cols.unwrap_or(80),
                 };
                 let mut channel = if let Some(shell) = p.shell.as_deref() {
-                    let mut cmd = portable_pty::CommandBuilder::new(shell);
-                    for a in &p.shell_args {
-                        cmd.arg(a);
-                    }
+                    let cmd = crate::terminal::build_shell_command(shell, &p.shell_args);
                     crate::terminal::PtyChannel::spawn(cmd, size)
                         .map_err(|e| internal(e.to_string()))?
                 } else {

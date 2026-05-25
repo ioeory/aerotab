@@ -85,9 +85,27 @@ fn push_shell(
         id: format!("shell:{command}"),
         label,
         command: command.to_string(),
-        args: vec![],
+        args: default_login_shell_args(command),
         icon: icon.to_string(),
     });
+}
+
+#[cfg(unix)]
+fn default_login_shell_args(command: &str) -> Vec<String> {
+    let base = Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match base {
+        "zsh" | "bash" => vec!["-l".into()],
+        "fish" => vec!["--login".into()],
+        _ => vec![],
+    }
+}
+
+#[cfg(not(unix))]
+fn default_login_shell_args(_command: &str) -> Vec<String> {
+    vec![]
 }
 
 #[cfg(unix)]

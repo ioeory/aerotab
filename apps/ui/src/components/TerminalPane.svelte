@@ -27,11 +27,9 @@
     type TrzszTerminalOutput,
   } from '../lib/trzszBridge';
   import {
-    installMacTextareaBackspaceGuard,
-    macBackspaceEraseByte,
-    markMacBackspaceHandled,
-    shouldHandleMacBackspace,
-    shouldSuppressMacSpuriousSpace,
+    installMacTextareaInputGuard,
+    shouldSuppressMacSpuriousInput,
+    trackMacBackspaceKeydown,
   } from '../lib/terminalInputMac';
 
   interface Props {
@@ -622,23 +620,18 @@
     requestAnimationFrame(() => safeFit());
 
     // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
-    // macOS WKWebView: Backspace can leak a spurious space via textarea input — handle explicitly.
+    // macOS WKWebView: after Backspace, filter stray space only — xterm must encode keys (vim/zsh).
     const activeTerm = term;
     activeTerm.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === 'keydown') trackMacBackspaceKeydown(ev);
       if (ev.type !== 'keydown') return true;
-      if (shouldHandleMacBackspace(ev)) {
-        markMacBackspaceHandled();
-        sendSessionInput(macBackspaceEraseByte(ev.ctrlKey));
-        if (activeTerm.textarea) activeTerm.textarea.value = '';
-        return false;
-      }
       if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === 'f' || ev.key === 'F')) {
         openSearch();
         return false;
       }
       return true;
     });
-    macTextareaGuard = installMacTextareaBackspaceGuard(activeTerm.textarea);
+    macTextareaGuard = installMacTextareaInputGuard(activeTerm.textarea);
 
     // App-level Ctrl+F also routes here when this pane is active.
     const searchListener = () => { if (active) openSearch(); };
@@ -701,11 +694,12 @@
     };
 
     term.onData((data) => {
-      if (shouldSuppressMacSpuriousSpace(data)) return;
+      if (shouldSuppressMacSpuriousInput(data)) return;
       if (transferFilter) transferFilter.processTerminalInput(data);
       else sendSessionInput(data);
     });
     term.onBinary((data) => {
+      if (shouldSuppressMacSpuriousInput(data)) return;
       if (transferFilter) transferFilter.processBinaryInput(data);
       else sendSessionInput(data);
     });
