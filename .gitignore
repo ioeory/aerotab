@@ -1,3 +1,4 @@
+.cursor/
 # Rust
 target/
 **/*.rs.bk
