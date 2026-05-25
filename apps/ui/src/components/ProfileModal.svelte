@@ -253,7 +253,7 @@
     <div class="flex gap-3 mt-2">
       <div class="flex-1">
         <label for="pm-group" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.group')}</label>
-        <input id="pm-group" bind:value={group} placeholder="prod / customer-a" class="input" />
+        <input id="pm-group" bind:value={group} placeholder={i18n.t('profileModal.groupPlaceholder')} class="input" />
       </div>
       <label class="favorite-row">
         <input type="checkbox" bind:checked={favorite} />

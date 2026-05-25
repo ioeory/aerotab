@@ -1,10 +1,17 @@
 <script lang="ts">
-  import { Plus, Pencil, Trash2, Terminal as TerminalIcon, Server, Usb, FolderOpen, Settings as SettingsIcon, Star } from '@lucide/svelte';
+  import { Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
-  import { profileEndpointLabel, sortProfiles } from '../lib/profileMeta';
+  import { matchesProfileQuery } from '../lib/profileMeta';
+  import {
+    buildProfileTree,
+    expandPathsForMatches,
+    loadCollapsedPaths,
+    saveCollapsedPaths,
+  } from '../lib/profileTree';
+  import SidebarProfileTree from './SidebarProfileTree.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { PROFILES_CHANGED } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
@@ -23,7 +30,34 @@
   let { rpc, onError, openProfileModal, openSerialModal, openSftp, openSettings }: Props = $props();
 
   let profiles = $state<StoredProfile[]>([]);
-  const visibleProfiles = $derived(sortProfiles(profiles.filter((p) => p.kind === 'ssh')));
+  let profileQuery = $state('');
+  let collapsedPaths = $state<Set<string>>(loadCollapsedPaths());
+
+  const sshProfiles = $derived(profiles.filter((p) => p.kind === 'ssh'));
+  const filteredProfiles = $derived(
+    sshProfiles.filter((p) => matchesProfileQuery(p, profileQuery)),
+  );
+  const profileTree = $derived(buildProfileTree(filteredProfiles));
+  const forceExpandedPaths = $derived(
+    profileQuery.trim()
+      ? expandPathsForMatches(sshProfiles, (p) => matchesProfileQuery(p, profileQuery))
+      : new Set<string>(),
+  );
+  const hasVisibleProfiles = $derived(
+    filteredProfiles.length > 0,
+  );
+
+  function toggleFolder(path: string) {
+    const next = new Set(collapsedPaths);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    collapsedPaths = next;
+    saveCollapsedPaths(next);
+  }
+
+  function clearProfileSearch() {
+    profileQuery = '';
+  }
 
   export async function refresh() {
     try {
@@ -188,75 +222,49 @@
     </button>
   </div>
 
-  <div class="px-3 pt-3 pb-1 shell-section-title">
-    {i18n.t('sidebar.sshProfiles')}
+  <div class="px-2 pt-2 pb-1 flex flex-col gap-1.5">
+    <div class="px-1 shell-section-title">{i18n.t('sidebar.sshProfiles')}</div>
+    <div class="relative">
+      <Search size={12} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-fg-muted)] pointer-events-none" />
+      <input
+        type="search"
+        bind:value={profileQuery}
+        placeholder={i18n.t('sidebar.searchProfiles')}
+        class="input w-full pl-8 pr-7 py-1.5 text-[12px]"
+        aria-label={i18n.t('sidebar.searchProfiles')}
+      />
+      {#if profileQuery.trim()}
+        <button
+          type="button"
+          class="btn-ghost absolute right-1 top-1/2 -translate-y-1/2 p-0.5"
+          onclick={clearProfileSearch}
+          aria-label={i18n.t('sidebar.clearSearch')}
+        >
+          <X size={12} />
+        </button>
+      {/if}
+    </div>
+    <div class="help px-1 text-[10px] leading-snug">{i18n.t('sidebar.groupPathHint')}</div>
   </div>
-  <div class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5">
-    {#each visibleProfiles as p (p.id)}
-      <div class="group flex items-center gap-1 rounded-md hover:bg-[var(--color-panel-2)]"
-           role="presentation"
-           oncontextmenu={(e) => showMenu(p, e)}>
-        <div class="pl-2">
-          <ProfileIcon icon={p.icon} name={p.name} size={13} />
-        </div>
-        <button
-          type="button"
-          onclick={() => openProfile(p)}
-          class="flex-1 min-w-0 text-left px-3 py-1.5 text-[12px]"
-          title={profileEndpointLabel(p)}
-        >
-          <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
-            <span class="truncate">{p.name}</span>
-            {#if p.favorite}
-              <Star size={10} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
-            {/if}
-          </div>
-          <div class="truncate text-[10.5px] text-[var(--color-fg-muted)]">
-            {profileEndpointLabel(p)}
-          </div>
-          {#if (p.tags ?? []).length > 0}
-            <div class="mt-1 flex gap-1 overflow-hidden">
-              {#each (p.tags ?? []).slice(0, 3) as tag (tag)}
-                <span class="shrink-0 max-w-[64px] truncate rounded-full border border-[var(--color-border-soft)] px-1.5 text-[9.5px] text-[var(--color-fg-muted)]">{tag}</span>
-              {/each}
-            </div>
-          {/if}
-        </button>
-        {#if p.kind === 'ssh'}
-          <button
-            type="button"
-            class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-            onclick={(e) => { e.stopPropagation(); openSftp(p); }}
-            title={i18n.t('sidebar.openSftpBrowser')}
-            aria-label={i18n.t('sidebar.openSftpBrowser')}
-          >
-            <FolderOpen size={12} />
-          </button>
-        {/if}
-        <button
-          type="button"
-          class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-          onclick={(e) => { e.stopPropagation(); void editProfile(p); }}
-          title={i18n.t('common.edit')}
-          aria-label={i18n.t('sidebar.editProfile')}
-        >
-          <Pencil size={12} />
-        </button>
-        <button
-          type="button"
-          class="opacity-0 group-hover:opacity-100 p-1 mr-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
-          onclick={(e) => deleteProfile(p, e)}
-          title={i18n.t('common.delete')}
-          aria-label={i18n.t('sidebar.deleteProfile')}
-        >
-          <Trash2 size={12} />
-        </button>
+  <div class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0">
+    {#if !hasVisibleProfiles}
+      <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)] italic">
+        {profileQuery.trim() ? i18n.t('sidebar.noSearchResults') : i18n.t('sidebar.noProfiles')}
       </div>
     {:else}
-      <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)] italic">
-        {i18n.t('sidebar.noProfiles')}
-      </div>
-    {/each}
+      <SidebarProfileTree
+        folder={profileTree}
+        collapsed={collapsedPaths}
+        forceExpanded={forceExpandedPaths}
+        onToggleFolder={toggleFolder}
+        onOpenProfile={(p) => openProfile(p)}
+        onOpenSftp={openSftp}
+        onEditProfile={(p) => { void editProfile(p); }}
+        onDeleteProfile={(p, ev) => deleteProfile(p, ev)}
+        onContextMenu={showMenu}
+        showUngroupedLabel={profileTree.folders.length > 0}
+      />
+    {/if}
   </div>
 </aside>
 
