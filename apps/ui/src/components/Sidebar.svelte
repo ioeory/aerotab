@@ -10,19 +10,19 @@
     expandPathsForMatches,
     loadCollapsedPaths,
     saveCollapsedPaths,
+    type ProfileTreeFolder,
   } from '../lib/profileTree';
   import SidebarProfileTree from './SidebarProfileTree.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { PROFILES_CHANGED } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
-  import ProfileIcon from './ProfileIcon.svelte';
   import { onMount, onDestroy } from 'svelte';
   import logoUrl from '../assets/logo.png';
 
   interface Props {
     rpc: RpcClient;
     onError: (msg: string) => void;
-    openProfileModal: (existing?: StoredProfile) => void;
+    openProfileModal: (existing?: StoredProfile, options?: { group?: string }) => void;
     openSerialModal: () => void;
     openSftp: (p: StoredProfile) => void;
     openSettings: () => void;
@@ -115,31 +115,65 @@
     }
   }
 
-  // Profile context menu state (right-click).
+  type SidebarMenu =
+    | { kind: 'profile'; profile: StoredProfile }
+    | { kind: 'group'; groupPath: string; groupLabel: string };
+
   let menuOpen = $state(false);
   let menuX = $state(0);
   let menuY = $state(0);
-  let menuProfile = $state<StoredProfile | null>(null);
+  let menuTarget = $state<SidebarMenu | null>(null);
 
-  function showMenu(p: StoredProfile, ev: MouseEvent) {
+  function openMenu(target: SidebarMenu, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
-    menuProfile = p;
+    menuTarget = target;
     menuX = ev.clientX;
     menuY = ev.clientY;
     menuOpen = true;
   }
-  function closeMenu() { menuOpen = false; menuProfile = null; }
 
-  // Each menu action captures the profile into a local before calling
-  // closeMenu(), because `menuProfile` is reactive state and would otherwise
-  // be read as `null` by the time the action consumes it.
-  function menuOpenInNewTab(p: StoredProfile) { closeMenu(); void openProfile(p, 'new-tab'); }
-  function menuSplitRight(p: StoredProfile) { closeMenu(); void openProfile(p, 'split-right'); }
-  function menuSplitDown(p: StoredProfile) { closeMenu(); void openProfile(p, 'split-down'); }
-  function menuOpenSftp(p: StoredProfile) { closeMenu(); openSftp(p); }
-  function menuEdit(p: StoredProfile) { closeMenu(); void editProfile(p); }
-  function menuDelete(p: StoredProfile, ev: Event) { closeMenu(); void deleteProfile(p, ev); }
+  function showProfileMenu(p: StoredProfile, ev: MouseEvent) {
+    openMenu({ kind: 'profile', profile: p }, ev);
+  }
+
+  function showFolderMenu(folder: ProfileTreeFolder, ev: MouseEvent) {
+    openMenu({ kind: 'group', groupPath: folder.path, groupLabel: folder.name }, ev);
+  }
+
+  function closeMenu() {
+    menuOpen = false;
+    menuTarget = null;
+  }
+
+  function menuOpenInNewTab(p: StoredProfile) {
+    closeMenu();
+    void openProfile(p, 'new-tab');
+  }
+  function menuSplitRight(p: StoredProfile) {
+    closeMenu();
+    void openProfile(p, 'split-right');
+  }
+  function menuSplitDown(p: StoredProfile) {
+    closeMenu();
+    void openProfile(p, 'split-down');
+  }
+  function menuOpenSftp(p: StoredProfile) {
+    closeMenu();
+    openSftp(p);
+  }
+  function menuEdit(p: StoredProfile) {
+    closeMenu();
+    void editProfile(p);
+  }
+  function menuDelete(p: StoredProfile) {
+    closeMenu();
+    void deleteProfile(p);
+  }
+  function menuNewProfileInGroup(groupPath: string) {
+    closeMenu();
+    openProfileModal(undefined, { group: groupPath });
+  }
 
   async function latestProfile(p: StoredProfile): Promise<StoredProfile> {
     try {
@@ -165,8 +199,7 @@
     openProfileModal(await latestProfile(p));
   }
 
-  async function deleteProfile(p: StoredProfile, ev: Event) {
-    ev.stopPropagation();
+  async function deleteProfile(p: StoredProfile) {
     if (!confirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
@@ -258,48 +291,63 @@
         forceExpanded={forceExpandedPaths}
         onToggleFolder={toggleFolder}
         onOpenProfile={(p) => openProfile(p)}
-        onOpenSftp={openSftp}
-        onEditProfile={(p) => { void editProfile(p); }}
-        onDeleteProfile={(p, ev) => deleteProfile(p, ev)}
-        onContextMenu={showMenu}
+        onProfileContextMenu={showProfileMenu}
+        onFolderContextMenu={showFolderMenu}
         showUngroupedLabel={profileTree.folders.length > 0}
       />
     {/if}
   </div>
 </aside>
 
-{#if menuOpen && menuProfile}
-  {@const mp = menuProfile}
-  <div role="presentation" data-aerotab-context-menu="" class="fixed inset-0 z-[55]" onclick={closeMenu}
-       oncontextmenu={(e) => { e.preventDefault(); closeMenu(); }}>
-    <div role="menu" tabindex="-1"
-         class="absolute min-w-[200px] panel py-1 text-[12.5px] text-[var(--color-fg)]"
-         style="left:{menuX}px; top:{menuY}px;"
-          onkeydown={(e) => e.stopPropagation()}
-         onclick={(e) => e.stopPropagation()}>
-      <button type="button" class="menu-item" onclick={() => menuOpenInNewTab(mp)}>
-        {i18n.t('sidebar.openInNewTab')}
-      </button>
-      <button type="button" class="menu-item" onclick={() => menuSplitRight(mp)}>
-        {i18n.t('sidebar.splitRightCurrent')}
-      </button>
-      <button type="button" class="menu-item" onclick={() => menuSplitDown(mp)}>
-        {i18n.t('sidebar.splitDownCurrent')}
-      </button>
-      {#if mp.kind === 'ssh'}
-        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-        <button type="button" class="menu-item" onclick={() => menuOpenSftp(mp)}>
-          {i18n.t('sidebar.openSftpBrowser')}
+{#if menuOpen && menuTarget}
+  <div
+    role="presentation"
+    data-aerotab-context-menu=""
+    class="fixed inset-0 z-[55]"
+    onclick={closeMenu}
+    oncontextmenu={(e) => {
+      e.preventDefault();
+      closeMenu();
+    }}
+  >
+    <div
+      role="menu"
+      tabindex="-1"
+      class="absolute min-w-[200px] panel py-1 text-[12.5px] text-[var(--color-fg)]"
+      style="left:{menuX}px; top:{menuY}px;"
+      onkeydown={(e) => e.stopPropagation()}
+      onclick={(e) => e.stopPropagation()}
+    >
+      {#if menuTarget.kind === 'group'}
+        {@const groupPath = menuTarget.groupPath}
+        <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
+          {i18n.t('sidebar.newProfileInGroup')}
         </button>
+      {:else}
+        {@const mp = menuTarget.profile}
+        <button type="button" class="menu-item" onclick={() => menuEdit(mp)}>
+          {i18n.t('sidebar.editProfile')}
+        </button>
+        <button type="button" class="menu-item text-[var(--color-danger)]" onclick={() => menuDelete(mp)}>
+          {i18n.t('sidebar.removeProfile')}
+        </button>
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        <button type="button" class="menu-item" onclick={() => menuOpenInNewTab(mp)}>
+          {i18n.t('sidebar.openInNewTab')}
+        </button>
+        <button type="button" class="menu-item" onclick={() => menuSplitRight(mp)}>
+          {i18n.t('sidebar.splitRightCurrent')}
+        </button>
+        <button type="button" class="menu-item" onclick={() => menuSplitDown(mp)}>
+          {i18n.t('sidebar.splitDownCurrent')}
+        </button>
+        {#if mp.kind === 'ssh'}
+          <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+          <button type="button" class="menu-item" onclick={() => menuOpenSftp(mp)}>
+            {i18n.t('sidebar.openSftpBrowser')}
+          </button>
+        {/if}
       {/if}
-      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item" onclick={() => menuEdit(mp)}>
-        {i18n.t('sidebar.editProfile')}...
-      </button>
-      <button type="button" class="menu-item text-[var(--color-danger)]"
-              onclick={(e) => menuDelete(mp, e)}>
-        {i18n.t('sidebar.deleteProfile')}
-      </button>
     </div>
   </div>
 {/if}

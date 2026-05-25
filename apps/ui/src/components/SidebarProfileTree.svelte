@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ChevronDown, ChevronRight, FolderOpen, Pencil, Star, Trash2 } from '@lucide/svelte';
+  import { ChevronDown, ChevronRight, Star } from '@lucide/svelte';
   import type { StoredProfile } from '../lib/types';
   import type { ProfileTreeFolder } from '../lib/profileTree';
   import { profileEndpointLabel } from '../lib/profileMeta';
@@ -14,10 +14,8 @@
     forceExpanded: Set<string>;
     onToggleFolder: (path: string) => void;
     onOpenProfile: (p: StoredProfile) => void;
-    onOpenSftp: (p: StoredProfile) => void;
-    onEditProfile: (p: StoredProfile) => void;
-    onDeleteProfile: (p: StoredProfile, ev: Event) => void;
-    onContextMenu: (p: StoredProfile, ev: MouseEvent) => void;
+    onProfileContextMenu: (p: StoredProfile, ev: MouseEvent) => void;
+    onFolderContextMenu: (folder: ProfileTreeFolder, ev: MouseEvent) => void;
     showUngroupedLabel?: boolean;
   }
 
@@ -29,10 +27,8 @@
     forceExpanded,
     onToggleFolder,
     onOpenProfile,
-    onOpenSftp,
-    onEditProfile,
-    onDeleteProfile,
-    onContextMenu,
+    onProfileContextMenu,
+    onFolderContextMenu,
   }: Props = $props();
 
   function isExpanded(path: string): boolean {
@@ -44,25 +40,36 @@
 {#each folder.folders as child (child.path)}
   {@const expanded = isExpanded(child.path)}
   <div class="profile-folder" style="--depth: {depth}">
-    <button
-      type="button"
-      class="folder-header w-full flex items-center gap-1 py-1 pr-1 rounded-md text-left
-             hover:bg-[var(--color-panel-2)] cursor-pointer text-[var(--color-fg-muted)]"
-      onclick={() => onToggleFolder(child.path)}
-      aria-expanded={expanded}
+    <div
+      role="presentation"
+      class="folder-header w-full flex items-center gap-1 py-1 pr-1 rounded-md
+             hover:bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]"
+      oncontextmenu={(e) => onFolderContextMenu(child, e)}
     >
-      <span class="shrink-0 w-3.5 grid place-items-center">
+      <button
+        type="button"
+        class="shrink-0 w-3.5 grid place-items-center rounded hover:text-[var(--color-fg)] cursor-pointer"
+        onclick={() => onToggleFolder(child.path)}
+        aria-expanded={expanded}
+        aria-label={expanded ? i18n.t('sidebar.collapseGroup') : i18n.t('sidebar.expandGroup')}
+      >
         {#if expanded}
           <ChevronDown size={12} />
         {:else}
           <ChevronRight size={12} />
         {/if}
-      </span>
-      <span class="truncate text-[11px] font-medium text-[var(--color-fg)]">{child.name}</span>
-      <span class="ml-auto shrink-0 text-[10px] opacity-70">
+      </button>
+      <button
+        type="button"
+        class="flex-1 min-w-0 text-left truncate text-[11px] font-medium text-[var(--color-fg)] cursor-pointer"
+        onclick={() => onToggleFolder(child.path)}
+      >
+        {child.name}
+      </button>
+      <span class="ml-auto shrink-0 text-[10px] opacity-70 pr-0.5">
         {child.profiles.length + child.folders.length}
       </span>
-    </button>
+    </div>
     {#if expanded}
       <div class="folder-children">
         <Self
@@ -72,10 +79,8 @@
           {forceExpanded}
           {onToggleFolder}
           {onOpenProfile}
-          {onOpenSftp}
-          {onEditProfile}
-          {onDeleteProfile}
-          {onContextMenu}
+          {onProfileContextMenu}
+          {onFolderContextMenu}
         />
       </div>
     {/if}
@@ -90,21 +95,23 @@
 
 {#each folder.profiles as p (p.id)}
   <div
-    class="profile-row group flex items-center gap-1 rounded-md hover:bg-[var(--color-panel-2)]"
+    class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer"
     style="--depth: {depth}"
-    role="presentation"
-    oncontextmenu={(e) => onContextMenu(p, e)}
+    role="button"
+    tabindex="0"
+    title="{profileEndpointLabel(p)} — {i18n.t('sidebar.doubleClickToOpen')}"
+    ondblclick={() => onOpenProfile(p)}
+    onkeydown={(e) => {
+      if (e.key === 'Enter') {
+        onOpenProfile(p);
+        e.preventDefault();
+      }
+    }}
+    oncontextmenu={(e) => onProfileContextMenu(p, e)}
   >
     <div class="profile-row-indent shrink-0"></div>
-    <div class="pl-0.5">
-      <ProfileIcon icon={p.icon} name={p.name} size={13} />
-    </div>
-    <button
-      type="button"
-      onclick={() => onOpenProfile(p)}
-      class="flex-1 min-w-0 text-left px-2 py-1.5 text-[12px]"
-      title={profileEndpointLabel(p)}
-    >
+    <ProfileIcon icon={p.icon} name={p.name} size={13} />
+    <div class="flex-1 min-w-0 text-left py-1.5 text-[12px]">
       <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
         <span class="truncate">{p.name}</span>
         {#if p.favorite}
@@ -124,36 +131,7 @@
           {/each}
         </div>
       {/if}
-    </button>
-    {#if p.kind === 'ssh'}
-      <button
-        type="button"
-        class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-        onclick={(e) => { e.stopPropagation(); onOpenSftp(p); }}
-        title={i18n.t('sidebar.openSftpBrowser')}
-        aria-label={i18n.t('sidebar.openSftpBrowser')}
-      >
-        <FolderOpen size={12} />
-      </button>
-    {/if}
-    <button
-      type="button"
-      class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-      onclick={(e) => { e.stopPropagation(); onEditProfile(p); }}
-      title={i18n.t('common.edit')}
-      aria-label={i18n.t('sidebar.editProfile')}
-    >
-      <Pencil size={12} />
-    </button>
-    <button
-      type="button"
-      class="opacity-0 group-hover:opacity-100 p-1 mr-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
-      onclick={(e) => onDeleteProfile(p, e)}
-      title={i18n.t('common.delete')}
-      aria-label={i18n.t('sidebar.deleteProfile')}
-    >
-      <Trash2 size={12} />
-    </button>
+    </div>
   </div>
 {/each}
 
@@ -169,5 +147,10 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
+  }
+  .folder-header button {
+    background: transparent;
+    border: none;
+    font: inherit;
   }
 </style>

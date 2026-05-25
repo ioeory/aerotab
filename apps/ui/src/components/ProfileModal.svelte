@@ -77,7 +77,12 @@
     }
   }
 
-  export function open(existing?: StoredProfile) {
+  export interface ProfileModalOpenOptions {
+    /** Pre-fill Group when creating a new SSH profile (slash-separated path). */
+    group?: string;
+  }
+
+  export function open(existing?: StoredProfile, options?: ProfileModalOpenOptions) {
     editing = existing ?? null;
     void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
@@ -134,7 +139,7 @@
     } else {
       profileKind = 'ssh';
       name = '';
-      group = '';
+      group = options?.group?.trim() ?? '';
       tagsText = '';
       favorite = false;
       iconKind = 'builtin';

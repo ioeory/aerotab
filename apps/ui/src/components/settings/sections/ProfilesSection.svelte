@@ -37,7 +37,9 @@
   let loadGen = 0;
   let healthRunning = $state(false);
   let health = $state<Record<string, ProfileHealthResult>>({});
-  let profileModal: { open: (existing?: StoredProfile) => void } | null = $state(null);
+  let profileModal: {
+    open: (existing?: StoredProfile, options?: { group?: string }) => void;
+  } | null = $state(null);
 
   async function load() {
     const gen = ++loadGen;

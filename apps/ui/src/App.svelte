@@ -62,7 +62,9 @@
   let hostStatsSeq = 0;
   let hostStatsUpdatedAt = $state<number | null>(null);
 
-  let profileModal: { open: (existing?: StoredProfile) => void } | null = $state(null);
+  let profileModal: {
+    open: (existing?: StoredProfile, options?: { group?: string }) => void;
+  } | null = $state(null);
   let vaultUnlockModal: { open: () => Promise<void> } | null = $state(null);
   let serialModal: { open: () => Promise<void> } | null = $state(null);
   let sidebar: { refresh: () => Promise<void> } | null = $state(null);
