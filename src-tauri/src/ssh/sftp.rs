@@ -16,7 +16,7 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::known_hosts::KnownHosts;
-use super::{connect_authenticated, SshError, SshProfile, TrustingClient};
+use super::{connect_authenticated, SshError, SshProfile, SshTransportSettings, TrustingClient};
 
 #[derive(Debug, Clone, Default)]
 pub struct SftpOpenOptions {
@@ -106,15 +106,22 @@ impl Sftp {
         profile: &SshProfile,
         known_hosts: Option<KnownHosts>,
     ) -> Result<Self, SshError> {
-        Self::open_with_options(profile, known_hosts, SftpOpenOptions::default()).await
+        Self::open_with_options(
+            profile,
+            known_hosts,
+            SftpOpenOptions::default(),
+            SshTransportSettings::default(),
+        )
+        .await
     }
 
     pub async fn open_with_options(
         profile: &SshProfile,
         known_hosts: Option<KnownHosts>,
         options: SftpOpenOptions,
+        transport: SshTransportSettings,
     ) -> Result<Self, SshError> {
-        let handle = connect_authenticated(profile, known_hosts).await?;
+        let handle = connect_authenticated(profile, known_hosts, transport).await?;
         let mut sftp = open_subsystem_on_handle(&handle, options).await?;
         sftp._owned_handle = Some(handle);
         Ok(sftp)

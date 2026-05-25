@@ -116,6 +116,35 @@
   let appliedConnectKey = '';
   let connectInFlight = false;
 
+  function isStaleSftpError(message: string): boolean {
+    const m = message.toLowerCase();
+    return (
+      m.includes('session closed')
+      || m.includes('sessionnotfound')
+      || m.includes('channel closed')
+      || m.includes('connection reset')
+      || m.includes('broken pipe')
+      || m.includes('not connected')
+      || m.includes('timed out')
+      || m.includes('timeout')
+    );
+  }
+
+  async function invalidateSftpSession() {
+    const prev = sessionId;
+    sessionId = null;
+    registrySnapshot = '';
+    appliedConnectKey = '';
+    if (prev) {
+      await rpc.call('sftp.close', { id: prev }).catch(() => {});
+    }
+    sftpSessionRegistry.unregister(registryId);
+  }
+
+  function markConnectSuccess(key: string) {
+    appliedConnectKey = key;
+  }
+
   type TransferKind = 'upload' | 'download';
   type TransferStatus = 'queued' | 'running' | 'paused' | 'done' | 'error' | 'canceled';
   interface TransferTask {
@@ -377,11 +406,9 @@
     return r.id;
   }
 
-  async function connect() {
-    if (!target) return;
-    const prev = sessionId;
-    sessionId = null;
-    if (prev) await rpc.call('sftp.close', { id: prev }).catch(() => {});
+  async function connect(): Promise<boolean> {
+    if (!target) return false;
+    await invalidateSftpSession();
     loading = true;
     listError = null;
     try {
@@ -394,11 +421,14 @@
       const list = await rpc.call<SftpEntry[]>('sftp.list', { id, path: nextCwd });
       cwd = nextCwd;
       entries = sortEntries(list);
+      markConnectSuccess(sftpConnectKey());
+      return true;
     } catch (e) {
-      sessionId = null;
+      await invalidateSftpSession();
       entries = [];
       listError = (e as Error).message;
       onError(`sftp: ${(e as Error).message}`);
+      return false;
     } finally {
       loading = false;
     }
@@ -413,10 +443,7 @@
     try {
       if (seq === connectSeq) await connect();
     } finally {
-      if (seq === connectSeq) {
-        connectInFlight = false;
-        appliedConnectKey = key;
-      }
+      if (seq === connectSeq) connectInFlight = false;
     }
   }
 
@@ -426,15 +453,14 @@
   }
 
   function retryRemoteList() {
+    void forceReconnect();
+  }
+
+  async function refresh() {
     if (!sessionId) {
       void forceReconnect();
       return;
     }
-    void refresh();
-  }
-
-  async function refresh() {
-    if (!sessionId) return;
     const seq = ++listSeq;
     loading = true;
     listError = null;
@@ -444,8 +470,13 @@
       entries = sortEntries(list);
     } catch (e) {
       if (seq !== listSeq) return;
-      listError = (e as Error).message;
+      const msg = (e as Error).message;
+      listError = msg;
       entries = [];
+      if (isStaleSftpError(msg)) {
+        await invalidateSftpSession();
+        void forceReconnect();
+      }
     } finally {
       if (seq === listSeq) loading = false;
     }
@@ -747,7 +778,6 @@
     }
     const key = sftpConnectKey();
     if (!key || key === appliedConnectKey || connectInFlight) return;
-    appliedConnectKey = key;
     const seq = ++connectSeq;
     connectInFlight = true;
     void (async () => {

@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::known_hosts::KnownHosts;
-use super::{connect_authenticated_custom, SshError, SshProfile, TrustingClient};
+use super::{connect_authenticated_custom, SshError, SshProfile, SshTransportSettings, TrustingClient};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -231,12 +231,17 @@ async fn spawn_local_tunnel(
 
     let kh = known_hosts.clone();
     let handle =
-        connect_authenticated_custom(&profile, known_hosts, move |hop, _| TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: false,
-        })
+        connect_authenticated_custom(
+            &profile,
+            known_hosts,
+            SshTransportSettings::default(),
+            move |hop, _| TrustingClient {
+                host_port: format!("{}:{}", hop.host, hop.port),
+                known_hosts: kh.clone(),
+                pinned_host_key_b64: None,
+                x11_forward: false,
+            },
+        )
         .await?;
     let handle = Arc::new(Mutex::new(handle));
 
@@ -290,7 +295,11 @@ async fn spawn_remote_tunnel(
     let profile = req.profile;
     let kh = known_hosts.clone();
 
-    let mut handle = connect_authenticated_custom(&profile, known_hosts, |hop, is_final| {
+    let mut handle = connect_authenticated_custom(
+        &profile,
+        known_hosts,
+        SshTransportSettings::default(),
+        |hop, is_final| {
         let trusting = TrustingClient {
             host_port: format!("{}:{}", hop.host, hop.port),
             known_hosts: kh.clone(),
@@ -305,7 +314,8 @@ async fn spawn_remote_tunnel(
                 None
             },
         }
-    })
+        },
+    )
     .await?;
 
     let bound_port = handle
@@ -337,12 +347,17 @@ async fn spawn_dynamic_tunnel(
 
     let kh = known_hosts.clone();
     let handle =
-        connect_authenticated_custom(&profile, known_hosts, move |hop, _| TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: false,
-        })
+        connect_authenticated_custom(
+            &profile,
+            known_hosts,
+            SshTransportSettings::default(),
+            move |hop, _| TrustingClient {
+                host_port: format!("{}:{}", hop.host, hop.port),
+                known_hosts: kh.clone(),
+                pinned_host_key_b64: None,
+                x11_forward: false,
+            },
+        )
         .await?;
     let handle = Arc::new(Mutex::new(handle));
 

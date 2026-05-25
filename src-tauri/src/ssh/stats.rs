@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio::time::timeout;
 
 use super::known_hosts::KnownHosts;
-use super::{connect_authenticated, SshError, SshProfile};
+use super::{connect_authenticated, SshError, SshProfile, SshTransportSettings};
 
 const HOST_STATS_COMMAND: &str = r#"LC_ALL=C; export LC_ALL;
 host=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo ""); [ -n "$host" ] && printf 'hostname=%s\n' "$host";
@@ -67,7 +67,7 @@ pub async fn probe_host_stats(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
 ) -> Result<HostStats, SshError> {
-    let handle = connect_authenticated(profile, known_hosts).await?;
+    let handle = connect_authenticated(profile, known_hosts, SshTransportSettings::default()).await?;
     let mut channel = handle
         .channel_open_session()
         .await

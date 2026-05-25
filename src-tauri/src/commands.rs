@@ -307,6 +307,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
                 let x11 = load_ssh_x11_options(&st).await;
+                let transport = load_ssh_transport_settings(&st).await;
                 let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let mut shell = ssh::connect_shell_with_known_hosts(
                     &profile,
@@ -314,6 +315,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     rows as u32,
                     kh,
                     Some(x11),
+                    transport,
                 )
                 .await
                 .map_err(|e| internal(e.to_string()))?;
@@ -358,6 +360,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
                 let x11 = load_ssh_x11_options(&st).await;
+                let transport = load_ssh_transport_settings(&st).await;
                 let mut shell = match profile.spec {
                     ProfileKind::Ssh { ssh } => {
                         let ssh = materialize_ssh_profile(&st, ssh).await?;
@@ -367,6 +370,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                             rows as u32,
                             kh,
                             Some(x11),
+                            transport,
                         )
                         .await
                     }
@@ -1148,9 +1152,15 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let kh = st.known_hosts.lock().await.clone();
-                let sftp = Sftp::open_with_options(&profile, kh, SftpOpenOptions { sudo: p.sudo })
-                    .await
-                    .map_err(|e| internal(e.to_string()))?;
+                let transport = load_ssh_transport_settings(&st).await;
+                let sftp = Sftp::open_with_options(
+                    &profile,
+                    kh,
+                    SftpOpenOptions { sudo: p.sudo },
+                    transport,
+                )
+                .await
+                .map_err(|e| internal(e.to_string()))?;
                 let id = Uuid::new_v4();
                 st.sftp_sessions.lock().await.insert(id, Arc::new(sftp));
                 Ok(json!({ "id": id }))
@@ -1206,10 +1216,16 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: SftpListParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let sftp = require_sftp(&st, p.id).await?;
-                let entries = sftp
-                    .read_dir(&p.path)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?;
+                let entries = match sftp.read_dir(&p.path).await {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if is_dead_sftp_channel(&msg) {
+                            st.sftp_sessions.lock().await.remove(&p.id);
+                        }
+                        return Err(internal(msg));
+                    }
+                };
                 serde_json::to_value(entries).map_err(|e| internal(e.to_string()))
             }
         });
@@ -1374,6 +1390,55 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
             }
         });
     }
+}
+
+fn is_dead_sftp_channel(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("session closed")
+        || m.contains("channel closed")
+        || m.contains("connection reset")
+        || m.contains("broken pipe")
+        || m.contains("not connected")
+}
+
+async fn load_ssh_transport_settings(st: &AppState) -> ssh::SshTransportSettings {
+    let Ok(store) = require_settings(st).await else {
+        return ssh::SshTransportSettings::default();
+    };
+    let Ok(entry) = store.get("ssh") else {
+        return ssh::SshTransportSettings::default();
+    };
+    let Some(value) = entry else {
+        return ssh::SshTransportSettings::default();
+    };
+    let Ok(v) = serde_json::from_value::<serde_json::Value>(value) else {
+        return ssh::SshTransportSettings::default();
+    };
+    let mut out = ssh::SshTransportSettings::default();
+    let interval_secs = v
+        .get("keepaliveInterval")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(45)
+        .clamp(15, 600);
+    let keepalive_max = v
+        .get("keepaliveCountMax")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(10)
+        .clamp(3, 30) as usize;
+    let server_alive = v
+        .get("serverAliveInterval")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let interval_secs = if server_alive > 0 {
+        interval_secs.min(server_alive).max(15)
+    } else {
+        interval_secs
+    };
+    out.keepalive_interval = std::time::Duration::from_secs(interval_secs);
+    out.keepalive_max = keepalive_max;
+    // Allow long idle SFTP browsing sessions on high-latency links.
+    out.inactivity_timeout = std::time::Duration::from_secs(60 * 60 * 6);
+    out
 }
 
 async fn load_ssh_x11_options(st: &AppState) -> X11ForwardOptions {

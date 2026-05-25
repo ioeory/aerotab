@@ -244,12 +244,36 @@ pub async fn connect_shell(
     cols: u32,
     rows: u32,
 ) -> Result<SshShell, SshError> {
-    connect_shell_with_known_hosts(profile, cols, rows, None, None).await
+    connect_shell_with_known_hosts(profile, cols, rows, None, None, SshTransportSettings::default()).await
 }
 
-fn ssh_config() -> Arc<client::Config> {
+/// TCP/SSH timing applied to every new SSH dial (terminal, SFTP, tunnels).
+#[derive(Debug, Clone)]
+pub struct SshTransportSettings {
+    /// Client keepalive interval when no data is received from the server.
+    pub keepalive_interval: Duration,
+    /// Close after this many unanswered keepalives.
+    pub keepalive_max: usize,
+    /// Drop the connection after this long with no inbound traffic at all.
+    pub inactivity_timeout: Duration,
+}
+
+impl Default for SshTransportSettings {
+    fn default() -> Self {
+        Self {
+            // Tolerant defaults for high-latency / NAT links.
+            keepalive_interval: Duration::from_secs(45),
+            keepalive_max: 10,
+            inactivity_timeout: Duration::from_secs(60 * 60 * 4),
+        }
+    }
+}
+
+pub fn ssh_config(transport: &SshTransportSettings) -> Arc<client::Config> {
     Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(60 * 30)),
+        inactivity_timeout: Some(transport.inactivity_timeout),
+        keepalive_interval: Some(transport.keepalive_interval),
+        keepalive_max: transport.keepalive_max,
         ..Default::default()
     })
 }
@@ -378,6 +402,7 @@ where
 pub async fn connect_authenticated_custom<H>(
     profile: &SshProfile,
     _known_hosts: Option<KnownHosts>,
+    transport: SshTransportSettings,
     mut make_handler: impl FnMut(&SshProfile, bool) -> H,
 ) -> Result<client::Handle<H>, SshError>
 where
@@ -392,7 +417,7 @@ where
     for (idx, hop) in chain.into_iter().enumerate() {
         let is_final = idx == final_idx;
         let handler = make_handler(hop, is_final);
-        let cfg = ssh_config();
+        let cfg = ssh_config(&transport);
         let mut handle = match prev_handle.take() {
             None => client::connect(cfg, (hop.host.as_str(), hop.port), handler)
                 .await
@@ -418,9 +443,10 @@ where
 pub async fn connect_authenticated(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
+    transport: SshTransportSettings,
 ) -> Result<client::Handle<TrustingClient>, SshError> {
     let kh = known_hosts.clone();
-    connect_authenticated_custom(profile, known_hosts, move |hop, _| TrustingClient {
+    connect_authenticated_custom(profile, known_hosts, transport, move |hop, _| TrustingClient {
         host_port: format!("{}:{}", hop.host, hop.port),
         known_hosts: kh.clone(),
         pinned_host_key_b64: None,
@@ -436,17 +462,22 @@ pub async fn connect_shell_with_known_hosts(
     rows: u32,
     known_hosts: Option<KnownHosts>,
     x11: Option<X11ForwardOptions>,
+    transport: SshTransportSettings,
 ) -> Result<SshShell, SshError> {
     let x11_enabled = x11.as_ref().is_some_and(|o| o.enabled);
     let kh = known_hosts.clone();
-    let handle =
-        connect_authenticated_custom(profile, known_hosts, move |hop, is_final| TrustingClient {
+    let handle = connect_authenticated_custom(
+        profile,
+        known_hosts,
+        transport,
+        move |hop, is_final| TrustingClient {
             host_port: format!("{}:{}", hop.host, hop.port),
             known_hosts: kh.clone(),
             pinned_host_key_b64: None,
             x11_forward: is_final && x11_enabled,
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     let mut channel = handle
         .channel_open_session()
