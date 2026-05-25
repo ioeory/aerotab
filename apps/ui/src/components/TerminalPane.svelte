@@ -26,6 +26,13 @@
     type TrzszTerminalInput,
     type TrzszTerminalOutput,
   } from '../lib/trzszBridge';
+  import {
+    installMacTextareaBackspaceGuard,
+    macBackspaceEraseByte,
+    markMacBackspaceHandled,
+    shouldHandleMacBackspace,
+    shouldSuppressMacSpuriousSpace,
+  } from '../lib/terminalInputMac';
 
   interface Props {
     rpc: RpcClient;
@@ -615,14 +622,23 @@
     requestAnimationFrame(() => safeFit());
 
     // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
-    term.attachCustomKeyEventHandler((ev) => {
+    // macOS WKWebView: Backspace can leak a spurious space via textarea input — handle explicitly.
+    const activeTerm = term;
+    activeTerm.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
+      if (shouldHandleMacBackspace(ev)) {
+        markMacBackspaceHandled();
+        sendSessionInput(macBackspaceEraseByte(ev.ctrlKey));
+        if (activeTerm.textarea) activeTerm.textarea.value = '';
+        return false;
+      }
       if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === 'f' || ev.key === 'F')) {
         openSearch();
         return false;
       }
       return true;
     });
+    macTextareaGuard = installMacTextareaBackspaceGuard(activeTerm.textarea);
 
     // App-level Ctrl+F also routes here when this pane is active.
     const searchListener = () => { if (active) openSearch(); };
@@ -685,6 +701,7 @@
     };
 
     term.onData((data) => {
+      if (shouldSuppressMacSpuriousSpace(data)) return;
       if (transferFilter) transferFilter.processTerminalInput(data);
       else sendSessionInput(data);
     });
@@ -717,6 +734,7 @@
 
   let cleanupHost: (() => void) | null = null;
   let cleanupSearchListener: (() => void) | null = null;
+  let macTextareaGuard: (() => void) | null = null;
 
   $effect(() => {
     void active;
@@ -786,6 +804,8 @@
     cleanupHost = null;
     cleanupSearchListener?.();
     cleanupSearchListener = null;
+    macTextareaGuard?.();
+    macTextareaGuard = null;
     stopPolling();
     clearTransferNotice();
     if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
