@@ -16,6 +16,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { appConfirm } from '../lib/confirm.svelte';
   import { hotkeys } from '../lib/hotkeys';
+  import { isPaneDragActive } from '../lib/paneDrag';
   import { clampMenuToViewport } from '../lib/contextMenuPosition';
   import { portal } from '../lib/portal';
   import { TerminalTransferDetector, type TerminalTransferDetection } from '../lib/terminalTransfer';
@@ -922,6 +923,11 @@
   }
 
   function onTransferDragOver(ev: DragEvent) {
+    if (isPaneDragActive()) {
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+      return;
+    }
     if (!canUseTrzszTransfer) return;
     if (!ev.dataTransfer?.types.includes('Files')) return;
     ev.preventDefault();

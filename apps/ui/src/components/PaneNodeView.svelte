@@ -3,7 +3,14 @@
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import { tabs, type PaneDropSide, type PaneNode, type Tab } from '../lib/tabs.svelte';
-  import { dispatchFitAllPanes, dispatchFitPane, dispatchFocusPane } from '../lib/focusPane';
+  import { dispatchFitAllPanes, dispatchFocusPane } from '../lib/focusPane';
+  import {
+    beginPaneDrag,
+    endPaneDrag,
+    getActivePaneDrag,
+    isPaneDragActive,
+    readPaneDragData,
+  } from '../lib/paneDrag';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
@@ -36,8 +43,6 @@
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
   let dropSide = $state<PaneDropSide | null>(null);
 
-  const PANE_DRAG_MIME = 'application/x-aerotab-pane';
-
   const maximized = $derived(tab.maximizedPaneId ?? null);
   const hiddenByMaximize = $derived(!!maximized && !tabs.nodeContains(node, maximized));
 
@@ -60,18 +65,8 @@
     dispatchFitAllPanes(tab.panes.map((p) => p.id));
   }
 
-  function dragPayload(ev: DragEvent): { tabId: string; paneId: string } | null {
-    const raw = ev.dataTransfer?.getData(PANE_DRAG_MIME);
-    if (!raw) return null;
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (typeof parsed.tabId === 'string' && typeof parsed.paneId === 'string') {
-        return { tabId: parsed.tabId, paneId: parsed.paneId };
-      }
-    } catch {
-      return null;
-    }
-    return null;
+  function paneDragSource(ev: DragEvent) {
+    return readPaneDragData(ev) ?? getActivePaneDrag();
   }
 
   function dropSideFromEvent(el: HTMLElement, ev: DragEvent): PaneDropSide {
@@ -99,21 +94,20 @@
 
   function onPaneDragStart(sessionId: string, ev: DragEvent) {
     ev.stopPropagation();
-    ev.dataTransfer?.setData(PANE_DRAG_MIME, JSON.stringify({ tabId: tab.id, paneId: sessionId }));
-    if (ev.dataTransfer) {
-      ev.dataTransfer.effectAllowed = 'move';
-      ev.dataTransfer.dropEffect = 'move';
-    }
+    beginPaneDrag(tab.id, sessionId, ev.dataTransfer);
   }
 
   function onPaneDragOver(sessionId: string, ev: DragEvent) {
     if (maximized) return;
-    const payload = dragPayload(ev);
-    if (!payload || payload.paneId === sessionId) return;
-    if (payload.tabId === tab.id && payload.paneId === sessionId) return;
+    if (!isPaneDragActive()) return;
     ev.preventDefault();
     ev.stopPropagation();
     if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+    const payload = getActivePaneDrag();
+    if (!payload || payload.paneId === sessionId) {
+      dropSide = null;
+      return;
+    }
     dropSide = dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
   }
 
@@ -124,12 +118,13 @@
   }
 
   function onPaneDrop(sessionId: string, ev: DragEvent) {
-    const payload = dragPayload(ev);
+    const payload = paneDragSource(ev);
     if (!payload || payload.paneId === sessionId) return;
     ev.preventDefault();
     ev.stopPropagation();
     const side = dropSide ?? dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
     dropSide = null;
+    endPaneDrag();
     tabs.movePaneBetweenTabs(payload.tabId, payload.paneId, tab.id, sessionId, side);
   }
 
@@ -181,6 +176,25 @@
     ondragleave={onPaneDragLeave}
     ondrop={(e) => onPaneDrop(node.pane.id, e)}
   >
+    {#if tab.panes.length > 1}
+      <div
+        class="absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[10px]
+               bg-[var(--color-panel)]/80 backdrop-blur border border-[var(--color-border-soft)]
+               cursor-grab active:cursor-grabbing select-none"
+        draggable="true"
+        title={i18n.t('pane.movePane')}
+        aria-label={i18n.t('pane.movePane')}
+        ondragstart={(e) => onPaneDragStart(node.pane.id, e)}
+        ondragend={() => {
+          endPaneDrag();
+          dropSide = null;
+        }}
+        onpointerdown={(e) => e.stopPropagation()}
+      >
+        <GripVertical size={11} />
+        <span>{tabs.paneIndex(tab, node.pane.id) + 1}</span>
+      </div>
+    {/if}
     <TerminalPane
       {rpc}
       session={node.pane}
@@ -217,21 +231,6 @@
       >
         <X size={12} />
       </button>
-      <button
-        type="button"
-        draggable="true"
-        title={i18n.t('pane.movePane')}
-        aria-label={i18n.t('pane.movePane')}
-        class="btn-ghost absolute top-1 left-1 z-10 px-1 py-0.5 text-[10px] bg-[var(--color-panel)]/80
-               backdrop-blur border border-[var(--color-border-soft)] inline-flex items-center gap-0.5 cursor-grab active:cursor-grabbing"
-        ondragstart={(e) => onPaneDragStart(node.pane.id, e)}
-        ondragend={() => (dropSide = null)}
-        onclick={(e) => e.stopPropagation()}
-        onpointerdown={(e) => e.stopPropagation()}
-      >
-        <GripVertical size={11} />
-        <span>{tabs.paneIndex(tab, node.pane.id) + 1}</span>
-      </button>
     {/if}
     {#if dropSide}
       <div class="absolute inset-0 z-20 pointer-events-none border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10">
@@ -243,13 +242,21 @@
   <div
     bind:this={host}
     style="display: {hiddenByMaximize ? 'none' : 'flex'};"
-    class="h-full w-full min-w-0 min-h-0 {node.direction === 'col' ? 'flex-col' : 'flex-row'}"
+    class="h-full w-full min-w-0 min-h-0 {maximized ? 'flex-1' : ''} {node.direction === 'col' ? 'flex-col' : 'flex-row'}"
+    ondragover={(e) => {
+      if (isPaneDragActive()) e.preventDefault();
+    }}
   >
     {#each node.children as child, idx (tabs.nodeKey(child))}
       {@const childHidden = !!maximized && !tabs.nodeContains(child, maximized)}
+      {@const childExpanded = !!maximized && tabs.nodeContains(child, maximized)}
       <div
-        style="display: {childHidden ? 'none' : 'block'}; flex: {node.ratios[idx] ?? 1} {node.ratios[idx] ?? 1} 0; min-width: 60px; min-height: 60px;"
-        class="relative min-w-0 min-h-0"
+        style={childHidden
+          ? 'display: none;'
+          : childExpanded
+            ? 'flex: 1 1 100%; min-width: 0; min-height: 0; width: 100%; height: 100%;'
+            : `flex: ${node.ratios[idx] ?? 1} ${node.ratios[idx] ?? 1} 0; min-width: 60px; min-height: 60px;`}
+        class="relative min-w-0 min-h-0 {childExpanded ? 'flex-[1_1_100%]' : ''}"
       >
         <PaneNodeView
           {rpc}
