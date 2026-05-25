@@ -63,7 +63,10 @@
   let hostStatsUpdatedAt = $state<number | null>(null);
 
   let profileModal: {
-    open: (existing?: StoredProfile, options?: { group?: string }) => void;
+    open: (
+      existing?: StoredProfile,
+      options?: import('./components/ProfileModal.svelte').ProfileModalOpenOptions,
+    ) => void;
   } | null = $state(null);
   let vaultUnlockModal: { open: () => Promise<void> } | null = $state(null);
   let serialModal: { open: () => Promise<void> } | null = $state(null);
@@ -1359,7 +1362,7 @@
     <Sidebar
       {rpc}
       bind:this={sidebar}
-      openProfileModal={(p) => profileModal?.open(p)}
+      openProfileModal={(p, opts) => profileModal?.open(p, opts)}
       openSerialModal={() => serialModal?.open()}
       openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
       openSettings={() => openSettings()}

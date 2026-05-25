@@ -39,6 +39,14 @@ export const ACTIONS: ActionDef[] = [
   { id: 'settings',    label: 'Open settings',         category: 'App',      defaultBindings: ['Ctrl+,'] },
   { id: 'toggle-sidebar', label: 'Toggle sidebar',      category: 'App',      defaultBindings: ['Ctrl+Alt+S'] },
   { id: 'search',      label: 'Search in pane',        category: 'Terminal', defaultBindings: ['Ctrl+F'] },
+  // Sidebar SSH profile row (focus a profile first)
+  { id: 'profile-edit',        label: 'Edit focused profile',           category: 'Profiles', defaultBindings: ['F2'] },
+  { id: 'profile-clone',       label: 'Clone focused profile',          category: 'Profiles', defaultBindings: ['Ctrl+D'] },
+  { id: 'profile-remove',      label: 'Remove focused profile',         category: 'Profiles', defaultBindings: ['Delete'] },
+  { id: 'profile-open-tab',    label: 'Open focused profile in new tab', category: 'Profiles', defaultBindings: ['Ctrl+Enter'] },
+  { id: 'profile-split-right', label: 'Open focused profile, split right', category: 'Profiles', defaultBindings: ['Ctrl+\\'] },
+  { id: 'profile-split-down',  label: 'Open focused profile, split down',  category: 'Profiles', defaultBindings: ['Ctrl+Shift+\\'] },
+  { id: 'profile-open-sftp',   label: 'Open SFTP for focused SSH profile', category: 'Profiles', defaultBindings: ['Ctrl+Shift+F'] },
 ];
 
 interface ParsedBinding {
@@ -66,6 +74,16 @@ function parseBinding(s: string): ParsedBinding | null {
   // Canonicalise single-char keys to lowercase; preserve named keys verbatim.
   if (key.length === 1) key = key.toLowerCase();
   return { ctrl, shift, alt, meta, key };
+}
+
+function bindingToString(b: ParsedBinding): string {
+  const parts: string[] = [];
+  if (b.ctrl) parts.push('Ctrl');
+  if (b.shift) parts.push('Shift');
+  if (b.alt) parts.push('Alt');
+  if (b.meta) parts.push('Meta');
+  parts.push(b.key.length === 1 ? b.key.toUpperCase() : b.key);
+  return parts.join('+');
 }
 
 function matches(ev: KeyboardEvent, b: ParsedBinding): boolean {
@@ -130,15 +148,7 @@ export class HotkeyManager {
     const out: Record<string, string[]> = {};
     for (const a of ACTIONS) {
       const list = this.bindings.get(a.id) ?? [];
-      out[a.id] = list.map((b) => {
-        const parts: string[] = [];
-        if (b.ctrl) parts.push('Ctrl');
-        if (b.shift) parts.push('Shift');
-        if (b.alt) parts.push('Alt');
-        if (b.meta) parts.push('Meta');
-        parts.push(b.key.length === 1 ? b.key.toUpperCase() : b.key);
-        return parts.join('+');
-      });
+      out[a.id] = list.map((b) => bindingToString(b));
     }
     return out;
   }
@@ -151,15 +161,14 @@ export class HotkeyManager {
 
   getBindings(actionId: string): string[] {
     const list = this.bindings.get(actionId) ?? [];
-    return list.map((b) => {
-      const parts: string[] = [];
-      if (b.ctrl) parts.push('Ctrl');
-      if (b.shift) parts.push('Shift');
-      if (b.alt) parts.push('Alt');
-      if (b.meta) parts.push('Meta');
-      parts.push(b.key.length === 1 ? b.key.toUpperCase() : b.key);
-      return parts.join('+');
-    });
+    return list.map((b) => bindingToString(b));
+  }
+
+  /** True when the event matches any binding for this action. */
+  matchesAction(ev: KeyboardEvent, actionId: string): boolean {
+    if (ev.isComposing) return false;
+    const list = this.bindings.get(actionId) ?? [];
+    return list.some((b) => matches(ev, b));
   }
 
   registerHandler(actionId: string, fn: () => void): void {

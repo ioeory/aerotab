@@ -5,7 +5,7 @@
   import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
   import { loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
-  import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput } from '../lib/profileMeta';
+  import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput, suggestDuplicateProfileName } from '../lib/profileMeta';
   import { notifyProfilesChanged } from '../lib/profileEvents';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -19,6 +19,7 @@
 
   let dialog: HTMLDialogElement | null = null;
   let editing = $state<StoredProfile | null>(null);
+  let cloning = $state(false);
   let profileKind = $state<'ssh' | 'rdp' | 'vnc'>('ssh');
   let remoteSshProfileId = $state('');
   let localBindPort = $state<number | ''>('');
@@ -80,82 +81,104 @@
   export interface ProfileModalOpenOptions {
     /** Pre-fill Group when creating a new SSH profile (slash-separated path). */
     group?: string;
+    /** Pre-fill fields from an existing profile; saves as a new profile (new id on submit). */
+    duplicateFrom?: StoredProfile;
+    /** Existing profile names for duplicate name suggestion. */
+    existingNames?: string[];
+  }
+
+  function loadFieldsFromProfile(existing: StoredProfile) {
+    profileKind = existing.kind;
+    name = existing.name;
+    group = existing.group ?? '';
+    tagsText = formatTags(existing.tags);
+    favorite = !!existing.favorite;
+    iconKind = (existing.icon?.kind as typeof iconKind) ?? 'builtin';
+    iconValue = existing.icon?.value ?? 'server';
+    if (existing.kind === 'ssh') {
+      host = existing.ssh.host;
+      port = existing.ssh.port;
+      user = existing.ssh.user;
+      jumpsText = formatJumps(existing.ssh.jump_via ?? []);
+      remoteSshProfileId = '';
+      localBindPort = '';
+      if (typeof existing.ssh.auth === 'object' && 'Password' in existing.ssh.auth) {
+        authKind = 'password';
+        password = existing.ssh.auth.Password.secret;
+        keyPath = '';
+        keyPassphrase = '';
+        vaultEntryId = '';
+        vaultPassphraseEntryId = '';
+      } else if (typeof existing.ssh.auth === 'object' && 'PublicKey' in existing.ssh.auth) {
+        authKind = 'key';
+        keyPath = existing.ssh.auth.PublicKey.key_path;
+        keyPassphrase = existing.ssh.auth.PublicKey.passphrase ?? '';
+        password = '';
+        vaultEntryId = '';
+        vaultPassphraseEntryId = '';
+      } else if (typeof existing.ssh.auth === 'object' && 'VaultRef' in existing.ssh.auth) {
+        authKind = 'vault';
+        vaultEntryId = existing.ssh.auth.VaultRef.entry_id;
+        vaultPassphraseEntryId = existing.ssh.auth.VaultRef.passphrase_entry_id ?? '';
+        password = '';
+        keyPath = '';
+        keyPassphrase = '';
+      } else {
+        authKind = 'key';
+        keyPath = '';
+        keyPassphrase = '';
+        password = '';
+        vaultEntryId = '';
+        vaultPassphraseEntryId = '';
+      }
+    } else {
+      loadRemoteFields(existing.kind === 'rdp' ? existing.rdp : existing.vnc);
+      authKind = 'password';
+    }
+  }
+
+  function resetNewProfileFields(groupDefault = '') {
+    profileKind = 'ssh';
+    name = '';
+    group = groupDefault;
+    tagsText = '';
+    favorite = false;
+    iconKind = 'builtin';
+    iconValue = 'server';
+    host = '';
+    port = 22;
+    user = '';
+    authKind = 'password';
+    password = '';
+    keyPath = '';
+    keyPassphrase = '';
+    vaultEntryId = '';
+    vaultPassphraseEntryId = '';
+    jumpsText = '';
+    remoteSshProfileId = '';
+    localBindPort = '';
   }
 
   export function open(existing?: StoredProfile, options?: ProfileModalOpenOptions) {
+    cloning = false;
     editing = existing ?? null;
     void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
       .then((list) => { tunnelProfiles = list.filter((p) => p.kind === 'ssh'); })
       .catch(() => { tunnelProfiles = []; });
-    if (existing) {
-      profileKind = existing.kind;
-      name = existing.name;
-      group = existing.group ?? '';
-      tagsText = formatTags(existing.tags);
-      favorite = !!existing.favorite;
-      iconKind = (existing.icon?.kind as typeof iconKind) ?? 'builtin';
-      iconValue = existing.icon?.value ?? 'server';
-      if (existing.kind === 'ssh') {
-        host = existing.ssh.host;
-        port = existing.ssh.port;
-        user = existing.ssh.user;
-        jumpsText = formatJumps(existing.ssh.jump_via ?? []);
-        remoteSshProfileId = '';
-        localBindPort = '';
-        if (typeof existing.ssh.auth === 'object' && 'Password' in existing.ssh.auth) {
-          authKind = 'password';
-          password = existing.ssh.auth.Password.secret;
-          keyPath = '';
-          keyPassphrase = '';
-          vaultEntryId = '';
-          vaultPassphraseEntryId = '';
-        } else if (typeof existing.ssh.auth === 'object' && 'PublicKey' in existing.ssh.auth) {
-          authKind = 'key';
-          keyPath = existing.ssh.auth.PublicKey.key_path;
-          keyPassphrase = existing.ssh.auth.PublicKey.passphrase ?? '';
-          password = '';
-          vaultEntryId = '';
-          vaultPassphraseEntryId = '';
-        } else if (typeof existing.ssh.auth === 'object' && 'VaultRef' in existing.ssh.auth) {
-          authKind = 'vault';
-          vaultEntryId = existing.ssh.auth.VaultRef.entry_id;
-          vaultPassphraseEntryId = existing.ssh.auth.VaultRef.passphrase_entry_id ?? '';
-          password = '';
-          keyPath = '';
-          keyPassphrase = '';
-        } else {
-          authKind = 'key';
-          keyPath = '';
-          keyPassphrase = '';
-          password = '';
-          vaultEntryId = '';
-          vaultPassphraseEntryId = '';
-        }
-      } else {
-        loadRemoteFields(existing.kind === 'rdp' ? existing.rdp : existing.vnc);
-        authKind = 'password';
-      }
-    } else {
-      profileKind = 'ssh';
-      name = '';
-      group = options?.group?.trim() ?? '';
-      tagsText = '';
+    if (options?.duplicateFrom) {
+      editing = null;
+      cloning = true;
+      loadFieldsFromProfile(options.duplicateFrom);
+      name = suggestDuplicateProfileName(
+        options.duplicateFrom.name,
+        options.existingNames ?? [],
+      );
       favorite = false;
-      iconKind = 'builtin';
-      iconValue = 'server';
-      host = '';
-      port = 22;
-      user = '';
-      authKind = 'password';
-      password = '';
-      keyPath = '';
-      keyPassphrase = '';
-      vaultEntryId = '';
-      vaultPassphraseEntryId = '';
-      jumpsText = '';
-      remoteSshProfileId = '';
-      localBindPort = '';
+    } else if (existing) {
+      loadFieldsFromProfile(existing);
+    } else {
+      resetNewProfileFields(options?.group?.trim() ?? '');
     }
     dialog?.showModal();
   }
@@ -233,7 +256,11 @@
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">
-        {editing ? i18n.t('profileModal.editTitle') : i18n.t('profileModal.newTitle')}
+        {editing
+          ? i18n.t('profileModal.editTitle')
+          : cloning
+            ? i18n.t('profileModal.cloneTitle')
+            : i18n.t('profileModal.newTitle')}
       </h2>
       <button
         type="button"

@@ -4,9 +4,13 @@
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
-  import { cloneProfileAsNew, matchesProfileQuery, suggestDuplicateProfileName } from '../lib/profileMeta';
-  import { notifyProfilesChanged } from '../lib/profileEvents';
-  import { uuidv4 } from '../lib/rpc';
+  import { matchesProfileQuery } from '../lib/profileMeta';
+  import type { ProfileModalOpenOptions } from './ProfileModal.svelte';
+  import {
+    handleProfileSidebarShortcut,
+    profileSidebarBindingLabel,
+    type ProfileSidebarActionKey,
+  } from '../lib/profileSidebarShortcuts';
   import {
     buildProfileTree,
     expandPathsForMatches,
@@ -24,7 +28,7 @@
   interface Props {
     rpc: RpcClient;
     onError: (msg: string) => void;
-    openProfileModal: (existing?: StoredProfile, options?: { group?: string }) => void;
+    openProfileModal: (existing?: StoredProfile, options?: ProfileModalOpenOptions) => void;
     openSerialModal: () => void;
     openSftp: (p: StoredProfile) => void;
     openSettings: () => void;
@@ -73,12 +77,19 @@
     }
   }
   const onProfilesChanged = () => { void refresh(); };
+  let hotkeyRev = $state(0);
+  const onHotkeysChanged = () => { hotkeyRev += 1; };
+
   onMount(() => {
     void refresh();
     document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
+    document.addEventListener('aerotab:settings-changed', onHotkeysChanged);
+    document.addEventListener('aerotab:settings-synced', onHotkeysChanged);
   });
   onDestroy(() => {
     document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
+    document.removeEventListener('aerotab:settings-changed', onHotkeysChanged);
+    document.removeEventListener('aerotab:settings-synced', onHotkeysChanged);
   });
 
   async function openLocal() {
@@ -125,6 +136,7 @@
   let menuX = $state(0);
   let menuY = $state(0);
   let menuTarget = $state<SidebarMenu | null>(null);
+  let focusedProfileId = $state<string | null>(null);
 
   function openMenu(target: SidebarMenu, ev: MouseEvent) {
     ev.preventDefault();
@@ -135,7 +147,12 @@
     menuOpen = true;
   }
 
+  function focusProfile(p: StoredProfile) {
+    focusedProfileId = p.id;
+  }
+
   function showProfileMenu(p: StoredProfile, ev: MouseEvent) {
+    focusProfile(p);
     openMenu({ kind: 'profile', profile: p }, ev);
   }
 
@@ -168,20 +185,16 @@
     closeMenu();
     void editProfile(p);
   }
-  async function menuDuplicateProfile(p: StoredProfile) {
+  async function cloneProfile(p: StoredProfile) {
     closeMenu();
     try {
       const fresh = await latestProfile(p);
-      const newName = suggestDuplicateProfileName(
-        fresh.name,
-        profiles.map((x) => x.name),
-      );
-      const clone = cloneProfileAsNew(fresh, newName, uuidv4());
-      await rpc.call('profile.upsert', clone);
-      notifyProfilesChanged();
-      await refresh();
+      openProfileModal(undefined, {
+        duplicateFrom: fresh,
+        existingNames: profiles.map((x) => x.name),
+      });
     } catch (e) {
-      onError(i18n.t('sidebar.duplicateProfileFailed', { message: (e as Error).message }));
+      onError(i18n.t('sidebar.cloneProfileFailed', { message: (e as Error).message }));
     }
   }
   function menuDelete(p: StoredProfile) {
@@ -221,10 +234,34 @@
     if (!confirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
+      if (focusedProfileId === p.id) focusedProfileId = null;
       await refresh();
     } catch (e) {
       onError((e as Error).message);
     }
+  }
+
+  const profileShortcutHandlers = {
+    onEdit: (p: StoredProfile) => { void editProfile(p); },
+    onClone: (p: StoredProfile) => { void cloneProfile(p); },
+    onRemove: (p: StoredProfile) => { void deleteProfile(p); },
+    onOpenNewTab: (p: StoredProfile) => { void openProfile(p, 'new-tab'); },
+    onSplitRight: (p: StoredProfile) => { void openProfile(p, 'split-right'); },
+    onSplitDown: (p: StoredProfile) => { void openProfile(p, 'split-down'); },
+    onOpenSftp: (p: StoredProfile) => { openSftp(p); },
+  };
+
+  function onProfileKeydown(p: StoredProfile, ev: KeyboardEvent) {
+    focusProfile(p);
+    if (handleProfileSidebarShortcut(p, ev, profileShortcutHandlers)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+  }
+
+  function shortcutKbd(key: ProfileSidebarActionKey): string {
+    void hotkeyRev;
+    return profileSidebarBindingLabel(key);
   }
 </script>
 
@@ -307,8 +344,11 @@
         folder={profileTree}
         collapsed={collapsedPaths}
         forceExpanded={forceExpandedPaths}
+        focusedProfileId={focusedProfileId}
         onToggleFolder={toggleFolder}
         onOpenProfile={(p) => openProfile(p)}
+        onProfileFocus={focusProfile}
+        onProfileKeydown={onProfileKeydown}
         onProfileContextMenu={showProfileMenu}
         onFolderContextMenu={showFolderMenu}
         showUngroupedLabel={profileTree.folders.length > 0}
@@ -343,29 +383,36 @@
         </button>
       {:else}
         {@const mp = menuTarget.profile}
-        <button type="button" class="menu-item" onclick={() => menuEdit(mp)}>
-          {i18n.t('sidebar.editProfile')}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuEdit(mp)}>
+          <span>{i18n.t('sidebar.editProfile')}</span>
+          <kbd class="kbd">{shortcutKbd('edit')}</kbd>
         </button>
-        <button type="button" class="menu-item" onclick={() => { void menuDuplicateProfile(mp); }}>
-          {i18n.t('sidebar.duplicateProfile')}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => { void cloneProfile(mp); }}>
+          <span>{i18n.t('sidebar.cloneProfile')}</span>
+          <kbd class="kbd">{shortcutKbd('clone')}</kbd>
         </button>
-        <button type="button" class="menu-item text-[var(--color-danger)]" onclick={() => menuDelete(mp)}>
-          {i18n.t('sidebar.removeProfile')}
+        <button type="button" class="menu-item menu-item--shortcut text-[var(--color-danger)]" onclick={() => menuDelete(mp)}>
+          <span>{i18n.t('sidebar.removeProfile')}</span>
+          <kbd class="kbd">{shortcutKbd('remove')}</kbd>
         </button>
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-        <button type="button" class="menu-item" onclick={() => menuOpenInNewTab(mp)}>
-          {i18n.t('sidebar.openInNewTab')}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuOpenInNewTab(mp)}>
+          <span>{i18n.t('sidebar.openInNewTab')}</span>
+          <kbd class="kbd">{shortcutKbd('openNewTab')}</kbd>
         </button>
-        <button type="button" class="menu-item" onclick={() => menuSplitRight(mp)}>
-          {i18n.t('sidebar.splitRightCurrent')}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuSplitRight(mp)}>
+          <span>{i18n.t('sidebar.splitRightCurrent')}</span>
+          <kbd class="kbd">{shortcutKbd('splitRight')}</kbd>
         </button>
-        <button type="button" class="menu-item" onclick={() => menuSplitDown(mp)}>
-          {i18n.t('sidebar.splitDownCurrent')}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuSplitDown(mp)}>
+          <span>{i18n.t('sidebar.splitDownCurrent')}</span>
+          <kbd class="kbd">{shortcutKbd('splitDown')}</kbd>
         </button>
         {#if mp.kind === 'ssh'}
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-          <button type="button" class="menu-item" onclick={() => menuOpenSftp(mp)}>
-            {i18n.t('sidebar.openSftpBrowser')}
+          <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuOpenSftp(mp)}>
+            <span>{i18n.t('sidebar.openSftpBrowser')}</span>
+            <kbd class="kbd">{shortcutKbd('sftp')}</kbd>
           </button>
         {/if}
       {/if}

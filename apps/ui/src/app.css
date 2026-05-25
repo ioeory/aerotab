@@ -394,6 +394,17 @@ dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
   background: var(--color-panel-2);
   color: var(--color-accent);
 }
+.menu-item--shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.menu-item--shortcut .kbd {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.75;
+}
 .ctx-item:disabled {
   opacity: 0.45;
   cursor: default;

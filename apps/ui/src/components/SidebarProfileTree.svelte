@@ -12,8 +12,11 @@
     depth?: number;
     collapsed: Set<string>;
     forceExpanded: Set<string>;
+    focusedProfileId?: string | null;
     onToggleFolder: (path: string) => void;
     onOpenProfile: (p: StoredProfile) => void;
+    onProfileFocus: (p: StoredProfile) => void;
+    onProfileKeydown: (p: StoredProfile, ev: KeyboardEvent) => void;
     onProfileContextMenu: (p: StoredProfile, ev: MouseEvent) => void;
     onFolderContextMenu: (folder: ProfileTreeFolder, ev: MouseEvent) => void;
     showUngroupedLabel?: boolean;
@@ -25,8 +28,11 @@
     showUngroupedLabel = false,
     collapsed,
     forceExpanded,
+    focusedProfileId = null,
     onToggleFolder,
     onOpenProfile,
+    onProfileFocus,
+    onProfileKeydown,
     onProfileContextMenu,
     onFolderContextMenu,
   }: Props = $props();
@@ -77,8 +83,11 @@
           depth={depth + 1}
           {collapsed}
           {forceExpanded}
+          {focusedProfileId}
           {onToggleFolder}
           {onOpenProfile}
+          {onProfileFocus}
+          {onProfileKeydown}
           {onProfileContextMenu}
           {onFolderContextMenu}
         />
@@ -95,14 +104,18 @@
 
 {#each folder.profiles as p (p.id)}
   <div
-    class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer"
+    class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer
+           {focusedProfileId === p.id ? 'profile-row--focused' : ''}"
     style="--depth: {depth}"
     role="button"
     tabindex="0"
-    title="{profileEndpointLabel(p)} — {i18n.t('sidebar.doubleClickToOpen')}"
+    title="{profileEndpointLabel(p)} — {i18n.t('sidebar.profileRowHint')}"
+    onclick={() => onProfileFocus(p)}
+    onfocus={() => onProfileFocus(p)}
     ondblclick={() => onOpenProfile(p)}
     onkeydown={(e) => {
-      if (e.key === 'Enter') {
+      onProfileKeydown(p, e);
+      if (!e.defaultPrevented && e.key === 'Enter') {
         onOpenProfile(p);
         e.preventDefault();
       }
@@ -152,5 +165,10 @@
     background: transparent;
     border: none;
     font: inherit;
+  }
+  .profile-row--focused {
+    background: var(--color-panel-2);
+    outline: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    outline-offset: -1px;
   }
 </style>

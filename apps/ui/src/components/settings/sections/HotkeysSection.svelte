@@ -5,7 +5,8 @@
   import { Trash2, Plus, RotateCcw } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
-  import { ACTIONS, hotkeys, formatEvent } from '../../../lib/hotkeys';
+  import { ACTIONS, hotkeys, formatEvent, type ActionDef } from '../../../lib/hotkeys';
+  import { i18n } from '../../../lib/i18n.svelte';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -15,6 +16,12 @@
   // canonical state back to HotkeyManager + sled.
   let bindings = $state<Record<string, string[]>>({});
   let recordingFor = $state<string | null>(null);
+
+  function actionLabel(a: ActionDef): string {
+    const key = `hotkey.${a.id}`;
+    const translated = i18n.t(key);
+    return translated !== key ? translated : a.label;
+  }
 
   const grouped = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -62,6 +69,7 @@
     hotkeys.resetToDefaults();
     snapshot();
     settingsCoord.markDirty();
+    settingsCoord.bumpRev();
   }
 
   async function load() {
@@ -73,6 +81,7 @@
         hotkeys.resetToDefaults();
       }
       snapshot();
+      settingsCoord.bumpRev();
     } catch (e) {
       onError(`hotkeys load: ${(e as Error).message}`);
     }
@@ -83,6 +92,7 @@
     }
     const map = hotkeys.toMap();
     await rpc.call('settings.set', { key: 'hotkeys', value: map });
+    settingsCoord.bumpRev();
   }
 
   onMount(() => {
@@ -113,7 +123,7 @@
       {#each list as a (a.id)}
         <div class="hotkey-row">
           <div class="hotkey-label">
-            <div class="font-medium">{a.label}</div>
+            <div class="font-medium">{actionLabel(a)}</div>
             <div class="text-[11px] text-[var(--color-fg-muted)]"><code>{a.id}</code></div>
           </div>
           <div class="hotkey-keys">
