@@ -44,6 +44,7 @@ pub fn detect() -> Vec<ShellEntry> {
     }
 }
 
+#[cfg(unix)]
 fn shell_display_label(path: &Path) -> String {
     let name = path
         .file_name()
@@ -322,6 +323,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn shell_display_label_maps_names() {
         assert_eq!(shell_display_label(Path::new("/bin/zsh")), "Zsh");
         assert_eq!(shell_display_label(Path::new("/bin/bash")), "Bash");
