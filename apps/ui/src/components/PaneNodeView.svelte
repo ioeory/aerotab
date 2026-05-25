@@ -12,11 +12,23 @@
     node: PaneNode;
     settingsRev: number;
     onOpenSftp?: () => void;
+    onSplitRight?: () => void;
+    onSplitDown?: () => void;
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
   }
 
-  let { rpc, tab, node, settingsRev, onOpenSftp, broadcastEnabled = false, broadcastTargetIds = [] }: Props = $props();
+  let {
+    rpc,
+    tab,
+    node,
+    settingsRev,
+    onOpenSftp,
+    onSplitRight,
+    onSplitDown,
+    broadcastEnabled = false,
+    broadcastTargetIds = [],
+  }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
   let dropSide = $state<PaneDropSide | null>(null);
@@ -87,7 +99,8 @@
   function onPaneDragOver(sessionId: string, ev: DragEvent) {
     if (maximized) return;
     const payload = dragPayload(ev);
-    if (!payload || payload.tabId !== tab.id || payload.paneId === sessionId) return;
+    if (!payload || payload.paneId === sessionId) return;
+    if (payload.tabId === tab.id && payload.paneId === sessionId) return;
     ev.preventDefault();
     ev.stopPropagation();
     if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
@@ -102,12 +115,12 @@
 
   function onPaneDrop(sessionId: string, ev: DragEvent) {
     const payload = dragPayload(ev);
-    if (!payload || payload.tabId !== tab.id || payload.paneId === sessionId) return;
+    if (!payload || payload.paneId === sessionId) return;
     ev.preventDefault();
     ev.stopPropagation();
     const side = dropSide ?? dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
     dropSide = null;
-    tabs.movePane(tab.id, payload.paneId, sessionId, side);
+    tabs.movePaneBetweenTabs(payload.tabId, payload.paneId, tab.id, sessionId, side);
   }
 
   function onResize(idx: number, ev: PointerEvent) {
@@ -165,6 +178,9 @@
       {settingsRev}
       onClosePane={() => closePane(node.pane.id, new Event('close'))}
       {onOpenSftp}
+      {onSplitRight}
+      {onSplitDown}
+      onMaximize={() => toggleMaximize(node.pane.id, new Event('click'))}
       {broadcastEnabled}
       {broadcastTargetIds}
     />
@@ -223,7 +239,17 @@
         style="display: {childHidden ? 'none' : 'block'}; flex: {node.ratios[idx] ?? 1} {node.ratios[idx] ?? 1} 0; min-width: 60px; min-height: 60px;"
         class="relative min-w-0 min-h-0"
       >
-        <PaneNodeView {rpc} {tab} node={child} {settingsRev} {onOpenSftp} {broadcastEnabled} {broadcastTargetIds} />
+        <PaneNodeView
+          {rpc}
+          {tab}
+          node={child}
+          {settingsRev}
+          {onOpenSftp}
+          {onSplitRight}
+          {onSplitDown}
+          {broadcastEnabled}
+          {broadcastTargetIds}
+        />
       </div>
       {#if idx < node.children.length - 1 && !maximized}
         <button

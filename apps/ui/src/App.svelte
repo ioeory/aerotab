@@ -1267,6 +1267,21 @@
     hotkeys.registerHandler('search',      () => {
       document.dispatchEvent(new CustomEvent('aerotab:search'));
     });
+    hotkeys.registerHandler('terminal-copy', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:terminal-copy'));
+    });
+    hotkeys.registerHandler('terminal-font-increase', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:terminal-font-delta', { detail: 1 }));
+    });
+    hotkeys.registerHandler('terminal-font-decrease', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:terminal-font-delta', { detail: -1 }));
+    });
+    hotkeys.registerHandler('session-ended-close', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:session-ended-action', { detail: 'close' }));
+    });
+    hotkeys.registerHandler('session-ended-reconnect', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:session-ended-action', { detail: 'reconnect' }));
+    });
 
     // Load user-overridden bindings from settings.
     void (async () => {
@@ -1395,6 +1410,8 @@
               broadcastEnabled={broadcastOn}
               broadcastTargetIds={broadcastTargets}
               onOpenSftp={() => { void openSftpForActivePane(); }}
+              onSplitRight={() => { void splitActive('row'); }}
+              onSplitDown={() => { void splitActive('col'); }}
             />
           </div>
         {/each}

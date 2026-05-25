@@ -39,6 +39,11 @@ export const ACTIONS: ActionDef[] = [
   { id: 'settings',    label: 'Open settings',         category: 'App',      defaultBindings: ['Ctrl+,'] },
   { id: 'toggle-sidebar', label: 'Toggle sidebar',      category: 'App',      defaultBindings: ['Ctrl+Alt+S'] },
   { id: 'search',      label: 'Search in pane',        category: 'Terminal', defaultBindings: ['Ctrl+F'] },
+  { id: 'terminal-copy', label: 'Copy terminal selection', category: 'Terminal', defaultBindings: ['Ctrl+Shift+C'] },
+  { id: 'terminal-font-increase', label: 'Increase terminal font size', category: 'Terminal', defaultBindings: ['Ctrl+='] },
+  { id: 'terminal-font-decrease', label: 'Decrease terminal font size', category: 'Terminal', defaultBindings: ['Ctrl+-'] },
+  { id: 'session-ended-close', label: 'Close pane after session ended', category: 'Terminal', defaultBindings: ['Enter'] },
+  { id: 'session-ended-reconnect', label: 'Reconnect after session ended', category: 'Terminal', defaultBindings: ['R'] },
   // Sidebar SSH profile row (focus a profile first)
   { id: 'profile-edit',        label: 'Edit focused profile',           category: 'Profiles', defaultBindings: ['F2'] },
   { id: 'profile-clone',       label: 'Clone focused profile',          category: 'Profiles', defaultBindings: ['Ctrl+D'] },

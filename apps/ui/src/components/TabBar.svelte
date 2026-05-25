@@ -34,6 +34,9 @@
   let menuY = $state(0);
   let menuTab = $state<Tab | null>(null);
   let menuTabIndex = $state(-1);
+  let paneDropTabId = $state<string | null>(null);
+
+  const PANE_DRAG_MIME = 'application/x-aerotab-pane';
 
   function iconFor(kind: string) {
     if (kind === 'Ssh') return Server;
@@ -83,14 +86,56 @@
     dragIdx = idx;
     if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
   }
+  function paneDragPayload(ev: DragEvent): { tabId: string; paneId: string } | null {
+    if (!isPaneDrag(ev)) return null;
+    const raw = ev.dataTransfer?.getData(PANE_DRAG_MIME) ?? '';
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed.tabId === 'string' && typeof parsed.paneId === 'string') {
+        return { tabId: parsed.tabId, paneId: parsed.paneId };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
   function onDragOver(ev: DragEvent) {
     ev.preventDefault();
     if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
   }
-  function onDrop(idx: number, ev: DragEvent) {
+
+  function isPaneDrag(ev: DragEvent): boolean {
+    return !!ev.dataTransfer?.types.includes(PANE_DRAG_MIME);
+  }
+
+  function onTabDragOver(tabId: string, idx: number, ev: DragEvent) {
+    if (isPaneDrag(ev)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+      paneDropTabId = tabId;
+      return;
+    }
+    paneDropTabId = null;
+    onDragOver(ev);
+  }
+
+  function onDrop(idx: number, tabId: string, ev: DragEvent) {
+    const panePayload = paneDragPayload(ev);
+    if (panePayload) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      paneDropTabId = null;
+      tabs.mergePaneIntoTab(panePayload.tabId, panePayload.paneId, tabId);
+      activateTab(tabId);
+      return;
+    }
     ev.preventDefault();
     if (dragIdx != null) tabs.move(dragIdx, idx);
     dragIdx = null;
+    paneDropTabId = null;
   }
 
   function activateTab(tabId: string) {
@@ -113,8 +158,10 @@
       tabindex="0"
       draggable="true"
       ondragstart={(e) => onDragStart(i, e)}
-      ondragover={onDragOver}
-      ondrop={(e) => onDrop(i, e)}
+      ondragover={(e) => onTabDragOver(tab.id, i, e)}
+      ondrop={(e) => onDrop(i, tab.id, e)}
+      class:ring-1={paneDropTabId === tab.id}
+      class:ring-[var(--color-accent)]={paneDropTabId === tab.id}
       onclick={() => activateTab(tab.id)}
       oncontextmenu={(e) => showTabMenu(tab, i, e)}
       onpointerenter={() => onTabHover(tab)}

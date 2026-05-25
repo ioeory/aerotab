@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -14,6 +14,9 @@
   import { tabs } from '../lib/tabs.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { appConfirm } from '../lib/confirm.svelte';
+  import { hotkeys } from '../lib/hotkeys';
+  import { clampMenuToViewport } from '../lib/contextMenuPosition';
+  import { portal } from '../lib/portal';
   import { TerminalTransferDetector, type TerminalTransferDetection } from '../lib/terminalTransfer';
   import {
     createTrzszFilter,
@@ -32,6 +35,9 @@
     onClosePane?: () => void;
     /** Invoked when transfer detection should open the active SSH pane's SFTP browser. */
     onOpenSftp?: () => void;
+    onSplitRight?: () => void;
+    onSplitDown?: () => void;
+    onMaximize?: () => void;
     /** When true, keystrokes are sent to every SSH pane in the tab. */
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
@@ -43,6 +49,9 @@
     settingsRev = 0,
     onClosePane,
     onOpenSftp,
+    onSplitRight,
+    onSplitDown,
+    onMaximize,
     broadcastEnabled = false,
     broadcastTargetIds = [],
   }: Props = $props();
@@ -67,6 +76,9 @@
   let menuOpen = $state(false);
   let menuX = $state(0);
   let menuY = $state(0);
+  let menuEl = $state<HTMLDivElement | null>(null);
+  let exitedOverlayEl = $state<HTMLDivElement | null>(null);
+  let sessionFontDelta = $state(0);
 
   // Behavior toggles loaded from settings.
   let copyOnSelect = false;
@@ -112,6 +124,34 @@
     exited = true;
     term?.write('\r\n\x1b[31m[session ended]\x1b[0m The process exited or the connection was closed.\r\n');
     tabs.markActivity(session.id, 'bell');
+    requestAnimationFrame(() => exitedOverlayEl?.focus());
+  }
+
+  function bindingLabel(actionId: string): string {
+    return hotkeys.getBindings(actionId)[0] ?? '';
+  }
+
+  function adjustFontSize(delta: number) {
+    if (!term || !delta) return;
+    sessionFontDelta += delta;
+    const next = Math.min(32, Math.max(8, (term.options.fontSize ?? 13) + delta));
+    term.options.fontSize = next;
+    requestAnimationFrame(() => fit?.fit());
+  }
+
+  function onExitedKeydown(ev: KeyboardEvent) {
+    if (!exited || !active) return;
+    if (hotkeys.matchesAction(ev, 'session-ended-close')) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      onClosePane?.();
+      return;
+    }
+    if (canReconnect && hotkeys.matchesAction(ev, 'session-ended-reconnect')) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void reconnectSession();
+    }
   }
 
   async function reconnectSession() {
@@ -555,11 +595,29 @@
         requestAnimationFrame(() => fit?.fit());
       });
     };
+    const copyListener = () => { if (active) void doCopy(); };
+    const fontListener = (ev: Event) => {
+      if (!active) return;
+      const delta = (ev as CustomEvent<number>).detail;
+      if (typeof delta === 'number') adjustFontSize(delta);
+    };
+    const endedListener = (ev: Event) => {
+      if (!active || !exited) return;
+      const action = (ev as CustomEvent<'close' | 'reconnect'>).detail;
+      if (action === 'close') onClosePane?.();
+      else if (action === 'reconnect' && canReconnect) void reconnectSession();
+    };
+    document.addEventListener('aerotab:terminal-copy', copyListener);
+    document.addEventListener('aerotab:terminal-font-delta', fontListener);
+    document.addEventListener('aerotab:session-ended-action', endedListener);
     document.addEventListener('aerotab:focus-pane', focusListener);
     document.addEventListener('aerotab:fit-pane', fitListener);
     cleanupSearchListener = () => {
       document.removeEventListener('aerotab:search', searchListener);
       document.removeEventListener('aerotab:settings-changed', settingsListener);
+      document.removeEventListener('aerotab:terminal-copy', copyListener);
+      document.removeEventListener('aerotab:terminal-font-delta', fontListener);
+      document.removeEventListener('aerotab:session-ended-action', endedListener);
       document.removeEventListener('aerotab:focus-pane', focusListener);
       document.removeEventListener('aerotab:fit-pane', fitListener);
     };
@@ -621,7 +679,7 @@
     const cfg = await loadTermSettings();
     if (!term) return;
     term.options.fontFamily = cfg.fontFamily;
-    term.options.fontSize = cfg.fontSize;
+    term.options.fontSize = cfg.fontSize + sessionFontDelta;
     term.options.fontWeight = cfg.fontWeight;
     term.options.fontWeightBold = cfg.fontWeightBold;
     term.options.theme = paletteFromCfg(cfg);
@@ -687,7 +745,7 @@
   }
 
   // --- context menu ---
-  function onContextMenu(ev: MouseEvent) {
+  async function onContextMenu(ev: MouseEvent) {
     if (rightClickAction === 'paste') { void doPasteFromClipboard(); ev.preventDefault(); return; }
     if (rightClickAction === 'select-word') {
       // xterm doesn't expose select-word; trigger a synthetic double-click.
@@ -704,6 +762,10 @@
     menuX = ev.clientX;
     menuY = ev.clientY;
     menuOpen = true;
+    await tick();
+    const clamped = clampMenuToViewport(menuX, menuY, menuEl);
+    menuX = clamped.x;
+    menuY = clamped.y;
   }
   async function doCopy() {
     menuOpen = false;
@@ -839,8 +901,15 @@
 
 {#if exited}
   <div class="absolute bottom-3 right-3 z-20 max-w-[min(320px,calc(100%-24px))] pointer-events-none">
-    <div class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
-                rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur">
+    <div
+      bind:this={exitedOverlayEl}
+      tabindex="0"
+      role="group"
+      aria-label={i18n.t('terminal.sessionEnded')}
+      class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
+                rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur outline-none"
+      onkeydown={onExitedKeydown}
+    >
       <div class="min-w-0">
         <div class="text-[var(--color-danger)] font-semibold leading-tight">{i18n.t('terminal.sessionEnded')}</div>
         <div class="text-[var(--color-fg-muted)] leading-tight truncate">{i18n.t('terminal.historyVisible')}</div>
@@ -850,14 +919,26 @@
           type="button"
           class="btn-primary shrink-0 text-[12px] px-2 py-1"
           disabled={reconnecting}
+          title={bindingLabel('session-ended-reconnect')}
           onclick={() => { void reconnectSession(); }}
         >
           {reconnecting ? i18n.t('terminal.reconnecting') : i18n.t('terminal.reconnect')}
+          {#if bindingLabel('session-ended-reconnect')}
+            <span class="opacity-60 ml-1">({bindingLabel('session-ended-reconnect')})</span>
+          {/if}
         </button>
       {/if}
       {#if onClosePane}
-        <button type="button" class="btn-secondary shrink-0 text-[12px] px-2 py-1" onclick={() => onClosePane?.()}>
+        <button
+          type="button"
+          class="btn-secondary shrink-0 text-[12px] px-2 py-1"
+          title={bindingLabel('session-ended-close')}
+          onclick={() => onClosePane?.()}
+        >
           {i18n.t('common.close')}
+          {#if bindingLabel('session-ended-close')}
+            <span class="opacity-60 ml-1">({bindingLabel('session-ended-close')})</span>
+          {/if}
         </button>
       {/if}
     </div>
@@ -935,17 +1016,65 @@
 {/if}
 
 {#if menuOpen && active}
-  <div role="presentation" data-aerotab-context-menu="" class="fixed inset-0 z-40" onclick={() => (menuOpen = false)}
-       oncontextmenu={(e) => { e.preventDefault(); menuOpen = false; }}>
-    <div role="menu" tabindex="-1"
-         class="absolute min-w-[160px] bg-[var(--color-panel)] border border-[var(--color-border)]
-                rounded shadow-xl py-1 text-[12.5px] text-[var(--color-fg)]"
-         style="left:{menuX}px; top:{menuY}px;"
-          onkeydown={(e) => e.stopPropagation()}
-         onclick={(e) => e.stopPropagation()}>
-      <button type="button" class="menu-item" onclick={doCopy}>{i18n.t('common.copy')}</button>
+  <div use:portal class="contents">
+    <div
+      role="presentation"
+      class="fixed inset-0 z-40"
+      onclick={() => (menuOpen = false)}
+      oncontextmenu={(e) => { e.preventDefault(); menuOpen = false; }}
+    ></div>
+    <div
+      bind:this={menuEl}
+      role="menu"
+      tabindex="-1"
+      data-aerotab-context-menu=""
+      class="panel fixed z-[41] min-w-[200px] py-1 text-[12.5px] text-[var(--color-fg)]"
+      style="left: {menuX}px; top: {menuY}px;"
+      onkeydown={(e) => e.stopPropagation()}
+      onclick={(e) => e.stopPropagation()}
+    >
+      <button type="button" class="menu-item menu-item--shortcut" onclick={doCopy}>
+        <span>{i18n.t('common.copy')}</span>
+        {#if bindingLabel('terminal-copy')}<kbd class="kbd">{bindingLabel('terminal-copy')}</kbd>{/if}
+      </button>
       <button type="button" class="menu-item" onclick={doPaste}>{i18n.t('common.paste')}</button>
       <button type="button" class="menu-item" onclick={doSelectAll}>{i18n.t('common.selectAll')}</button>
+      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      {#if exited && canReconnect}
+        <button type="button" class="menu-item" onclick={() => { menuOpen = false; void reconnectSession(); }}>
+          {i18n.t('terminal.reconnect')}
+        </button>
+        {#if onClosePane}
+          <button type="button" class="menu-item" onclick={() => { menuOpen = false; onClosePane?.(); }}>
+            {i18n.t('common.close')}
+          </button>
+        {/if}
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      {/if}
+      {#if onSplitRight}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onSplitRight?.(); }}>
+          <span>{i18n.t('tabbar.splitRight')}</span>
+          <kbd class="kbd">{bindingLabel('split-right')}</kbd>
+        </button>
+      {/if}
+      {#if onSplitDown}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onSplitDown?.(); }}>
+          <span>{i18n.t('tabbar.splitDown')}</span>
+          <kbd class="kbd">{bindingLabel('split-down')}</kbd>
+        </button>
+      {/if}
+      {#if onMaximize}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onMaximize?.(); }}>
+          <span>{i18n.t('pane.maximizePane')}</span>
+          <kbd class="kbd">{bindingLabel('maximize-pane')}</kbd>
+        </button>
+      {/if}
+      {#if canOpenSftp}
+        <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onOpenSftp?.(); }}>
+          <span>{i18n.t('terminal.transferOpenSftp')}</span>
+          <kbd class="kbd">{bindingLabel('open-sftp')}</kbd>
+        </button>
+      {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       <button type="button" class="menu-item" onclick={doSearchAction}>{i18n.t('terminal.searchAction')}</button>
       <button type="button" class="menu-item" onclick={doClear}>{i18n.t('common.clearScreen')}</button>

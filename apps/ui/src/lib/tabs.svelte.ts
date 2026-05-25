@@ -318,30 +318,81 @@ class TabStore {
   }
 
   movePane(tabId: string, sourceId: string, targetId: string, side: PaneDropSide): boolean {
-    if (sourceId === targetId) return false;
-    const tab = this.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab) return false;
-    if (!tab.panes.some((pane) => pane.id === sourceId)) return false;
-    if (!tab.panes.some((pane) => pane.id === targetId)) return false;
+    return this.movePaneBetweenTabs(tabId, sourceId, tabId, targetId, side);
+  }
 
-    const removed = removeLeaf(tab.layout, sourceId);
-    if (!removed.removed || !removed.node) return false;
+  /** Move a pane within one tab or into another tab (merge / reposition). */
+  movePaneBetweenTabs(
+    sourceTabId: string,
+    sourceId: string,
+    targetTabId: string,
+    targetId: string,
+    side: PaneDropSide,
+  ): boolean {
+    if (sourceId === targetId && sourceTabId === targetTabId) return false;
+
+    const sourceTab = this.tabs.find((candidate) => candidate.id === sourceTabId);
+    const targetTab = this.tabs.find((candidate) => candidate.id === targetTabId);
+    if (!sourceTab || !targetTab) return false;
+    if (!sourceTab.panes.some((pane) => pane.id === sourceId)) return false;
+    if (sourceTabId === targetTabId && !targetTab.panes.some((pane) => pane.id === targetId)) {
+      return false;
+    }
+
+    const removed = removeLeaf(sourceTab.layout, sourceId);
+    if (!removed.removed) return false;
+
+    if (!removed.node) {
+      this.remove(sourceTabId);
+    } else {
+      sourceTab.layout = removed.node;
+      if (sourceTab.activePaneId === sourceId) {
+        const next = sourceTab.panes[0];
+        if (next) sourceTab.activePaneId = next.id;
+      }
+      if (sourceTab.maximizedPaneId === sourceId) sourceTab.maximizedPaneId = null;
+      this.refreshTab(sourceTab);
+    }
+
+    let targetLayout = targetTab.layout;
+    if (targetTab.panes.length === 0) {
+      targetTab.layout = leaf(removed.removed);
+      targetTab.activePaneId = removed.removed.id;
+      targetTab.maximizedPaneId = null;
+      this.activeId = targetTabId;
+      this.refreshTab(targetTab);
+      this.bump();
+      return true;
+    }
+
+    const anchorId =
+      targetTab.panes.some((pane) => pane.id === targetId)
+        ? targetId
+        : targetTab.activePaneId;
     const inserted = insertRelative(
-      removed.node,
-      targetId,
+      targetLayout,
+      anchorId,
       removed.removed,
       directionForDropSide(side),
       splitSideForDropSide(side),
     );
     if (!inserted.inserted) return false;
 
-    tab.layout = inserted.node;
-    tab.activePaneId = sourceId;
-    tab.maximizedPaneId = null;
-    this.activeId = tab.id;
-    this.refreshTab(tab);
+    targetTab.layout = inserted.node;
+    targetTab.activePaneId = sourceId;
+    targetTab.maximizedPaneId = null;
+    this.activeId = targetTabId;
+    this.refreshTab(targetTab);
     this.bump();
     return true;
+  }
+
+  /** Drop a pane onto a tab strip to merge into that tab. */
+  mergePaneIntoTab(sourceTabId: string, sourceId: string, targetTabId: string, side: PaneDropSide = 'right'): boolean {
+    const targetTab = this.tabs.find((candidate) => candidate.id === targetTabId);
+    if (!targetTab || targetTab.panes.length === 0) return false;
+    const anchorId = targetTab.activePaneId || targetTab.panes[0]!.id;
+    return this.movePaneBetweenTabs(sourceTabId, sourceId, targetTabId, anchorId, side);
   }
 
   activate(id: string) {
