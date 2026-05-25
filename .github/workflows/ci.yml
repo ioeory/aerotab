@@ -80,6 +80,8 @@ jobs:
     name: Build Release
     runs-on: ${{ matrix.os }}
     if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      CI: true
     strategy:
       fail-fast: false
       matrix:
@@ -121,7 +123,7 @@ jobs:
             libwebkit2gtk-4.1-dev file wget patchelf
       - name: macOS deps
         if: runner.os == 'macOS'
-        run: brew install pkg-config
+        run: brew install pkg-config create-dmg
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -144,11 +146,17 @@ jobs:
       - name: Build dmg (Intel)
         if: matrix.bundle == 'dmg-intel'
         working-directory: src-tauri
+        env:
+          # Skip Finder AppleScript layout in CI (see tauri-apps/tauri-action#1003).
+          TAURI_BUNDLER_DMG_IGNORE_CI: true
         run: cargo tauri build --target x86_64-apple-darwin --bundles dmg
       - name: Build dmg (Apple Silicon)
         if: matrix.bundle == 'dmg-arm'
         working-directory: src-tauri
-        run: cargo tauri build --target aarch64-apple-darwin --bundles dmg
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: true
+        # Native build on macos-14 ARM runners (no cross-target needed).
+        run: cargo tauri build --bundles dmg
       - name: Resolve bundle artifact path
         id: bundle
         shell: bash
@@ -170,7 +178,11 @@ jobs:
               name="AeroTab_${ver}_x64.dmg"
               ;;
             dmg-arm)
-              path="target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_${ver}_aarch64.dmg"
+              # Native build on ARM macos-14 (no --target); fall back to cross-compile path if present.
+              path="target/release/bundle/dmg/AeroTab_${ver}_aarch64.dmg"
+              if [ ! -f "$path" ]; then
+                path="target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_${ver}_aarch64.dmg"
+              fi
               name="AeroTab_${ver}_aarch64.dmg"
               ;;
             *)
