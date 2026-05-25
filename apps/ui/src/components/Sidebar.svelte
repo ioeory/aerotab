@@ -4,7 +4,9 @@
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
-  import { matchesProfileQuery } from '../lib/profileMeta';
+  import { cloneProfileAsNew, matchesProfileQuery, suggestDuplicateProfileName } from '../lib/profileMeta';
+  import { notifyProfilesChanged } from '../lib/profileEvents';
+  import { uuidv4 } from '../lib/rpc';
   import {
     buildProfileTree,
     expandPathsForMatches,
@@ -165,6 +167,22 @@
   function menuEdit(p: StoredProfile) {
     closeMenu();
     void editProfile(p);
+  }
+  async function menuDuplicateProfile(p: StoredProfile) {
+    closeMenu();
+    try {
+      const fresh = await latestProfile(p);
+      const newName = suggestDuplicateProfileName(
+        fresh.name,
+        profiles.map((x) => x.name),
+      );
+      const clone = cloneProfileAsNew(fresh, newName, uuidv4());
+      await rpc.call('profile.upsert', clone);
+      notifyProfilesChanged();
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('sidebar.duplicateProfileFailed', { message: (e as Error).message }));
+    }
   }
   function menuDelete(p: StoredProfile) {
     closeMenu();
@@ -327,6 +345,9 @@
         {@const mp = menuTarget.profile}
         <button type="button" class="menu-item" onclick={() => menuEdit(mp)}>
           {i18n.t('sidebar.editProfile')}
+        </button>
+        <button type="button" class="menu-item" onclick={() => { void menuDuplicateProfile(mp); }}>
+          {i18n.t('sidebar.duplicateProfile')}
         </button>
         <button type="button" class="menu-item text-[var(--color-danger)]" onclick={() => menuDelete(mp)}>
           {i18n.t('sidebar.removeProfile')}

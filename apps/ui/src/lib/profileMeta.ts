@@ -1,5 +1,36 @@
 import type { StoredProfile } from './types';
 
+/** Strip trailing " copy" / " (n)" suffixes before generating a duplicate name. */
+export function duplicateNameBase(name: string): string {
+  const trimmed = name.trim() || 'profile';
+  return trimmed
+    .replace(/\s+\(\d+\)$/u, '')
+    .replace(/\s+copy(?:\s+\d+)?$/iu, '')
+    .trim() || trimmed;
+}
+
+/** Pick a unique profile name among existing entries (e.g. "server" → "server copy"). */
+export function suggestDuplicateProfileName(baseName: string, existingNames: string[]): string {
+  const taken = new Set(existingNames.map((n) => n.trim().toLowerCase()).filter(Boolean));
+  const root = duplicateNameBase(baseName);
+  let candidate = `${root} copy`;
+  if (!taken.has(candidate.toLowerCase())) return candidate;
+  for (let i = 2; i < 1000; i++) {
+    candidate = `${root} copy ${i}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${root} copy ${Date.now()}`;
+}
+
+/** Deep-clone a stored profile with a new id and display name (not persisted). */
+export function cloneProfileAsNew(src: StoredProfile, newName: string, newId: string): StoredProfile {
+  const raw = JSON.parse(JSON.stringify(src)) as StoredProfile;
+  raw.id = newId;
+  raw.name = newName;
+  raw.favorite = false;
+  return raw;
+}
+
 export const BUILTIN_PROFILE_ICONS = [
   'server',
   'database',
