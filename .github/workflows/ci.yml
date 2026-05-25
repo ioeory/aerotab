@@ -88,7 +88,8 @@ jobs:
             bundle: deb
           - os: windows-latest
             bundle: nsis
-          - os: macos-13
+          # Intel DMG: cross-compile on Apple Silicon (macos-13 Intel runners are scarce/queued).
+          - os: macos-14
             bundle: dmg-intel
             rust_target: x86_64-apple-darwin
           - os: macos-14
