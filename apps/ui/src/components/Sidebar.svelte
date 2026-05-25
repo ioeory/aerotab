@@ -22,7 +22,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { PROFILES_CHANGED } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import logoUrl from '../assets/logo.png';
 
   interface Props {
@@ -136,15 +136,31 @@
   let menuX = $state(0);
   let menuY = $state(0);
   let menuTarget = $state<SidebarMenu | null>(null);
+  let menuEl = $state<HTMLDivElement | null>(null);
   let focusedProfileId = $state<string | null>(null);
 
-  function openMenu(target: SidebarMenu, ev: MouseEvent) {
+  function clampMenuToViewport(x: number, y: number, el: HTMLDivElement | null): { x: number; y: number } {
+    if (!el) return { x, y };
+    const pad = 8;
+    const maxX = Math.max(pad, window.innerWidth - el.offsetWidth - pad);
+    const maxY = Math.max(pad, window.innerHeight - el.offsetHeight - pad);
+    return {
+      x: Math.min(Math.max(pad, x), maxX),
+      y: Math.min(Math.max(pad, y), maxY),
+    };
+  }
+
+  async function openMenu(target: SidebarMenu, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
     menuTarget = target;
     menuX = ev.clientX;
     menuY = ev.clientY;
     menuOpen = true;
+    await tick();
+    const clamped = clampMenuToViewport(menuX, menuY, menuEl);
+    menuX = clamped.x;
+    menuY = clamped.y;
   }
 
   function focusProfile(p: StoredProfile) {
