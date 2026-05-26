@@ -9,7 +9,11 @@
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm, appPrompt } from '../../../lib/confirm.svelte';
-  import { BULK_OPEN_CONFIRM_THRESHOLD, openProfilesInSameTab } from '../../../lib/profileBulkOpen';
+  import {
+    BULK_OPEN_CONFIRM_THRESHOLD,
+    openProfilesEachInNewTab,
+    openProfilesInSameTab,
+  } from '../../../lib/profileBulkOpen';
   import {
     defaultGroupForMove,
     normalizeProfileGroupInput,
@@ -238,24 +242,55 @@
     }
   }
 
-  async function bulkConnectSelected() {
+  const bulkOpenDeps = {
+    rpc,
+    onError,
+    onSummary: async (message: string) => {
+      await appConfirm(message, { confirmLabel: i18n.t('common.ok') });
+    },
+  };
+
+  function bulkOpenConfirmMany(
+    count: number,
+    messageKey:
+      | 'profiles.bulkOpenManyConfirm'
+      | 'profiles.bulkOpenManyConfirmSameNewTab'
+      | 'profiles.bulkOpenManyConfirmEachNewTab',
+  ): Promise<boolean> {
+    return appConfirm(i18n.t(messageKey, { count }), {
+      confirmLabel: i18n.t('profiles.bulkOpenConfirm'),
+    });
+  }
+
+  async function bulkOpenSelected(mode: 'active' | 'new-same' | 'new-each') {
     const list = selectedProfiles;
     if (list.length === 0) {
       onError(i18n.t('profiles.bulkConnectNone'));
       return;
     }
     const sshList = list.filter((p) => p.kind === 'ssh');
-    if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD) {
-      const ok = await appConfirm(
-        i18n.t('profiles.bulkOpenManyConfirm', { count: sshList.length }),
-        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
-      );
-      if (!ok) return;
-      await tick();
-    }
+    const confirmKey =
+      mode === 'new-each'
+        ? 'profiles.bulkOpenManyConfirmEachNewTab'
+        : mode === 'new-same'
+          ? 'profiles.bulkOpenManyConfirmSameNewTab'
+          : 'profiles.bulkOpenManyConfirm';
+    const deps = {
+      ...bulkOpenDeps,
+      confirmMany:
+        sshList.length > BULK_OPEN_CONFIRM_THRESHOLD
+          ? async (count: number) => bulkOpenConfirmMany(count, confirmKey)
+          : undefined,
+    };
     bulkBusy = true;
     try {
-      await openProfilesInSameTab(list, { rpc, onError });
+      if (mode === 'new-each') {
+        await openProfilesEachInNewTab(list, deps);
+      } else {
+        await openProfilesInSameTab(list, deps, {
+          tabTarget: mode === 'new-same' ? 'new' : 'active',
+        });
+      }
     } catch (e) {
       onError(`connect: ${(e as Error).message}`);
     } finally {
@@ -396,7 +431,15 @@
         {i18n.t('profiles.clearSelection')}
       </button>
       <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy}
-              onclick={() => { void bulkConnectSelected(); }}>
+              onclick={() => { void bulkOpenSelected('new-same'); }}>
+        {i18n.t('profiles.bulkConnectSameNewTab')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy}
+              onclick={() => { void bulkOpenSelected('new-each'); }}>
+        {i18n.t('profiles.bulkConnectEachNewTab')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy}
+              onclick={() => { void bulkOpenSelected('active'); }}>
         {i18n.t('profiles.bulkConnect')}
       </button>
       <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy || healthRunning}
