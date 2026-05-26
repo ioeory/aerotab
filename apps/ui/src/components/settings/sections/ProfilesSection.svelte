@@ -8,7 +8,12 @@
   import type { RpcClient } from '../../../lib/rpc';
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
-  import { appConfirm } from '../../../lib/confirm.svelte';
+  import { appConfirm, appPrompt } from '../../../lib/confirm.svelte';
+  import {
+    defaultGroupForMove,
+    normalizeProfileGroupInput,
+    upsertProfilesGroup,
+  } from '../../../lib/profileGroupMove';
   import { tabs } from '../../../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
   import {
@@ -244,6 +249,31 @@
     }
   }
 
+  async function bulkMoveSelected() {
+    const list = selectedProfiles;
+    if (list.length === 0 || bulkBusy) return;
+    const value = await appPrompt(
+      i18n.t('profiles.moveToGroupPrompt', { count: list.length }),
+      {
+        defaultValue: defaultGroupForMove(list),
+        placeholder: i18n.t('profileModal.groupPlaceholder'),
+        confirmLabel: i18n.t('profiles.moveToGroup'),
+      },
+    );
+    if (value === null) return;
+    bulkBusy = true;
+    try {
+      const group = normalizeProfileGroupInput(value);
+      const moved = await upsertProfilesGroup(rpc, list, group);
+      if (moved > 0) notifyProfilesChanged({ group });
+      await load();
+    } catch (e) {
+      onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
   async function bulkDeleteSelected() {
     const list = selectedProfiles;
     if (list.length === 0) return;
@@ -336,6 +366,10 @@
       <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy || healthRunning}
               onclick={() => { void runHealthCheck(selectedProfiles.map((p) => p.id)); }}>
         {i18n.t('profiles.bulkHealthCheck')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" disabled={bulkBusy}
+              onclick={() => { void bulkMoveSelected(); }}>
+        {i18n.t('profiles.bulkMoveToGroup')}
       </button>
       <button type="button" class="btn-secondary text-[11px] py-0.5 px-2 text-[var(--color-danger)]" disabled={bulkBusy}
               onclick={() => { void bulkDeleteSelected(); }}>

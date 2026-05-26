@@ -26,7 +26,12 @@
   import { notifyProfilesChanged, PROFILES_CHANGED, type ProfilesChangedDetail } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import { portal } from '../lib/portal';
-  import { appConfirm } from '../lib/confirm.svelte';
+  import { appConfirm, appPrompt } from '../lib/confirm.svelte';
+  import {
+    defaultGroupForMove,
+    normalizeProfileGroupInput,
+    upsertProfilesGroup,
+  } from '../lib/profileGroupMove';
   import {
     invertProfileSelection,
     profilesFromSelection,
@@ -273,6 +278,49 @@
     }
   }
 
+  function profilesToMove(context: StoredProfile): StoredProfile[] {
+    if (selectedProfileIds.has(context.id) && selectedProfileIds.size > 0) {
+      return selectedProfiles;
+    }
+    return [context];
+  }
+
+  async function moveProfilesToGroup(profiles: StoredProfile[], group: string | null) {
+    if (profiles.length === 0 || bulkBusy) return;
+    closeMenu();
+    bulkBusy = true;
+    try {
+      const moved = await upsertProfilesGroup(rpc, profiles, group);
+      if (moved > 0) {
+        notifyProfilesChanged({ group });
+        expandFoldersForGroup(group);
+      }
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function promptAndMoveProfiles(profiles: StoredProfile[]) {
+    if (profiles.length === 0) return;
+    const value = await appPrompt(
+      i18n.t('profiles.moveToGroupPrompt', { count: profiles.length }),
+      {
+        defaultValue: defaultGroupForMove(profiles),
+        placeholder: i18n.t('profileModal.groupPlaceholder'),
+        confirmLabel: i18n.t('profiles.moveToGroup'),
+      },
+    );
+    if (value === null) return;
+    await moveProfilesToGroup(profiles, normalizeProfileGroupInput(value));
+  }
+
+  async function bulkMoveSelected() {
+    await promptAndMoveProfiles(selectedProfiles);
+  }
+
   async function bulkDeleteSelected() {
     const list = selectedProfiles;
     if (list.length === 0) return;
@@ -296,6 +344,10 @@
   }
 
   function showProfileMenu(p: StoredProfile, ev: MouseEvent) {
+    if (!selectedProfileIds.has(p.id)) {
+      selectedProfileIds = new Set([p.id]);
+      selectionAnchorId = p.id;
+    }
     focusProfile(p);
     openMenu({ kind: 'profile', profile: p }, ev);
   }
@@ -328,6 +380,13 @@
   function menuEdit(p: StoredProfile) {
     closeMenu();
     void editProfile(p);
+  }
+  function menuMoveToGroup(p: StoredProfile) {
+    void promptAndMoveProfiles(profilesToMove(p));
+  }
+  function menuMoveSelectedToFolder(groupPath: string) {
+    const group = groupPath.trim() ? groupPath.trim() : null;
+    void moveProfilesToGroup(selectedProfiles, group);
   }
   async function cloneProfile(p: StoredProfile) {
     closeMenu();
@@ -503,6 +562,10 @@
                 onclick={() => { void bulkHealthCheckSelected(); }}>
           {i18n.t('profiles.bulkHealthCheck')}
         </button>
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { void bulkMoveSelected(); }}>
+          {i18n.t('profiles.bulkMoveToGroup')}
+        </button>
         <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5 text-[var(--color-danger)]" disabled={bulkBusy}
                 onclick={() => { void bulkDeleteSelected(); }}>
           {i18n.t('profiles.bulkDelete')}
@@ -560,11 +623,27 @@
   >
       {#if menuTarget.kind === 'group'}
         {@const groupPath = menuTarget.groupPath}
+        {#if hasProfileSelection}
+          <button type="button" class="menu-item" onclick={() => menuMoveSelectedToFolder(groupPath)}>
+            {i18n.t('sidebar.moveSelectedToGroup', {
+              count: selectedProfileIds.size,
+              group: groupPath || i18n.t('sidebar.ungrouped'),
+            })}
+          </button>
+          <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        {/if}
         <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
           {i18n.t('sidebar.newProfileInGroup')}
         </button>
       {:else}
         {@const mp = menuTarget.profile}
+        {@const moveCount = selectedProfileIds.has(mp.id) ? selectedProfileIds.size : 1}
+        <button type="button" class="menu-item" onclick={() => menuMoveToGroup(mp)}>
+          {moveCount > 1
+            ? i18n.t('sidebar.moveProfilesToGroup', { count: moveCount })
+            : i18n.t('sidebar.moveProfileToGroup')}
+        </button>
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuEdit(mp)}>
           <span>{i18n.t('sidebar.editProfile')}</span>
           <kbd class="kbd">{shortcutKbd('edit')}</kbd>
