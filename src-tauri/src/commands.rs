@@ -2336,6 +2336,9 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let handle = tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    // `interval.tick()` is ready immediately; skip it because we already
+                    // ran one cycle synchronously above.
+                    ticker.tick().await;
                     loop {
                         ticker.tick().await;
                         match run_sync_now_cycle(&st_tick, &eng, &groups).await {
@@ -2381,12 +2384,14 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     .map(|e| e.device_id().to_string());
                 let last_sync_ms = *st.sync_last_ms.lock().await;
                 let auto_interval_ms = *st.sync_auto_interval_ms.lock().await;
+                let auto_running = st.sync_auto.lock().await.is_some();
                 Ok(json!({
                     "configured": configured,
                     "kind": kind,
                     "deviceId": device_id,
                     "lastSyncMs": last_sync_ms,
                     "autoIntervalMs": auto_interval_ms,
+                    "autoRunning": auto_running,
                 }))
             }
         });

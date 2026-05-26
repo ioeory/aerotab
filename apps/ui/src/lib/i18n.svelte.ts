@@ -139,7 +139,7 @@ const en: Messages = {
   'sync.autoSyncEvery': 'Sync automatically every',
   'sync.autoSyncMinutes': 'minutes',
   'sync.autoSyncHelp':
-    'After Configure / re-key, the first auto-sync runs immediately, then repeats on this interval. Save settings when changing groups.',
+    'After Configure / re-key or “Apply auto-sync”, one sync runs immediately, then repeats on this interval. Changing minutes or the checkbox only marks settings dirty until you apply.',
   'sync.autoSyncActive': 'Auto-sync running (every {minutes} min)',
   'sync.autoSyncApplied': 'Auto-sync schedule updated',
   'sync.autoSyncApply': 'Apply auto-sync',
@@ -731,7 +731,8 @@ const zhCN: Messages = {
   'sync.gitHttpsCleared': '已清除保存的 Git HTTPS Token',
   'sync.autoSyncEvery': '每',
   'sync.autoSyncMinutes': '分钟自动同步',
-  'sync.autoSyncHelp': 'Configure / re-key 后会立即同步一次，之后按此间隔重复。修改同步分组后请保存设置。',
+  'sync.autoSyncHelp':
+    'Configure / re-key 或点击「应用自动同步」后会立即同步一次，之后按此间隔重复。仅改分钟数或勾选框不会立刻生效，需点「应用自动同步」或保存设置。',
   'sync.autoSyncActive': '自动同步运行中（每 {minutes} 分钟）',
   'sync.autoSyncApplied': '自动同步计划已更新',
   'sync.autoSyncApply': '应用自动同步',

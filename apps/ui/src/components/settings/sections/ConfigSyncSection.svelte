@@ -16,7 +16,9 @@
     bootstrapSyncEngine,
     configureSyncEngineFromSettings,
     clearGitHttpsPassword,
+    ensureSyncEngineConfigured,
     hasGitHttpsPassword,
+    isSyncEngineConfigured,
     loadGitHttpsPassword,
     saveGitHttpsPassword,
     type PersistedSyncSettings,
@@ -602,7 +604,7 @@
         await refreshSecretStatus();
       }
       await persist();
-      await applyPersistedAutoSync(rpc, snapshot);
+      await applyPersistedAutoSync(rpc, snapshot, { force: true });
       setSyncInfo('ok', i18n.t('sync.engineConfigured'));
       await refreshStatus();
       await loadSyncHistory();
@@ -617,21 +619,23 @@
 
   async function syncNow() {
     try {
-      const boot = await bootstrapSyncEngine(rpc);
-      if (boot === 'configured' || boot === 'already_configured') {
-        await refreshStatus();
-      } else if (boot === 'no_keyring_secret') {
-        setSyncInfo('err', i18n.t('sync.masterKeyringRequired'));
-        return;
-      } else if (boot === 'no_git_https_secret') {
-        setSyncInfo('err', i18n.t('sync.gitHttpsRequired'));
-        return;
-      } else if (!configured) {
+      await ensureSyncEngineConfigured(rpc);
+      await refreshStatus();
+      if (!configured) {
         setSyncInfo('err', i18n.t('sync.notConfiguredHint'));
         return;
       }
     } catch (e) {
-      setSyncInfo('err', (e as Error).message);
+      const msg = (e as Error).message ?? '';
+      if (msg.includes('HTTPS token')) {
+        setSyncInfo('err', i18n.t('sync.gitHttpsRequired'));
+        return;
+      }
+      if (msg.includes('master password') || msg.includes('credential store')) {
+        setSyncInfo('err', i18n.t('sync.masterKeyringRequired'));
+        return;
+      }
+      setSyncInfo('err', msg);
       return;
     }
     const groups = selectedGroups();
@@ -678,7 +682,7 @@
   async function applyAutoSync() {
     try {
       await persist();
-      await applyPersistedAutoSync(rpc, currentPersistedSettings());
+      await applyPersistedAutoSync(rpc, currentPersistedSettings(), { force: true });
       await refreshStatus();
       setSyncInfo('ok', i18n.t('sync.autoSyncApplied'));
     } catch (e) {
@@ -686,10 +690,8 @@
     }
   }
 
-  async function onAutoSyncSettingsChanged() {
+  function onAutoSyncSettingsChanged() {
     markDirty();
-    if (!configured) return;
-    await applyAutoSync();
   }
 
   async function listSyncRecords() {
@@ -858,11 +860,15 @@
       await refreshVaultStatus();
       await refreshVaultSecretStatus();
       await refreshGitHttpsSecretStatus();
-      const boot = await bootstrapSyncEngine(rpc);
-      if (boot === 'configured') {
-        setSyncInfo('ok', i18n.t('sync.engineRestored'));
+      if (await isSyncEngineConfigured(rpc)) {
+        await refreshStatus();
+      } else {
+        const boot = await bootstrapSyncEngine(rpc);
+        if (boot === 'configured') {
+          setSyncInfo('ok', i18n.t('sync.engineRestored'));
+        }
+        await refreshStatus();
       }
-      await refreshStatus();
       await loadSyncHistory();
     })();
     statusTimer = setInterval(async () => {
@@ -1152,12 +1158,12 @@
     <div class="section-h">Auto sync</div>
     <label class="row">
       <input type="checkbox" bind:checked={autoSyncEnabled}
-        onchange={() => { void onAutoSyncSettingsChanged(); }} />
+        onchange={onAutoSyncSettingsChanged} />
       {i18n.t('sync.autoSyncEvery')}
       <input
         type="number" min="1" max="1440"
         bind:value={autoSyncMinutes}
-        onchange={() => { void onAutoSyncSettingsChanged(); }}
+        onchange={onAutoSyncSettingsChanged}
         class="input" style="width: 70px; display: inline-block; margin: 0 4px;"
       />
       {i18n.t('sync.autoSyncMinutes')}

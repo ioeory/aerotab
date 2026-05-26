@@ -220,7 +220,11 @@ export async function configureSyncEngineFromSettings(
   await rpc.call('sync.configureGit', args);
 }
 
-export async function applyPersistedAutoSync(rpc: RpcClient, settings: PersistedSyncSettings): Promise<void> {
+export async function applyPersistedAutoSync(
+  rpc: RpcClient,
+  settings: PersistedSyncSettings,
+  opts?: { force?: boolean },
+): Promise<void> {
   if (!settings.autoSyncEnabled) {
     await rpc.call('sync.stopAutoSync', {});
     return;
@@ -235,6 +239,20 @@ export async function applyPersistedAutoSync(rpc: RpcClient, settings: Persisted
     return;
   }
   const interval_ms = Math.max(1, settings.autoSyncMinutes ?? 15) * 60_000;
+  if (!opts?.force) {
+    try {
+      const s = await rpc.call<{
+        configured: boolean;
+        autoIntervalMs: number | null;
+        autoRunning?: boolean;
+      }>('sync.status', {});
+      if (s.configured && s.autoRunning && s.autoIntervalMs === interval_ms) {
+        return;
+      }
+    } catch {
+      /* start below */
+    }
+  }
   await rpc.call('sync.startAutoSync', { interval_ms, groups });
 }
 
@@ -278,6 +296,7 @@ export async function bootstrapSyncEngine(rpc: RpcClient): Promise<SyncBootstrap
 
 /** Ensure engine is live before sync.now (palette or settings). */
 export async function ensureSyncEngineConfigured(rpc: RpcClient): Promise<void> {
+  if (await isSyncEngineConfigured(rpc)) return;
   const boot = await bootstrapSyncEngine(rpc);
   if (boot === 'configured' || boot === 'already_configured') return;
   if (boot === 'no_settings') {
