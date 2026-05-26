@@ -787,8 +787,16 @@
 
   $effect(() => {
     void tabVisible;
-    if (!tabVisible || !layoutVisible) return;
+    if (!tabVisible || !layoutVisible || !term) return;
     scheduleSafeFit(true);
+    scheduleTerminalFit(() => {
+      if (!term) return;
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        /* renderer not ready */
+      }
+    });
   });
 
   $effect(() => {
