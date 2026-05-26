@@ -12,7 +12,7 @@
   import { getWindowSettings } from '../lib/windowSettings';
   import { onMount } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
-  import { appConfirm } from '../lib/confirm.svelte';
+  import { appConfirm, appPrompt } from '../lib/confirm.svelte';
   import type { RpcClient } from '../lib/rpc';
 
   interface Props {
@@ -136,12 +136,27 @@
     const tab = tabs.tabs.find((candidate) => candidate.id === tabId);
     requestAnimationFrame(() => dispatchFocusPane(tab?.activePaneId));
   }
+
+  async function renameTab(tab: Tab) {
+    const value = await appPrompt(i18n.t('tabbar.renameTabPrompt'), {
+      defaultValue: tabs.displayTitle(tab),
+      placeholder: i18n.t('tabbar.renameTabPlaceholder'),
+      confirmLabel: i18n.t('common.save'),
+    });
+    if (value === null) return;
+    tabs.setCustomTitle(tab.id, value);
+  }
+
+  function resetTabTitle(tab: Tab) {
+    tabs.clearCustomTitle(tab.id);
+  }
 </script>
 
 <svelte:window onclick={closeMenu} />
 
 <div data-aerotab-context-menu="" class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
   {#each tabs.tabs as tab, i (tab.id)}
+    {@const tabChromeRev = tabs.revision}
     {@const first = tabs.firstPane(tab)}
     {@const Icon = iconFor(first ? first.kind : 'Local')}
     {@const isActive = tabs.activeId === tab.id}
@@ -162,6 +177,7 @@
         if (e.button === 0) activateTab(tab.id);
       }}
       oncontextmenu={(e) => showTabMenu(tab, i, e)}
+      ondblclick={(e) => { e.stopPropagation(); void renameTab(tab); }}
       onpointerenter={() => onTabHover(tab)}
       onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') activateTab(tab.id); }}
       class="tab-shell group flex items-center gap-2 px-3 py-1.5 rounded-t-md cursor-pointer text-[12.5px] border-t border-l border-r
@@ -171,7 +187,7 @@
              {dragIdx === i ? 'opacity-60 ring-1 ring-[var(--color-accent)]' : ''}"
     >
       <Icon size={13} class={isActive ? 'text-[var(--color-accent)]' : ''} />
-      <span class="truncate max-w-[180px]">{tab.title}</span>
+      <span class="truncate max-w-[180px]" title={tabs.displayTitle(tab)}>{tabs.displayTitle(tab)}</span>
       {#if tab.panes.length > 1}
         <span class="text-[10px] px-1 rounded bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]">
           {tab.panes.length}
@@ -235,6 +251,17 @@
     style="left: {menuX}px; top: {menuY}px;"
     role="menu"
   >
+    <button type="button" class="ctx-item" role="menuitem"
+            onclick={() => { const t = menuTab!; closeMenu(); void renameTab(t); }}>
+      {i18n.t('tabbar.renameTab')}
+    </button>
+    {#if menuTab.customTitle?.trim()}
+      <button type="button" class="ctx-item" role="menuitem"
+              onclick={() => { const t = menuTab!; closeMenu(); resetTabTitle(t); }}>
+        {i18n.t('tabbar.resetTabTitle')}
+      </button>
+    {/if}
+    <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const t = menuTab!; closeMenu(); void closeTab(t); }}>
       {i18n.t('tabbar.closeTab')}

@@ -43,8 +43,10 @@ export interface Tab {
   activePaneId: string;
   /** Full-screen pane view state; sessions remain alive. */
   maximizedPaneId?: string | null;
-  /** Human-friendly title (defaults to the first pane's title). */
+  /** Display title in tab chrome (auto or custom). */
   title: string;
+  /** When set, tab title does not follow the active pane. */
+  customTitle?: string | null;
   /** Per-pane activity flags: 'output' since last focus or 'bell' if BEL seen. */
   activity: Record<string, 'output' | 'bell' | undefined>;
 }
@@ -208,6 +210,63 @@ class TabStore {
     return tab.panes.find((pane) => pane.id === tab.activePaneId);
   }
 
+  paneTitle(pane?: SessionMeta): string {
+    if (!pane) return 'Session';
+    return pane.title?.trim() || pane.id.slice(0, 8) || 'Session';
+  }
+
+  /** Title derived from the active pane (or first pane). */
+  autoTitle(tab: Tab): string {
+    return this.paneTitle(this.activePane(tab) ?? tab.panes[0]);
+  }
+
+  displayTitle(tab: Tab): string {
+    const custom = tab.customTitle?.trim();
+    if (custom) return custom;
+    return this.autoTitle(tab);
+  }
+
+  /** Refresh auto title from the active pane when not user-renamed. */
+  syncAutoTitle(tab: Tab): boolean {
+    if (tab.customTitle?.trim()) return false;
+    const next = this.autoTitle(tab);
+    if (tab.title === next) return false;
+    tab.title = next;
+    return true;
+  }
+
+  setCustomTitle(tabId: string, name: string | null): void {
+    const tab = this.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    const trimmed = name?.trim() ?? '';
+    if (!trimmed) {
+      tab.customTitle = null;
+      this.syncAutoTitle(tab);
+    } else {
+      tab.customTitle = trimmed;
+      tab.title = trimmed;
+    }
+    this.bump();
+  }
+
+  clearCustomTitle(tabId: string): void {
+    this.setCustomTitle(tabId, null);
+  }
+
+  private applyLayoutTitle(tab: Tab, explicitTitle?: string) {
+    const trimmed = explicitTitle?.trim() ?? '';
+    if (trimmed) {
+      const auto = this.autoTitle(tab);
+      if (trimmed !== auto) {
+        tab.customTitle = trimmed;
+        tab.title = trimmed;
+        return;
+      }
+    }
+    tab.customTitle = null;
+    this.syncAutoTitle(tab);
+  }
+
   private refreshTab(tab: Tab) {
     tab.panes = flatten(tab.layout);
     if (!tab.panes.some((pane) => pane.id === tab.activePaneId)) {
@@ -216,8 +275,7 @@ class TabStore {
     if (tab.maximizedPaneId && !tab.panes.some((pane) => pane.id === tab.maximizedPaneId)) {
       tab.maximizedPaneId = null;
     }
-    const first = tab.panes[0];
-    if (first && !tab.title) tab.title = first.title || first.id.slice(0, 8);
+    this.syncAutoTitle(tab);
   }
 
   private bump() {
@@ -232,9 +290,11 @@ class TabStore {
       panes: [session],
       activePaneId: session.id,
       maximizedPaneId: null,
-      title: session.title || session.id.slice(0, 8),
+      title: '',
+      customTitle: null,
       activity: {},
     };
+    this.syncAutoTitle(tab);
     this.tabs.push(tab);
     this.activeId = tab.id;
     this.bump();
@@ -257,9 +317,11 @@ class TabStore {
       panes,
       activePaneId: activePaneId && panes.some((pane) => pane.id === activePaneId) ? activePaneId : first.id,
       maximizedPaneId: maximizedPaneId && panes.some((pane) => pane.id === maximizedPaneId) ? maximizedPaneId : null,
-      title: title || first.title || first.id.slice(0, 8),
+      title: '',
+      customTitle: null,
       activity: {},
     };
+    this.applyLayoutTitle(tab, title);
     this.tabs.push(tab);
     this.activeId = tab.id;
     this.bump();
@@ -440,6 +502,7 @@ class TabStore {
       tab.activePaneId = sessionId;
       this.activeId = tab.id;
       this.clearActivity(sessionId);
+      if (this.syncAutoTitle(tab)) this.bump();
     }
   }
 
@@ -501,6 +564,7 @@ class TabStore {
     tab.maximizedPaneId = tab.maximizedPaneId === paneId ? null : paneId;
     tab.activePaneId = paneId;
     this.activeId = tab.id;
+    this.syncAutoTitle(tab);
     this.bump();
   }
 

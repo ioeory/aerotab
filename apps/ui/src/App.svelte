@@ -185,6 +185,7 @@
     | { type: 'split'; direction: SplitDir; ratios: number[]; children: WorkspaceNode[] };
   interface WorkspaceTab {
     title: string;
+    customTitle?: string | null;
     layout: WorkspaceNode;
     activePaneIndex: number;
     maximizedPaneIndex?: number | null;
@@ -370,7 +371,8 @@
       const activePaneIndex = paneIndex.get(tab.activePaneId) ?? 0;
       const maximizedPaneIndex = tab.maximizedPaneId ? paneIndex.get(tab.maximizedPaneId) ?? null : null;
       workspaceTabs.push({
-        title: tab.title,
+        title: tabs.displayTitle(tab),
+        customTitle: tab.customTitle ?? null,
         layout,
         activePaneIndex,
         maximizedPaneIndex,
@@ -428,6 +430,11 @@
           ? opened[tab.maximizedPaneIndex]?.session.id ?? null
           : null;
         const created = tabs.addLayout(tab.title, layout, active, maximized);
+        if (tab.customTitle?.trim()) {
+          tabs.setCustomTitle(created.id, tab.customTitle);
+        } else if (tab.title?.trim() && tab.title.trim() !== tabs.autoTitle(created)) {
+          tabs.setCustomTitle(created.id, tab.title);
+        }
         for (const item of opened) {
           if (item) restoreMap.set(item.session.id, item.restore);
         }
@@ -954,7 +961,11 @@
     const active = opened[activeIdx]?.session.id;
     const maxIdx = source.maximizedPaneId ? paneIndex.get(source.maximizedPaneId) : undefined;
     const maximized = typeof maxIdx === 'number' ? opened[maxIdx]?.session.id ?? null : null;
-    const created = tabs.addLayout(`${source.title} (copy)`, layout, active, maximized);
+    const baseName = tabs.displayTitle(source);
+    const created = tabs.addLayout(`${baseName} (copy)`, layout, active, maximized);
+    if (source.customTitle?.trim()) {
+      tabs.setCustomTitle(created.id, `${source.customTitle} (copy)`);
+    }
     for (const item of opened) {
       if (item) restoreMap.set(item.session.id, item.restore);
     }

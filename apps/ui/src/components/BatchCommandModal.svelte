@@ -4,7 +4,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { isSshPane } from '../lib/broadcast';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
-  import type { Tab } from '../lib/tabs.svelte';
+  import { tabs, type Tab } from '../lib/tabs.svelte';
 
   export interface BatchPaneOption {
     sessionId: string;
@@ -32,7 +32,7 @@
       if (scope === 'active-tab' && tab.id !== activeTabId) continue;
       for (const pane of tab.panes) {
         if (!isSshPane(pane)) continue;
-        out.push({ sessionId: pane.id, title: pane.title, tabTitle: tab.title });
+        out.push({ sessionId: pane.id, title: pane.title, tabTitle: tabs.displayTitle(tab) });
       }
     }
     return out;
