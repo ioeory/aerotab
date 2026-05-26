@@ -1280,6 +1280,16 @@
   }
 
   let kbdHandler: ((e: KeyboardEvent) => void) | null = null;
+
+  const onProfilesChanged = () => {
+    void refreshProfileList();
+    void sidebar?.refresh();
+  };
+
+  async function refreshProfileList() {
+    try { savedProfiles = await rpc.call<StoredProfile[]>('profile.list'); } catch { savedProfiles = []; }
+  }
+
   onMount(() => {
     // Wire action handlers (M5). Bindings are owned by HotkeyManager and
     // loaded from settings asynchronously below.
@@ -1358,6 +1368,7 @@
       }
     };
     document.addEventListener('aerotab:settings-changed', onAppSettingsChanged);
+    document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
     document.addEventListener('aerotab:session-replaced', onSessionReplaced);
     installPaneDragGlobalHandlers();
     let winResizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1382,6 +1393,7 @@
     return () => {
       window.removeEventListener('resize', onWindowResize);
       if (winResizeTimer) clearTimeout(winResizeTimer);
+      document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
       document.removeEventListener('aerotab:session-replaced', onSessionReplaced);
       unsubPaneDrop();
     };
@@ -1389,12 +1401,9 @@
   onDestroy(() => {
     if (kbdHandler) window.removeEventListener('keydown', kbdHandler, true);
     document.removeEventListener('aerotab:settings-changed', onAppSettingsChanged);
+    document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
     clearHostStatsPoll();
   });
-
-  async function refreshProfileList() {
-    try { savedProfiles = await rpc.call<StoredProfile[]>('profile.list'); } catch { savedProfiles = []; }
-  }
   // Keep palette profile list fresh whenever it opens.
   $effect(() => {
     if (paletteOpen) {

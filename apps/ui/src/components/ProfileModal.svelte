@@ -258,9 +258,9 @@
     }
     try {
       await rpc.call('profile.upsert', profile);
-      close();
-      notifyProfilesChanged();
+      notifyProfilesChanged({ profileId: profile.id, group: profile.group });
       onSaved();
+      close();
     } catch (e) {
       onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
     }

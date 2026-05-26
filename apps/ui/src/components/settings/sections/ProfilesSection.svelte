@@ -18,7 +18,7 @@
     selectAllProfiles,
     toggleProfileInSelection,
   } from '../../../lib/profileSelection';
-  import { PROFILES_CHANGED } from '../../../lib/profileEvents';
+  import { notifyProfilesChanged, PROFILES_CHANGED } from '../../../lib/profileEvents';
   import { withRpcTimeout } from '../../../lib/rpcTimeout';
   import { focusProfileInTabs } from '../../../lib/focusProfileSession';
   import ProfileModal from '../../ProfileModal.svelte';
@@ -177,6 +177,7 @@
     if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
+      notifyProfilesChanged();
       await load();
     } catch (e) { onError(`delete: ${(e as Error).message}`); }
   }
@@ -256,6 +257,7 @@
         await rpc.call('profile.delete', { id: p.id });
       }
       clearProfileSelection();
+      notifyProfilesChanged();
       await load();
     } catch (e) {
       onError(`delete: ${(e as Error).message}`);

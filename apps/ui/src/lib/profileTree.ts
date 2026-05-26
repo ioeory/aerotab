@@ -85,6 +85,17 @@ export function collectFolderPaths(node: ProfileTreeFolder): string[] {
   return paths;
 }
 
+/** Folder paths along a profile group (for expand-after-save). */
+export function expandPathsForGroup(group: string | null | undefined): Set<string> {
+  const expanded = new Set<string>();
+  let path = '';
+  for (const segment of parseGroupSegments(group)) {
+    path = path ? `${path}/${segment}` : segment;
+    expanded.add(path);
+  }
+  return expanded;
+}
+
 /** Paths that should stay expanded so every visible match stays reachable. */
 export function expandPathsForMatches(
   profiles: StoredProfile[],

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X } from '@lucide/svelte';
+  import {
+    Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X, RefreshCw,
+  } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
@@ -13,6 +15,7 @@
   } from '../lib/profileSidebarShortcuts';
   import {
     buildProfileTree,
+    expandPathsForGroup,
     expandPathsForMatches,
     loadCollapsedPaths,
     saveCollapsedPaths,
@@ -20,7 +23,7 @@
   } from '../lib/profileTree';
   import SidebarProfileTree from './SidebarProfileTree.svelte';
   import { i18n } from '../lib/i18n.svelte';
-  import { PROFILES_CHANGED } from '../lib/profileEvents';
+  import { notifyProfilesChanged, PROFILES_CHANGED, type ProfilesChangedDetail } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import { portal } from '../lib/portal';
   import { appConfirm } from '../lib/confirm.svelte';
@@ -46,17 +49,17 @@
   let { rpc, onError, openProfileModal, openSerialModal, openSftp, openSettings }: Props = $props();
 
   let profiles = $state<StoredProfile[]>([]);
+  let profilesRefreshing = $state(false);
   let profileQuery = $state('');
   let collapsedPaths = $state<Set<string>>(loadCollapsedPaths());
 
-  const sshProfiles = $derived(profiles.filter((p) => p.kind === 'ssh'));
   const filteredProfiles = $derived(
-    sshProfiles.filter((p) => matchesProfileQuery(p, profileQuery)),
+    profiles.filter((p) => matchesProfileQuery(p, profileQuery)),
   );
   const profileTree = $derived(buildProfileTree(filteredProfiles));
   const forceExpandedPaths = $derived(
     profileQuery.trim()
-      ? expandPathsForMatches(sshProfiles, (p) => matchesProfileQuery(p, profileQuery))
+      ? expandPathsForMatches(profiles, (p) => matchesProfileQuery(p, profileQuery))
       : new Set<string>(),
   );
   const hasVisibleProfiles = $derived(
@@ -75,18 +78,37 @@
     profileQuery = '';
   }
 
+  function expandFoldersForGroup(group: string | null | undefined) {
+    const paths = expandPathsForGroup(group);
+    if (paths.size === 0) return;
+    const next = new Set(collapsedPaths);
+    for (const path of paths) next.delete(path);
+    collapsedPaths = next;
+    saveCollapsedPaths(next);
+  }
+
   export async function refresh() {
+    if (profilesRefreshing) return;
+    profilesRefreshing = true;
     try {
       profiles = await withRpcTimeout(
         rpc.call<StoredProfile[]>('profile.list'),
         20_000,
         'profile.list',
       );
-    } catch {
+    } catch (e) {
       profiles = [];
+      onError(`profile.list: ${(e as Error).message}`);
+    } finally {
+      profilesRefreshing = false;
     }
   }
-  const onProfilesChanged = () => { void refresh(); };
+
+  const onProfilesChanged = (ev: Event) => {
+    const detail = (ev as CustomEvent<ProfilesChangedDetail>).detail;
+    if (detail?.group) expandFoldersForGroup(detail.group);
+    void refresh();
+  };
   let hotkeyRev = $state(0);
   const onHotkeysChanged = () => { hotkeyRev += 1; };
 
@@ -264,6 +286,7 @@
         await rpc.call('profile.delete', { id: p.id });
       }
       clearProfileSelection();
+      notifyProfilesChanged();
       await refresh();
     } catch (e) {
       onError((e as Error).message);
@@ -346,6 +369,7 @@
     try {
       await rpc.call('profile.delete', { id: p.id });
       if (focusedProfileId === p.id) focusedProfileId = null;
+      notifyProfilesChanged();
       await refresh();
     } catch (e) {
       onError((e as Error).message);
@@ -422,7 +446,19 @@
   </div>
 
   <div class="px-2 pt-2 pb-1 flex flex-col gap-1.5">
-    <div class="px-1 shell-section-title">{i18n.t('sidebar.sshProfiles')}</div>
+    <div class="px-1 flex items-center gap-1 min-h-[22px]">
+      <div class="shell-section-title flex-1 min-w-0">{i18n.t('sidebar.sshProfiles')}</div>
+      <button
+        type="button"
+        class="btn-ghost p-1 shrink-0 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+        title={i18n.t('sidebar.refreshProfiles')}
+        aria-label={i18n.t('sidebar.refreshProfiles')}
+        disabled={profilesRefreshing}
+        onclick={() => { void refresh(); }}
+      >
+        <RefreshCw size={13} class={profilesRefreshing ? 'animate-spin' : ''} />
+      </button>
+    </div>
     <div class="relative">
       <Search size={12} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-fg-muted)] pointer-events-none" />
       <input
