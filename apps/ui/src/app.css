@@ -65,6 +65,18 @@ html, body {
 #root { zoom: var(--ui-spaciness); }
 .terminal-surface { zoom: calc(1 / var(--ui-spaciness)); }
 
+/* Full-screen modals (settings, palette, …): keep native <select> popups aligned and
+ * stop scroll/wheel from reaching xterm under the overlay. */
+.settings-overlay-root {
+  zoom: calc(1 / var(--ui-spaciness));
+}
+.settings-overlay-scroll {
+  overscroll-behavior: contain;
+}
+body[data-modal-overlay] .terminal-surface {
+  pointer-events: none !important;
+}
+
 /* When the Window section sets opacity below 100% it adds
  * `data-translucent="true"` to <body>. The chrome panels (sidebar/tabbar/
  * terminal area) all use opaque `bg-[var(--color-*)]` tailwind classes that

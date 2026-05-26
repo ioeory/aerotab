@@ -110,14 +110,21 @@
   }
 </script>
 
-<div
-  class="fixed inset-0 bg-black/60 z-50 grid place-items-center p-6"
-  role="dialog"
-  aria-modal="true"
-  aria-label={i18n.t('settings.title')}
->
+<div class="settings-overlay-root fixed inset-0 z-50">
+  <!-- Full-screen backdrop: grid centering left gaps where wheel reached the terminal. -->
+  <button
+    type="button"
+    class="settings-overlay-backdrop absolute inset-0 border-0 p-0 bg-black/60 cursor-default"
+    aria-label={i18n.t('common.close')}
+    onclick={onClose}
+    onwheel={(e) => e.stopPropagation()}
+  ></button>
+  <div class="relative z-10 flex min-h-full w-full items-center justify-center p-6 pointer-events-none">
   <div
-    class="panel w-full max-w-[920px] h-[80vh] flex flex-col overflow-hidden"
+    class="panel settings-overlay-panel pointer-events-auto w-full max-w-[920px] h-[80vh] flex flex-col overflow-hidden"
+    role="dialog"
+    aria-modal="true"
+    aria-label={i18n.t('settings.title')}
   >
     <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
       <div class="text-[var(--color-accent)] font-semibold text-[13px]">{i18n.t('settings.title')}</div>
@@ -138,7 +145,7 @@
     </header>
 
     <div class="flex-1 min-h-0 grid grid-cols-[200px_1fr]">
-      <nav class="overflow-y-auto border-r border-[var(--color-border-soft)]
+      <nav class="settings-overlay-scroll overflow-y-auto border-r border-[var(--color-border-soft)]
                   bg-[var(--color-panel-2)] py-3">
         {#each groups as g (g.titleKey)}
           <div class="px-3 pt-2 pb-1 shell-section-title">
@@ -156,7 +163,7 @@
         {/each}
       </nav>
 
-      <div class="overflow-y-auto p-5 text-[12.5px]">
+      <div class="settings-overlay-scroll overflow-y-auto p-5 text-[12.5px]">
         {#if active === 'application'}
           <ApplicationSection {rpc} {buildId} {onError} />
         {:else if active === 'appearance'}
@@ -205,6 +212,7 @@
         </button>
       </div>
     </footer>
+  </div>
   </div>
 </div>
 

@@ -1365,6 +1365,21 @@
     settingsRev = settingsCoord.rev;
   });
 
+  // Block wheel/pointer from reaching xterm while a full-screen modal is open.
+  $effect(() => {
+    const overlayOpen =
+      settingsOpen || paletteOpen || pickerOpen || batchCommandOpen;
+    if (overlayOpen) {
+      document.body.dataset.modalOverlay = 'true';
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.closest('.xterm, .terminal-surface')) {
+        active.blur();
+      }
+    } else {
+      delete document.body.dataset.modalOverlay;
+    }
+  });
+
   $effect(() => {
     void tabs.revision;
     void tabs.activeId;
