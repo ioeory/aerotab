@@ -9,15 +9,13 @@
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm, appPrompt } from '../../../lib/confirm.svelte';
-
-  const BULK_OPEN_CONFIRM_THRESHOLD = 4;
+  import { openProfilesInSameTab } from '../../../lib/profileBulkOpen';
   import {
     defaultGroupForMove,
     normalizeProfileGroupInput,
     upsertProfilesGroup,
   } from '../../../lib/profileGroupMove';
-  import { tabs, type SplitDir } from '../../../lib/tabs.svelte';
-  import type { SessionMeta } from '../../../lib/types';
+  import { tabs } from '../../../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
   import {
     invertProfileSelection,
@@ -241,43 +239,21 @@
   }
 
   async function bulkConnectSelected() {
-    const sshList = selectedProfiles.filter((p) => p.kind === 'ssh');
-    const remoteList = selectedProfiles.filter((p) => p.kind === 'rdp' || p.kind === 'vnc');
-    if (sshList.length === 0 && remoteList.length === 0) {
+    const list = selectedProfiles;
+    if (list.length === 0) {
       onError(i18n.t('profiles.bulkConnectNone'));
       return;
     }
-    if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD) {
-      const ok = await appConfirm(
-        i18n.t('profiles.bulkOpenManyConfirm', { count: sshList.length }),
-        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
-      );
-      if (!ok) return;
-    }
     bulkBusy = true;
     try {
-      for (const p of remoteList) {
-        await connect(p);
-      }
-      if (sshList.length === 0) return;
-
-      let tabId = tabs.activeId ?? undefined;
-      let tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
-
-      for (let i = 0; i < sshList.length; i++) {
-        const p = sshList[i]!;
-        const meta = await rpc.call<SessionMeta>('session.openSshProfile', { profile_id: p.id });
-        const pane = { ...meta, profileId: p.id, sshProfile: p.ssh };
-        if (i === 0 && !tab) {
-          tabs.add(pane);
-          tabId = tabs.activeId ?? undefined;
-          tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
-        } else if (tabId) {
-          const direction: SplitDir = i % 2 === 0 ? 'row' : 'col';
-          tabs.addPane(tabId, pane, direction);
-        }
-      }
-      if (tabId) tabs.activate(tabId);
+      await openProfilesInSameTab(list, {
+        rpc,
+        onError,
+        confirmMany: async (count: number) =>
+          appConfirm(i18n.t('profiles.bulkOpenManyConfirm', { count }), {
+            confirmLabel: i18n.t('profiles.bulkOpenConfirm'),
+          }),
+      });
     } catch (e) {
       onError(`connect: ${(e as Error).message}`);
     } finally {

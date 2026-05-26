@@ -44,6 +44,29 @@ export function parseJumpLines(
     .map((line) => parseJumpLine(line, auth, profiles));
 }
 
+/** Format a saved SSH profile as a ProxyJump line (`@Name`). */
+export function jumpLineForProfile(profile: StoredProfile): string {
+  return `@${profile.name}`;
+}
+
+/** Merge profile jump lines into existing textarea content (deduped). */
+export function appendJumpProfileLines(existingText: string, profiles: StoredProfile[]): string {
+  const lines = existingText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const seen = new Set(lines.map((l) => l.toLowerCase()));
+  for (const p of profiles) {
+    if (p.kind !== 'ssh') continue;
+    const line = jumpLineForProfile(p);
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    lines.push(line);
+    seen.add(key);
+  }
+  return lines.join('\n');
+}
+
 export async function loadProfilesForJumps(rpc: RpcClient): Promise<StoredProfile[]> {
   try {
     const list = await rpc.call<StoredProfile[]>('profile.list');

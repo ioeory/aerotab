@@ -4,7 +4,7 @@
   } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
-  import { tabs, type SplitDir } from '../lib/tabs.svelte';
+  import { tabs } from '../lib/tabs.svelte';
   import { healthIssueDetailText, summarizeHealthResults } from '../lib/profileHealthUi';
   import { focusProfileInTabs } from '../lib/focusProfileSession';
   import { matchesProfileQuery } from '../lib/profileMeta';
@@ -14,8 +14,10 @@
     profileSidebarBindingLabel,
     type ProfileSidebarActionKey,
   } from '../lib/profileSidebarShortcuts';
+  import { openProfilesEachInNewTab, openProfilesInSameTab } from '../lib/profileBulkOpen';
   import {
     buildProfileTree,
+    collectProfilesInFolder,
     expandPathsForGroup,
     expandPathsForMatches,
     loadCollapsedPaths,
@@ -168,7 +170,7 @@
 
   type SidebarMenu =
     | { kind: 'profile'; profile: StoredProfile }
-    | { kind: 'group'; groupPath: string; groupLabel: string };
+    | { kind: 'group'; folder: ProfileTreeFolder; groupLabel: string };
 
   let menuOpen = $state(false);
   let menuX = $state(0);
@@ -182,7 +184,14 @@
   let healthRunning = $state(false);
   let profileHealth = $state<Record<string, ProfileHealthResult>>({});
 
-  const BULK_OPEN_CONFIRM_THRESHOLD = 4;
+  const bulkOpenDeps = $derived({
+    rpc,
+    onError,
+    confirmMany: async (count: number) =>
+      appConfirm(i18n.t('profiles.bulkOpenManyConfirm', { count }), {
+        confirmLabel: i18n.t('profiles.bulkOpenConfirm'),
+      }),
+  });
 
   const selectedProfiles = $derived(profilesFromSelection(filteredProfiles, selectedProfileIds));
   const hasProfileSelection = $derived(selectedProfileIds.size > 0);
@@ -239,52 +248,14 @@
   }
 
   async function bulkConnectSelected() {
-    const sshList = selectedProfiles.filter((p) => p.kind === 'ssh');
-    const remoteList = selectedProfiles.filter((p) => p.kind === 'rdp' || p.kind === 'vnc');
-    if (sshList.length === 0 && remoteList.length === 0) {
+    const list = selectedProfiles;
+    if (list.length === 0) {
       onError(i18n.t('profiles.bulkConnectNone'));
       return;
     }
-    if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD) {
-      const ok = await appConfirm(
-        i18n.t('profiles.bulkOpenManyConfirm', { count: sshList.length }),
-        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
-      );
-      if (!ok) return;
-    }
     bulkBusy = true;
     try {
-      for (const p of remoteList) {
-        try {
-          await rpc.call('remote.openProfile', { profile_id: p.id });
-        } catch (e) {
-          onError(`remote: ${(e as Error).message}`);
-        }
-      }
-      if (sshList.length === 0) return;
-
-      let tabId = tabs.activeId ?? undefined;
-      let tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
-
-      for (let i = 0; i < sshList.length; i++) {
-        const p = sshList[i]!;
-        const meta = await rpc.call<SessionMeta>('session.openSsh', {
-          title: p.name,
-          rows: 24,
-          cols: 80,
-          profile: p.ssh,
-        });
-        const pane = { ...meta, profileId: p.id, sshProfile: p.ssh };
-        if (i === 0 && !tab) {
-          tabs.add(pane);
-          tabId = tabs.activeId ?? undefined;
-          tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
-        } else if (tabId) {
-          const direction: SplitDir = i % 2 === 0 ? 'row' : 'col';
-          tabs.addPane(tabId, pane, direction);
-        }
-      }
-      if (tabId) tabs.activate(tabId);
+      await openProfilesInSameTab(list, bulkOpenDeps);
     } catch (e) {
       onError(`ssh: ${(e as Error).message}`);
     } finally {
@@ -395,7 +366,7 @@
   }
 
   function showFolderMenu(folder: ProfileTreeFolder, ev: MouseEvent) {
-    openMenu({ kind: 'group', groupPath: folder.path, groupLabel: folder.name }, ev);
+    openMenu({ kind: 'group', folder, groupLabel: folder.name || i18n.t('sidebar.ungrouped') }, ev);
   }
 
   function closeMenu() {
@@ -449,6 +420,38 @@
   function menuNewProfileInGroup(groupPath: string) {
     closeMenu();
     openProfileModal(undefined, { group: groupPath });
+  }
+
+  async function menuOpenGroupProfiles(folder: ProfileTreeFolder) {
+    closeMenu();
+    const list = collectProfilesInFolder(folder);
+    if (list.length === 0) {
+      onError(i18n.t('sidebar.groupEmpty'));
+      return;
+    }
+    bulkBusy = true;
+    try {
+      await openProfilesEachInNewTab(list, bulkOpenDeps);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function menuOpenGroupInSameTab(folder: ProfileTreeFolder) {
+    closeMenu();
+    const list = collectProfilesInFolder(folder).filter((p) => p.kind === 'ssh');
+    if (list.length === 0) {
+      onError(i18n.t('sidebar.groupNoSsh'));
+      return;
+    }
+    bulkBusy = true;
+    try {
+      await openProfilesInSameTab(list, bulkOpenDeps);
+    } catch (e) {
+      onError(`ssh: ${(e as Error).message}`);
+    } finally {
+      bulkBusy = false;
+    }
   }
 
   async function latestProfile(p: StoredProfile): Promise<StoredProfile> {
@@ -665,7 +668,18 @@
     onclick={(e) => e.stopPropagation()}
   >
       {#if menuTarget.kind === 'group'}
-        {@const groupPath = menuTarget.groupPath}
+        {@const folder = menuTarget.folder}
+        {@const groupPath = folder.path}
+        {@const groupCount = collectProfilesInFolder(folder).length}
+        {#if groupCount > 0}
+          <button type="button" class="menu-item" onclick={() => { void menuOpenGroupProfiles(folder); }}>
+            {i18n.t('sidebar.openGroupProfiles', { count: groupCount })}
+          </button>
+          <button type="button" class="menu-item" onclick={() => { void menuOpenGroupInSameTab(folder); }}>
+            {i18n.t('sidebar.openGroupInSameTab')}
+          </button>
+          <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        {/if}
         {#if hasProfileSelection}
           <button type="button" class="menu-item" onclick={() => menuMoveSelectedToFolder(groupPath)}>
             {i18n.t('sidebar.moveSelectedToGroup', {

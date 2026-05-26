@@ -74,6 +74,15 @@ export function buildProfileTree(profiles: StoredProfile[]): ProfileTreeFolder {
   return root;
 }
 
+/** All profiles in a folder node and its subfolders (depth-first). */
+export function collectProfilesInFolder(folder: ProfileTreeFolder): StoredProfile[] {
+  const out: StoredProfile[] = [...folder.profiles];
+  for (const child of folder.folders) {
+    out.push(...collectProfilesInFolder(child));
+  }
+  return out;
+}
+
 /** All folder paths that contain at least one profile (for expand-on-search). */
 export function collectFolderPaths(node: ProfileTreeFolder): string[] {
   const paths: string[] = [];

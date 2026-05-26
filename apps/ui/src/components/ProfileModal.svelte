@@ -5,9 +5,15 @@
   import { uuidv4 } from '../lib/rpc';
   import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
-  import { loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
+  import { appendJumpProfileLines, loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
   import { defaultPortForKind } from '../lib/profileDefaults';
-  import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput, suggestDuplicateProfileName } from '../lib/profileMeta';
+  import {
+    BUILTIN_PROFILE_ICONS,
+    formatTags,
+    parseTagsInput,
+    profileEndpointLabel,
+    suggestDuplicateProfileName,
+  } from '../lib/profileMeta';
   import { notifyProfilesChanged } from '../lib/profileEvents';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -46,6 +52,11 @@
   /** One bastion per line, in `user@host[:port]` form. Each hop reuses the
    * target profile's auth method (key or password). */
   let jumpsText = $state('');
+  let jumpPickerIds = $state<Set<string>>(new Set());
+
+  const jumpPickProfiles = $derived(
+    tunnelProfiles.filter((p) => p.kind === 'ssh' && p.id !== editing?.id),
+  );
 
   function formatJumps(jumps: SshProfileSpec[]): string {
     return jumps
@@ -178,6 +189,7 @@
   export function open(existing?: StoredProfile, options?: ProfileModalOpenOptions) {
     cloning = false;
     editing = existing ?? null;
+    jumpPickerIds = new Set();
     void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
       .then((list) => { tunnelProfiles = list.filter((p) => p.kind === 'ssh'); })
@@ -201,6 +213,20 @@
 
   function close() {
     dialog?.close();
+  }
+
+  function toggleJumpPicker(id: string) {
+    const next = new Set(jumpPickerIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    jumpPickerIds = next;
+  }
+
+  function appendJumpPickerSelection() {
+    const picked = jumpPickProfiles.filter((p) => jumpPickerIds.has(p.id));
+    if (picked.length === 0) return;
+    jumpsText = appendJumpProfileLines(jumpsText, picked);
+    jumpPickerIds = new Set();
   }
 
   async function browsePrivateKeyPath() {
@@ -428,12 +454,45 @@
       <label for="pm-jumps" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
         {i18n.t('profileModal.proxyJump')}
       </label>
+      {#if jumpPickProfiles.length > 0}
+        <div class="jump-picker mt-2 border border-[var(--color-border-soft)] rounded-md overflow-hidden">
+          <div class="px-2 py-1.5 text-[10.5px] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
+            {i18n.t('profileModal.jumpPickFromList')}
+          </div>
+          <div class="jump-picker-list max-h-[140px] overflow-y-auto px-1 py-1">
+            {#each jumpPickProfiles as jp (jp.id)}
+              <label class="jump-picker-row flex items-start gap-2 px-2 py-1 rounded hover:bg-[var(--color-panel-2)] cursor-pointer text-[11.5px]">
+                <input
+                  type="checkbox"
+                  class="mt-0.5 shrink-0"
+                  checked={jumpPickerIds.has(jp.id)}
+                  onchange={() => toggleJumpPicker(jp.id)}
+                />
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate text-[var(--color-fg)]">{jp.name}</span>
+                  <span class="block truncate text-[10px] text-[var(--color-fg-muted)]">{profileEndpointLabel(jp)}</span>
+                </span>
+              </label>
+            {/each}
+          </div>
+          <div class="px-2 py-1.5 border-t border-[var(--color-border-soft)] flex justify-end">
+            <button
+              type="button"
+              class="btn-secondary text-[11px] py-0.5 px-2"
+              disabled={jumpPickerIds.size === 0}
+              onclick={appendJumpPickerSelection}
+            >
+              {i18n.t('profileModal.jumpAddSelected')}
+            </button>
+          </div>
+        </div>
+      {/if}
       <textarea
         id="pm-jumps"
         bind:value={jumpsText}
         rows="2"
         placeholder="jumpuser@bastion.example.com&#10;@prod-bastion"
-        class="input font-mono text-[11.5px]"
+        class="input font-mono text-[11.5px] mt-2"
       ></textarea>
       <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">{i18n.t('profileModal.proxyJumpProfileRef')}</p>
     {:else}
