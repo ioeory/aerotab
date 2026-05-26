@@ -43,6 +43,11 @@
     | { kind: 'ssh-config'; entry: SshConfigEntry }
     | { kind: 'address'; address: string };
 
+  type PickerBlock =
+    | { kind: 'header'; title: string; key: string }
+    | { kind: 'row'; key: string; item: PickerItem; navIndex: number }
+    | { kind: 'clearRecent'; key: string };
+
   interface Props {
     rpc: RpcClient;
     onClose: () => void;
@@ -56,7 +61,9 @@
   let recentIds = $state<string[]>([]);
   let query = $state('');
   let inputEl: HTMLInputElement | null = $state(null);
-  let hover = $state<number>(0); // keyboard-selected row index in flatList
+  let scrollEl: HTMLDivElement | null = $state(null);
+  /** Index into `navItems` (keyboard/mouse selection). */
+  let hover = $state(0);
 
   // ----- load -----
   onMount(() => {
@@ -119,22 +126,66 @@
   const visibleShells = $derived(shells.filter(matchShell));
   const visibleSshConfig = $derived(sshConfig.filter(matchSshConfig));
 
-  // Flatten everything to a single keyboard-navigable list.
-  const flatList = $derived.by((): PickerItem[] => {
-    const list: PickerItem[] = [];
-    for (const p of recentProfiles) list.push({ kind: 'profile', profile: p });
-    for (const [, ps] of groupedProfiles) {
-      for (const p of ps) list.push({ kind: 'profile', profile: p });
+  const { blocks, navItems } = $derived.by((): { blocks: PickerBlock[]; navItems: PickerItem[] } => {
+    const blocks: PickerBlock[] = [];
+    const navItems: PickerItem[] = [];
+    const pushRow = (key: string, item: PickerItem) => {
+      const navIndex = navItems.length;
+      navItems.push(item);
+      blocks.push({ kind: 'row', key, item, navIndex });
+    };
+
+    if (recentProfiles.length > 0) {
+      blocks.push({ kind: 'header', title: i18n.t('picker.recent'), key: 'hdr:recent' });
+      for (const p of recentProfiles) {
+        pushRow(`recent:${p.id}`, { kind: 'profile', profile: p });
+      }
+      blocks.push({ kind: 'clearRecent', key: 'clear-recent' });
     }
-    for (const s of visibleShells) list.push({ kind: 'shell', shell: s });
-    for (const e of visibleSshConfig) list.push({ kind: 'ssh-config', entry: e });
-    return list;
+
+    for (const [groupName, ps] of groupedProfiles) {
+      blocks.push({
+        kind: 'header',
+        title: `${groupName} · ${ps.length}`,
+        key: `hdr:${groupName || '__ungrouped__'}`,
+      });
+      for (const p of ps) {
+        pushRow(`group:${groupName}:${p.id}`, { kind: 'profile', profile: p });
+      }
+    }
+
+    if (visibleShells.length > 0) {
+      blocks.push({ kind: 'header', title: i18n.t('picker.builtInShells'), key: 'hdr:shells' });
+      for (const s of visibleShells) {
+        pushRow(`shell:${s.id}`, { kind: 'shell', shell: s });
+      }
+    }
+
+    if (visibleSshConfig.length > 0) {
+      blocks.push({ kind: 'header', title: i18n.t('picker.importedSshConfig'), key: 'hdr:ssh-config' });
+      for (const e of visibleSshConfig) {
+        pushRow(`ssh-config:${e.alias}`, { kind: 'ssh-config', entry: e });
+      }
+    }
+
+    return { blocks, navItems };
+  });
+
+  const showAddressRow = $derived(navItems.length === 0 && query.trim().length > 0);
+
+  $effect(() => {
+    void q;
+    hover = 0;
   });
 
   $effect(() => {
-    // Reset hover when filter changes.
-    void q;
-    hover = 0;
+    const idx = hover;
+    void navItems.length;
+    void tick().then(() => {
+      if (!scrollEl || idx < 0) return;
+      const row = scrollEl.querySelector<HTMLElement>(`[data-picker-nav="${idx}"]`);
+      row?.scrollIntoView({ block: 'nearest' });
+    });
   });
 
   // ----- actions -----
@@ -159,33 +210,42 @@
     if (!addr) return;
     onOpen({ kind: 'address', address: addr });
   }
+  function clampHover(next: number): number {
+    if (navItems.length === 0) return 0;
+    return Math.max(0, Math.min(navItems.length - 1, next));
+  }
   function onKey(ev: KeyboardEvent) {
     if (ev.key === 'Escape') { ev.preventDefault(); onClose(); return; }
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      hover = clampHover(hover + 1);
+      return;
+    }
+    if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      hover = clampHover(hover - 1);
+      return;
+    }
+    if (ev.key === 'Home') {
+      ev.preventDefault();
+      hover = 0;
+      return;
+    }
+    if (ev.key === 'End') {
+      ev.preventDefault();
+      hover = clampHover(navItems.length - 1);
+      return;
+    }
     if (ev.key === 'Enter') {
       ev.preventDefault();
-      if (flatList.length > 0 && hover >= 0 && hover < flatList.length) {
-        const item = flatList[hover];
+      if (navItems.length > 0) {
+        const item = navItems[hover];
         if (item) void chooseRecord(item);
       } else if (query.trim()) {
         submitAddress();
       }
       return;
     }
-    if (ev.key === 'ArrowDown') {
-      ev.preventDefault();
-      hover = Math.min(flatList.length - 1, hover + 1);
-      return;
-    }
-    if (ev.key === 'ArrowUp') {
-      ev.preventDefault();
-      hover = Math.max(0, hover - 1);
-      return;
-    }
-  }
-
-  function isHovered(item: PickerItem): boolean {
-    const idx = flatList.indexOf(item);
-    return idx === hover;
   }
 </script>
 
@@ -205,19 +265,36 @@
       bind:value={query}
       onkeydown={onKey}
       type="text"
+      role="combobox"
+      aria-expanded="true"
+      aria-controls="picker-listbox"
+      aria-activedescendant={navItems.length > 0 ? `picker-option-${hover}` : undefined}
+      aria-autocomplete="list"
       placeholder={i18n.t('picker.placeholder')}
       class="picker-search"
     />
 
-    <div class="picker-scroll">
-      {#if recentProfiles.length > 0}
-        <div class="picker-cat">{i18n.t('picker.recent')}</div>
-        {#each recentProfiles as p (p.id)}
-          {@const item = { kind: 'profile' as const, profile: p }}
+    <div id="picker-listbox" bind:this={scrollEl} class="picker-scroll" role="listbox">
+      {#each blocks as block (block.key)}
+        {#if block.kind === 'header'}
+          <div class="picker-cat">{block.title}</div>
+        {:else if block.kind === 'clearRecent'}
+          <button type="button" class="picker-row text-[var(--color-fg-muted)]" onclick={clearRecent}>
+            <Eraser size={13} />
+            <span class="picker-label">{i18n.t('picker.clearRecent')}</span>
+          </button>
+        {:else if block.item.kind === 'profile'}
+          {@const p = block.item.profile}
           <button
+            id="picker-option-{block.navIndex}"
             type="button"
-            class="picker-row" class:active={isHovered(item)}
-            onclick={() => chooseRecord(item)}
+            role="option"
+            aria-selected={hover === block.navIndex}
+            data-picker-nav={block.navIndex}
+            class="picker-row"
+            class:active={hover === block.navIndex}
+            onclick={() => chooseRecord(block.item)}
+            onmouseenter={() => { hover = block.navIndex; }}
           >
             <ProfileIcon icon={p.icon} name={p.name} size={13} />
             <span class="picker-label">{p.name}</span>
@@ -226,70 +303,54 @@
               <span class="picker-pill">{tag}</span>
             {/each}
             <span class="picker-sub">{profileEndpointLabel(p)}</span>
-            {#if isHovered(item)}
+            {#if hover === block.navIndex}
               <span class="picker-kbd">ENTER <ArrowRight size={10} /></span>
             {/if}
           </button>
-        {/each}
-        <button type="button" class="picker-row text-[var(--color-fg-muted)]" onclick={clearRecent}>
-          <Eraser size={13} />
-          <span class="picker-label">{i18n.t('picker.clearRecent')}</span>
-        </button>
-      {/if}
-
-      {#each groupedProfiles as [groupName, ps] (groupName || '__ungrouped__')}
-        <div class="picker-cat">{groupName} · {ps.length}</div>
-        {#each ps as p (p.id)}
-          {@const item = { kind: 'profile' as const, profile: p }}
+        {:else if block.item.kind === 'shell'}
+          {@const s = block.item.shell}
           <button
+            id="picker-option-{block.navIndex}"
             type="button"
-            class="picker-row" class:active={isHovered(item)}
-            onclick={() => chooseRecord(item)}
-          >
-            <ProfileIcon icon={p.icon} name={p.name} size={13} />
-            <span class="picker-label">{p.name}</span>
-            {#if p.favorite}<span class="picker-pill">{i18n.t('picker.favorite')}</span>{/if}
-            {#each (p.tags ?? []).slice(0, 2) as tag (tag)}
-              <span class="picker-pill">{tag}</span>
-            {/each}
-            <span class="picker-sub">{profileEndpointLabel(p)}</span>
-          </button>
-        {/each}
-      {/each}
-
-      {#if visibleShells.length > 0}
-        <div class="picker-cat">{i18n.t('picker.builtInShells')}</div>
-        {#each visibleShells as s (s.id)}
-          {@const item = { kind: 'shell' as const, shell: s }}
-          <button
-            type="button"
-            class="picker-row" class:active={isHovered(item)}
-            onclick={() => chooseRecord(item)}
+            role="option"
+            aria-selected={hover === block.navIndex}
+            data-picker-nav={block.navIndex}
+            class="picker-row"
+            class:active={hover === block.navIndex}
+            onclick={() => chooseRecord(block.item)}
+            onmouseenter={() => { hover = block.navIndex; }}
           >
             <TerminalIcon size={13} />
             <span class="picker-label">{s.label}</span>
             <span class="picker-sub">{s.command}</span>
+            {#if hover === block.navIndex}
+              <span class="picker-kbd">ENTER <ArrowRight size={10} /></span>
+            {/if}
           </button>
-        {/each}
-      {/if}
-
-      {#if visibleSshConfig.length > 0}
-        <div class="picker-cat">{i18n.t('picker.importedSshConfig')}</div>
-        {#each visibleSshConfig as e (e.alias)}
-          {@const item = { kind: 'ssh-config' as const, entry: e }}
+        {:else if block.item.kind === 'ssh-config'}
+          {@const e = block.item.entry}
           <button
+            id="picker-option-{block.navIndex}"
             type="button"
-            class="picker-row" class:active={isHovered(item)}
-            onclick={() => chooseRecord(item)}
+            role="option"
+            aria-selected={hover === block.navIndex}
+            data-picker-nav={block.navIndex}
+            class="picker-row"
+            class:active={hover === block.navIndex}
+            onclick={() => chooseRecord(block.item)}
+            onmouseenter={() => { hover = block.navIndex; }}
           >
             <Monitor size={13} />
             <span class="picker-label">{e.alias} (.ssh/config)</span>
             <span class="picker-sub">{e.host}</span>
+            {#if hover === block.navIndex}
+              <span class="picker-kbd">ENTER <ArrowRight size={10} /></span>
+            {/if}
           </button>
-        {/each}
-      {/if}
+        {/if}
+      {/each}
 
-      {#if flatList.length === 0 && query.trim()}
+      {#if showAddressRow}
         <button type="button" class="picker-row active" onclick={submitAddress}>
           <Cog size={13} />
           <span class="picker-label">{i18n.t('picker.connectTo', { address: query.trim() })}</span>
@@ -356,6 +417,8 @@
     border-radius: var(--radius-md);
     margin: 1px 6px;
     padding-left: 8px;
+    outline: 1px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+    outline-offset: -1px;
   }
   .picker-row.active .picker-sub { color: var(--color-fg-muted); }
   .picker-label { font-weight: 500; }
