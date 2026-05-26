@@ -47,7 +47,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.9-ui-20260526';
+  const buildId = '2.0.10-ui-20260526';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
