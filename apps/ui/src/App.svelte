@@ -92,6 +92,9 @@
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
   let workspaceOpening = $state(false);
   const WORKSPACE_SESSION_TIMEOUT_MS = 20_000;
+  /** Only the active tab mounts PaneGrid/xterm; other tabs keep backend sessions only. */
+  let mountedTabId = $state<string | null>(null);
+  let tabMountRaf = 0;
   let sidebarVisible = $state(true);
   const SIDEBAR_WIDTH_MIN = 180;
   const SIDEBAR_WIDTH_MAX = 480;
@@ -1476,6 +1479,7 @@
     };
   });
   onDestroy(() => {
+    cancelAnimationFrame(tabMountRaf);
     if (kbdHandler) window.removeEventListener('keydown', kbdHandler, true);
     document.removeEventListener('aerotab:settings-changed', onAppSettingsChanged);
     document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
@@ -1495,6 +1499,18 @@
     void tabs.revision;
     void tabs.activeId;
     schedulePersistOpenTabs();
+  });
+
+  $effect(() => {
+    const nextId = tabs.activeId;
+    cancelAnimationFrame(tabMountRaf);
+    if (!nextId) {
+      mountedTabId = null;
+      return;
+    }
+    tabMountRaf = requestAnimationFrame(() => {
+      if (tabs.activeId === nextId) mountedTabId = nextId;
+    });
   });
 
   // Live-preview bridge: any section that calls `settingsCoord.bumpRev()`
@@ -1586,19 +1602,21 @@
     <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">
       <div class="relative flex-1 min-w-0 min-h-0">
         {#each tabs.tabs as tab (tab.id)}
-          <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
-            <PaneGrid
-              {rpc}
-              {tab}
-              settingsRev={settingsRev}
-              tabVisible={tabs.activeId === tab.id}
-              broadcastEnabled={broadcastOn}
-              broadcastTargetIds={broadcastTargets}
-              onOpenSftp={() => { void openSftpForActivePane(); }}
-              onSplitRight={() => { void splitActive('row'); }}
-              onSplitDown={() => { void splitActive('col'); }}
-            />
-          </div>
+          {#if mountedTabId === tab.id}
+            <div class="absolute inset-0">
+              <PaneGrid
+                {rpc}
+                {tab}
+                settingsRev={settingsRev}
+                tabVisible={true}
+                broadcastEnabled={broadcastOn}
+                broadcastTargetIds={broadcastTargets}
+                onOpenSftp={() => { void openSftpForActivePane(); }}
+                onSplitRight={() => { void splitActive('row'); }}
+                onSplitDown={() => { void splitActive('col'); }}
+              />
+            </div>
+          {/if}
         {/each}
         {#if tabs.tabs.length === 0}
           <div class="absolute inset-0 grid place-items-center text-[var(--color-fg-muted)] text-[12.5px]">

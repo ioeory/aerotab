@@ -35,6 +35,7 @@
   } from '../lib/terminalInputMac';
   import { focusTerminalIfAllowed } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
+  import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
 
   interface Props {
     rpc: RpcClient;
@@ -324,7 +325,7 @@
     return theme;
   }
 
-  async function loadTermSettings() {
+  async function loadTermSettingsFresh() {
     const out = {
       fontFamily: 'JetBrains Mono, Menlo, monospace',
       fontSize: 13,
@@ -428,6 +429,10 @@
     }
     transferDetectionEnabled = out.experimentalTransferDetection;
     return out;
+  }
+
+  async function loadTermSettings() {
+    return getTerminalSettings(() => loadTermSettingsFresh());
   }
 
   function inspectTransferOutput(text: string) {
@@ -658,6 +663,7 @@
     // palette/font reload directly so live-apply works even if the prop
     // chain is somehow stale.
     const settingsListener = () => {
+      invalidateTerminalSettingsCache();
       if (!active || !tabVisible) return;
       void reloadSettingsLive();
     };
