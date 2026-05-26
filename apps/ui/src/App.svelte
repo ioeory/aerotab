@@ -30,6 +30,8 @@
   import { b64encode } from './lib/rpc';
   import { withRpcTimeout } from './lib/rpcTimeout';
   import { closeSessionsInBackground } from './lib/sessionClose';
+  import { notifySessionsClosing } from './lib/sessionLifecycle';
+  import { queueTabClose, queueTabsClose, type TabCloseSink } from './lib/tabCloseQueue';
   import { broadcastTargetIds } from './lib/broadcast';
   import {
     bootstrapSyncEngine,
@@ -205,12 +207,14 @@
   const restoreMap = new Map<string, Restorable>();
   let restoreReady = false; // suppress persistence until first load completes
 
+  let persistOpenTabsTimer: ReturnType<typeof setTimeout> | null = null;
+
   function recordRestore(sessionId: string, r: Restorable) {
     restoreMap.set(sessionId, r);
-    persistOpenTabs();
+    schedulePersistOpenTabs();
   }
 
-  function persistOpenTabs() {
+  function persistOpenTabsNow() {
     if (!restoreReady) return;
     const out = tabs.tabs
       .map((t) => {
@@ -222,6 +226,15 @@
       })
       .filter(Boolean);
     rpc.call('settings.set', { key: 'openTabs', value: out }).catch(() => { /* ignore */ });
+  }
+
+  function schedulePersistOpenTabs() {
+    if (!restoreReady) return;
+    if (persistOpenTabsTimer) clearTimeout(persistOpenTabsTimer);
+    persistOpenTabsTimer = setTimeout(() => {
+      persistOpenTabsTimer = null;
+      persistOpenTabsNow();
+    }, 250);
   }
 
   function restorableLabel(r: Restorable): string {
@@ -454,7 +467,7 @@
         sftpDockOpen = nextSftpOpen;
         sftpDockPinned = nextSftpPinned;
         sftpDockCollapsed = nextSftpCollapsed;
-        persistOpenTabs();
+        schedulePersistOpenTabs();
         status = i18n.t('workspace.opened', { name: workspace.name });
       } else {
         onError(i18n.t('workspace.openFailed', { name: workspace.name }));
@@ -884,6 +897,8 @@
     const sid = tab.activePaneId;
     const r = tabs.removePane(tab.id, sid);
     if (!r) return;
+    notifySessionsClosing([sid]);
+    restoreMap.delete(sid);
     closeSessionsInBackground(rpc, [sid]);
   }
 
@@ -902,22 +917,27 @@
     sftpDockCollapsed = Object.fromEntries(Object.entries(sftpDockCollapsed).filter(([k]) => !drop.has(k)));
   }
 
+  function clearRestoreForSessionIds(sessionIds: Iterable<string>) {
+    for (const id of sessionIds) restoreMap.delete(id);
+  }
+
+  const tabCloseSink: TabCloseSink = {
+    removeTabIds: (tabIds) => {
+      tabs.removeMany(tabIds);
+    },
+    clearSftpTabIds: clearSftpDockForTabIds,
+    clearRestoreSessionIds: clearRestoreForSessionIds,
+    closeSessions: (sessionIds) => {
+      closeSessionsInBackground(rpc, sessionIds);
+    },
+  };
+
   function closeTabSessions(tab: Tab) {
-    const paneIds = tab.panes.map((p) => p.id);
-    tabs.remove(tab.id);
-    clearSftpDockForTabIds([tab.id]);
-    closeSessionsInBackground(rpc, paneIds);
+    queueTabClose(tab, tabCloseSink);
   }
 
   function closeTabsBatch(tabList: Tab[]) {
-    if (tabList.length === 0) return;
-    const sessionIds = tabList.flatMap((t) => t.panes.map((p) => p.id));
-    const tabIds = tabList.map((t) => t.id);
-    for (const tab of tabList) {
-      tabs.remove(tab.id);
-    }
-    clearSftpDockForTabIds(tabIds);
-    closeSessionsInBackground(rpc, sessionIds);
+    queueTabsClose(tabList, tabCloseSink);
   }
 
   function closeOtherTabs(keepId: string) {
@@ -1420,7 +1440,7 @@
       if (restore) {
         restoreMap.delete(detail.oldId);
         restoreMap.set(detail.session.id, restore);
-        persistOpenTabs();
+        schedulePersistOpenTabs();
       }
     };
     document.addEventListener('aerotab:settings-changed', onAppSettingsChanged);
@@ -1473,7 +1493,7 @@
   $effect(() => {
     void tabs.revision;
     void tabs.activeId;
-    persistOpenTabs();
+    schedulePersistOpenTabs();
   });
 
   // Live-preview bridge: any section that calls `settingsCoord.bumpRev()`

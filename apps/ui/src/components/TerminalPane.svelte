@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
+  import { SESSIONS_CLOSING, type SessionsClosingDetail } from '../lib/sessionLifecycle';
+  import { scheduleTerminalTeardown } from '../lib/terminalTeardown';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -79,6 +81,8 @@
   let activeRenderer: 'dom' | 'canvas' | 'webgl' = 'dom';
   let pollHandle: number | null = null;
   let pollIntervalMs = 0;
+  /** Bumped to drop in-flight `session.poll` results when the pane or tab is closing. */
+  let pollEpoch = 0;
   let documentHidden = $state(false);
   const encoder = new TextEncoder();
   const decoder = new TextDecoder('utf-8');
@@ -239,13 +243,20 @@
     }
   }
 
+  function cancelPolling() {
+    pollEpoch += 1;
+    stopPolling();
+  }
+
   async function pollOnce() {
     if (!term) return;
+    const epoch = pollEpoch;
     try {
       const r = await rpc.call<PollResult>('session.poll', {
         id: session.id,
         max_chunks: 64,
       });
+      if (epoch !== pollEpoch || !term) return;
       for (const c of r.chunks) {
         const bytes = b64decode(c);
         const text = decoder.decode(bytes);
@@ -739,7 +750,16 @@
     await configureTransferFilter(cfg.experimentalTransferDetection);
     syncPolling();
 
-    cleanupHost = () => ro.disconnect();
+    const onSessionsClosing = (ev: Event) => {
+      const ids = (ev as CustomEvent<SessionsClosingDetail>).detail?.sessionIds;
+      if (ids?.includes(session.id)) cancelPolling();
+    };
+    document.addEventListener(SESSIONS_CLOSING, onSessionsClosing);
+
+    cleanupHost = () => {
+      ro.disconnect();
+      document.removeEventListener(SESSIONS_CLOSING, onSessionsClosing);
+    };
   });
 
   let cleanupHost: (() => void) | null = null;
@@ -811,20 +831,30 @@
   });
 
   onDestroy(() => {
+    const termToDispose = term;
+    const searchToDispose = search;
+    const rendererToDispose = rendererAddon;
+    const filterToStop = transferFilter;
     cleanupHost?.();
     cleanupHost = null;
     cleanupSearchListener?.();
     cleanupSearchListener = null;
     macTextareaGuard?.();
     macTextareaGuard = null;
-    stopPolling();
+    cancelPolling();
     clearTransferNotice();
-    if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
     transferFilter = null;
-    search?.dispose();
     search = null;
-    term?.dispose();
     term = null;
+    rendererAddon = null;
+    scheduleTerminalTeardown({
+      term: termToDispose,
+      search: searchToDispose,
+      rendererAddon: rendererToDispose,
+      beforeDispose: () => {
+        if (filterToStop?.isTransferringFiles()) filterToStop.stopTransferringFiles();
+      },
+    });
   });
 
   // --- search ---

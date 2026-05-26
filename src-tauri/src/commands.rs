@@ -198,17 +198,18 @@ pub enum SessionChannel {
 
 pub struct LocalPty {
     pub channel: PtyChannel,
-    pub rx: Mutex<mpsc::Receiver<Vec<u8>>>,
+    /// `Arc` so `session.poll` can recv without holding the global `channels` lock (tab close stays fast).
+    pub rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
 
 pub struct SshSessionEntry {
     pub shell: Arc<SshShell>,
-    pub rx: Mutex<mpsc::Receiver<Vec<u8>>>,
+    pub rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
 
 pub struct SerialSessionEntry {
     pub channel: SerialChannel,
-    pub rx: Mutex<mpsc::Receiver<Vec<u8>>>,
+    pub rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
 
 impl AppState {
@@ -286,7 +287,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Local(LocalPty {
                         channel,
-                        rx: Mutex::new(rx),
+                        rx: Arc::new(Mutex::new(rx)),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -331,7 +332,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Ssh(SshSessionEntry {
                         shell: Arc::new(shell),
-                        rx: Mutex::new(rx),
+                        rx: Arc::new(Mutex::new(rx)),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -389,7 +390,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Ssh(SshSessionEntry {
                         shell: Arc::new(shell),
-                        rx: Mutex::new(rx),
+                        rx: Arc::new(Mutex::new(rx)),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -537,14 +538,16 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let id = SessionId(p.id);
                 let max = p.max_chunks.unwrap_or(16);
-                let chans = st.channels.lock().await;
-                let chan = chans.get(&id).ok_or_else(|| session_not_found(id))?;
-                let rx_mtx = match chan {
-                    SessionChannel::Local(pty) => &pty.rx,
-                    SessionChannel::Ssh(s) => &s.rx,
-                    SessionChannel::Serial(s) => &s.rx,
+                let rx = {
+                    let chans = st.channels.lock().await;
+                    let chan = chans.get(&id).ok_or_else(|| session_not_found(id))?;
+                    match chan {
+                        SessionChannel::Local(pty) => pty.rx.clone(),
+                        SessionChannel::Ssh(s) => s.rx.clone(),
+                        SessionChannel::Serial(s) => s.rx.clone(),
+                    }
                 };
-                let mut rx = rx_mtx.lock().await;
+                let mut rx = rx.lock().await;
                 let mut chunks = Vec::new();
                 for _ in 0..max {
                     match rx.try_recv() {
@@ -569,19 +572,21 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let id = SessionId(p.id);
                 let max = p.max_chunks.unwrap_or(16);
-                let mut chans = st.channels.lock().await;
-                let Some(chan) = chans.get_mut(&id) else {
-                    return Ok(json!({ "chunks": Value::Array(vec![]), "alive": false }));
-                };
-                let (rx_mtx, mut alive) = match chan {
-                    SessionChannel::Local(pty) => {
-                        let alive = matches!(pty.channel.try_wait(), Ok(None));
-                        (&pty.rx, alive)
+                let (rx, mut alive) = {
+                    let mut chans = st.channels.lock().await;
+                    let Some(chan) = chans.get_mut(&id) else {
+                        return Ok(json!({ "chunks": Value::Array(vec![]), "alive": false }));
+                    };
+                    match chan {
+                        SessionChannel::Local(pty) => {
+                            let alive = matches!(pty.channel.try_wait(), Ok(None));
+                            (pty.rx.clone(), alive)
+                        }
+                        SessionChannel::Ssh(s) => (s.rx.clone(), true),
+                        SessionChannel::Serial(s) => (s.rx.clone(), true),
                     }
-                    SessionChannel::Ssh(s) => (&s.rx, true),
-                    SessionChannel::Serial(s) => (&s.rx, true),
                 };
-                let mut rx = rx_mtx.lock().await;
+                let mut rx = rx.lock().await;
                 let mut chunks = Vec::new();
                 use tokio::sync::mpsc::error::TryRecvError;
                 for _ in 0..max {
@@ -635,7 +640,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Serial(SerialSessionEntry {
                         channel,
-                        rx: Mutex::new(rx),
+                        rx: Arc::new(Mutex::new(rx)),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))

@@ -16,6 +16,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
   import { closeSessionsInBackground } from '../lib/sessionClose';
+  import { notifySessionsClosing } from '../lib/sessionLifecycle';
 
   interface Props {
     rpc: RpcClient;
@@ -58,6 +59,7 @@
     ev.stopPropagation();
     const result = tabs.removePane(tab.id, sessionId);
     if (!result) return;
+    notifySessionsClosing([sessionId]);
     closeSessionsInBackground(rpc, [sessionId]);
   }
 

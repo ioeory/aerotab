@@ -380,11 +380,29 @@ class TabStore {
 
   /** Remove a tab entirely. */
   remove(id: string): Tab | undefined {
-    const i = this.tabs.findIndex((tab) => tab.id === id);
-    if (i < 0) return;
-    const [removed] = this.tabs.splice(i, 1);
-    if (this.activeId === id) {
-      const next = this.tabs[Math.min(i, this.tabs.length - 1)];
+    return this.removeMany([id])[0];
+  }
+
+  /** Remove several tabs with a single reactive bump. */
+  removeMany(ids: string[]): Tab[] {
+    const drop = new Set(ids);
+    if (drop.size === 0) return [];
+    const removed: Tab[] = [];
+    const kept: Tab[] = [];
+    let firstRemovedIndex = -1;
+    for (let i = 0; i < this.tabs.length; i++) {
+      const tab = this.tabs[i]!;
+      if (drop.has(tab.id)) {
+        removed.push(tab);
+        if (firstRemovedIndex < 0) firstRemovedIndex = i;
+      } else {
+        kept.push(tab);
+      }
+    }
+    if (removed.length === 0) return [];
+    this.tabs = kept;
+    if (this.activeId && drop.has(this.activeId)) {
+      const next = kept[Math.min(firstRemovedIndex, kept.length - 1)];
       this.activeId = next?.id ?? null;
     }
     this.bump();

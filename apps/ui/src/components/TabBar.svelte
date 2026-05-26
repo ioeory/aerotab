@@ -63,15 +63,8 @@
     if (ws.confirmCloseWithMultipleTabs !== false && tab.panes.length > 1) {
       if (!(await appConfirm(i18n.t('tabbar.closeMultiPaneConfirm', { count: tab.panes.length })))) return;
     }
-    if (onCloseTab) {
-      onCloseTab(tab);
-      return;
-    }
-    const paneIds = tab.panes.map((p) => p.id);
-    tabs.remove(tab.id);
-    for (const id of paneIds) {
-      void rpc.call('session.close', { id }).catch((e) => { console.warn(e); });
-    }
+    if (!tabs.tabs.some((t) => t.id === tab.id)) return;
+    onCloseTab?.(tab);
   }
 
   function showTabMenu(tab: Tab, index: number, ev: MouseEvent) {
