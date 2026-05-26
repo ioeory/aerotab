@@ -5,12 +5,14 @@
   import { tabs, type PaneDropSide, type PaneNode, type Tab } from '../lib/tabs.svelte';
   import { dispatchFitAllPanes, dispatchFocusPane } from '../lib/focusPane';
   import {
-    beginPaneDrag,
     endPaneDrag,
-    getActivePaneDrag,
+    getPaneDragHit,
     isPaneDragActive,
-    readPaneDragData,
+    startPointerPaneDrag,
+    subscribePaneDragHit,
+    type PaneDropHit,
   } from '../lib/paneDrag';
+  import { onMount } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
 
@@ -40,8 +42,13 @@
     tabVisible = true,
   }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
+  let dragHandle: HTMLDivElement | null = $state(null);
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
-  let dropSide = $state<PaneDropSide | null>(null);
+  let dragHit = $state<PaneDropHit | null>(null);
+
+  onMount(() => subscribePaneDragHit(() => {
+    dragHit = getPaneDragHit();
+  }));
 
   const maximized = $derived(tab.maximizedPaneId ?? null);
   const hiddenByMaximize = $derived(!!maximized && !tabs.nodeContains(node, maximized));
@@ -65,23 +72,13 @@
     dispatchFitAllPanes(tab.panes.map((p) => p.id));
   }
 
-  function paneDragSource(ev: DragEvent) {
-    return readPaneDragData(ev) ?? getActivePaneDrag();
-  }
-
-  function dropSideFromEvent(el: HTMLElement, ev: DragEvent): PaneDropSide {
-    const rect = el.getBoundingClientRect();
-    const x = (ev.clientX - rect.left) / Math.max(1, rect.width);
-    const y = (ev.clientY - rect.top) / Math.max(1, rect.height);
-    const distances = [
-      ['left', x],
-      ['right', 1 - x],
-      ['up', y],
-      ['down', 1 - y],
-    ] as Array<[PaneDropSide, number]>;
-    distances.sort((a, b) => a[1] - b[1]);
-    return distances[0]?.[0] ?? 'right';
-  }
+  const dropSide = $derived(
+    node.type === 'leaf'
+      && dragHit?.kind === 'pane'
+      && dragHit.paneId === node.pane.id
+      ? dragHit.side
+      : null,
+  );
 
   function dropBandStyle(side: PaneDropSide): string {
     switch (side) {
@@ -90,42 +87,6 @@
       case 'up': return 'left: 0; top: 0; width: 100%; height: 34%;';
       case 'down': return 'left: 0; bottom: 0; width: 100%; height: 34%;';
     }
-  }
-
-  function onPaneDragStart(sessionId: string, ev: DragEvent) {
-    ev.stopPropagation();
-    beginPaneDrag(tab.id, sessionId, ev.dataTransfer);
-  }
-
-  function onPaneDragOver(sessionId: string, ev: DragEvent) {
-    if (maximized) return;
-    if (!isPaneDragActive()) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
-    const payload = getActivePaneDrag();
-    if (!payload || payload.paneId === sessionId) {
-      dropSide = null;
-      return;
-    }
-    dropSide = dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
-  }
-
-  function onPaneDragLeave(ev: DragEvent) {
-    const next = ev.relatedTarget;
-    if (next instanceof Node && (ev.currentTarget as HTMLElement).contains(next)) return;
-    dropSide = null;
-  }
-
-  function onPaneDrop(sessionId: string, ev: DragEvent) {
-    const payload = paneDragSource(ev);
-    if (!payload || payload.paneId === sessionId) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    const side = dropSide ?? dropSideFromEvent(ev.currentTarget as HTMLElement, ev);
-    dropSide = null;
-    endPaneDrag();
-    tabs.movePaneBetweenTabs(payload.tabId, payload.paneId, tab.id, sessionId, side);
   }
 
   function onResize(idx: number, ev: PointerEvent) {
@@ -171,25 +132,23 @@
     tabindex="-1"
     style="display: {hiddenByMaximize ? 'none' : 'block'};"
     class="relative h-full w-full min-w-0 min-h-0 bg-[var(--color-bg)] {focused ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
+    data-pane-drop-tab={tab.id}
+    data-pane-drop-pane={node.pane.id}
     onpointerdown={() => focusPane(node.pane.id)}
-    ondragover={(e) => onPaneDragOver(node.pane.id, e)}
-    ondragleave={onPaneDragLeave}
-    ondrop={(e) => onPaneDrop(node.pane.id, e)}
   >
     {#if tab.panes.length > 1}
       <div
-        class="absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[10px]
+        bind:this={dragHandle}
+        class="pane-drag-handle absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[10px]
                bg-[var(--color-panel)]/80 backdrop-blur border border-[var(--color-border-soft)]
-               cursor-grab active:cursor-grabbing select-none"
-        draggable="true"
+               cursor-grab active:cursor-grabbing select-none touch-none"
         title={i18n.t('pane.movePane')}
         aria-label={i18n.t('pane.movePane')}
-        ondragstart={(e) => onPaneDragStart(node.pane.id, e)}
-        ondragend={() => {
-          endPaneDrag();
-          dropSide = null;
+        onpointerdown={(e) => {
+          e.stopPropagation();
+          if (dragHandle) startPointerPaneDrag(tab.id, node.pane.id, e, dragHandle);
         }}
-        onpointerdown={(e) => e.stopPropagation()}
+        onlostpointercapture={() => endPaneDrag()}
       >
         <GripVertical size={11} />
         <span>{tabs.paneIndex(tab, node.pane.id) + 1}</span>

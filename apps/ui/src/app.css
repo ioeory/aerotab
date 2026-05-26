@@ -77,6 +77,15 @@ body[data-modal-overlay] .terminal-surface {
   pointer-events: none !important;
 }
 
+/* Pane reorder via pointer drag — keep wheel/click off xterm while dragging (WebView2). */
+body[data-pane-drag-active] {
+  cursor: grabbing;
+  user-select: none;
+}
+body[data-pane-drag-active] .terminal-surface {
+  pointer-events: none !important;
+}
+
 /* When the Window section sets opacity below 100% it adds
  * `data-translucent="true"` to <body>. The chrome panels (sidebar/tabbar/
  * terminal area) all use opaque `bg-[var(--color-*)]` tailwind classes that

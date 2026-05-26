@@ -2,8 +2,15 @@
   import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
-  import { endPaneDrag, isPaneDragActive, readPaneDragData } from '../lib/paneDrag';
+  import {
+    endPaneDrag,
+    getPaneDragHit,
+    isPaneDragActive,
+    readPaneDragData,
+    subscribePaneDragHit,
+  } from '../lib/paneDrag';
   import { getWindowSettings } from '../lib/windowSettings';
+  import { onMount } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { appConfirm } from '../lib/confirm.svelte';
   import type { RpcClient } from '../lib/rpc';
@@ -36,6 +43,11 @@
   let menuTab = $state<Tab | null>(null);
   let menuTabIndex = $state(-1);
   let paneDropTabId = $state<string | null>(null);
+
+  onMount(() => subscribePaneDragHit(() => {
+    const hit = getPaneDragHit();
+    paneDropTabId = hit?.kind === 'tab' ? hit.tabId : null;
+  }));
 
   function iconFor(kind: string) {
     if (kind === 'Ssh') return Server;
@@ -137,6 +149,7 @@
       role="tab"
       aria-selected={isActive}
       tabindex="0"
+      data-tab-drop={tab.id}
       draggable="true"
       ondragstart={(e) => onDragStart(i, e)}
       ondragenter={(e) => onTabDragOver(tab.id, i, e)}

@@ -25,6 +25,7 @@
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
+  import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
   import { b64encode } from './lib/rpc';
   import { broadcastTargetIds } from './lib/broadcast';
   import {
@@ -40,7 +41,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.8-ui-20260524';
+  const buildId = '0.2.9-ui-20260526';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1328,8 +1329,19 @@
     };
     document.addEventListener('aerotab:settings-changed', onAppSettingsChanged);
     document.addEventListener('aerotab:session-replaced', onSessionReplaced);
+    installPaneDragGlobalHandlers();
+    const unsubPaneDrop = subscribePanePointerDrop(({ source, hit }) => {
+      if (hit.kind === 'pane') {
+        tabs.movePaneBetweenTabs(source.tabId, source.paneId, hit.tabId, hit.paneId, hit.side);
+      } else {
+        tabs.mergePaneIntoTab(source.tabId, source.paneId, hit.tabId);
+        tabs.activate(hit.tabId);
+      }
+      requestAnimationFrame(() => dispatchFocusPane(source.paneId));
+    });
     return () => {
       document.removeEventListener('aerotab:session-replaced', onSessionReplaced);
+      unsubPaneDrop();
     };
   });
   onDestroy(() => {
