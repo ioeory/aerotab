@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { ChevronDown, ChevronRight, Star } from '@lucide/svelte';
-  import type { StoredProfile } from '../lib/types';
+  import { ChevronDown, ChevronRight, ShieldAlert, ShieldCheck, ShieldX, Star } from '@lucide/svelte';
+  import type { ProfileHealthResult, StoredProfile } from '../lib/types';
   import type { ProfileTreeFolder } from '../lib/profileTree';
   import { profileEndpointLabel } from '../lib/profileMeta';
   import { i18n } from '../lib/i18n.svelte';
@@ -14,6 +14,7 @@
     forceExpanded: Set<string>;
     focusedProfileId?: string | null;
     selectedProfileIds?: Set<string>;
+    profileHealth?: Record<string, ProfileHealthResult>;
     showSelection?: boolean;
     onToggleFolder: (path: string) => void;
     onOpenProfile: (p: StoredProfile) => void;
@@ -34,6 +35,7 @@
     forceExpanded,
     focusedProfileId = null,
     selectedProfileIds = new Set(),
+    profileHealth = {},
     showSelection = false,
     onToggleFolder,
     onOpenProfile,
@@ -48,6 +50,18 @@
   function isExpanded(path: string): boolean {
     if (forceExpanded.has(path)) return true;
     return !collapsed.has(path);
+  }
+
+  function healthLabel(status: ProfileHealthResult['status']): string {
+    if (status === 'ok') return i18n.t('profiles.healthOk');
+    if (status === 'warning') return i18n.t('profiles.healthWarning');
+    return i18n.t('profiles.healthError');
+  }
+
+  function healthTitle(result: ProfileHealthResult): string {
+    const issues = result.checks.filter((c) => c.status !== 'ok');
+    const visible = issues.length > 0 ? issues : result.checks.slice(0, 1);
+    return visible.map((c) => `${c.name}: ${c.message}`).join('\n') || i18n.t('profiles.healthNoIssues');
   }
 </script>
 
@@ -93,6 +107,7 @@
           {forceExpanded}
           {focusedProfileId}
           {selectedProfileIds}
+          {profileHealth}
           {showSelection}
           {onToggleFolder}
           {onOpenProfile}
@@ -115,6 +130,7 @@
 {/if}
 
 {#each folder.profiles as p (p.id)}
+  {@const h = profileHealth[p.id]}
   <div
     class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer
            {focusedProfileId === p.id ? 'profile-row--focused' : ''}
@@ -150,6 +166,17 @@
     <div class="flex-1 min-w-0 text-left py-1.5 text-[12px]">
       <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
         <span class="truncate">{p.name}</span>
+        {#if h}
+          <span class="health-chip {h.status}" title={healthTitle(h)} aria-label={healthLabel(h.status)}>
+            {#if h.status === 'ok'}
+              <ShieldCheck size={10} />
+            {:else if h.status === 'warning'}
+              <ShieldAlert size={10} />
+            {:else}
+              <ShieldX size={10} />
+            {/if}
+          </span>
+        {/if}
         {#if p.favorite}
           <Star size={10} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
         {/if}
@@ -172,6 +199,15 @@
 {/each}
 
 <style>
+  .health-chip {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .health-chip.ok { color: var(--color-success); }
+  .health-chip.warning { color: var(--color-warning); }
+  .health-chip.error { color: var(--color-danger); }
+
   .profile-folder,
   .profile-row {
     padding-left: calc(var(--depth, 0) * 10px);

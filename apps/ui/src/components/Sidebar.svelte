@@ -4,7 +4,8 @@
   } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
-  import { tabs } from '../lib/tabs.svelte';
+  import { tabs, type SplitDir } from '../lib/tabs.svelte';
+  import { healthIssueDetailText, summarizeHealthResults } from '../lib/profileHealthUi';
   import { focusProfileInTabs } from '../lib/focusProfileSession';
   import { matchesProfileQuery } from '../lib/profileMeta';
   import type { ProfileModalOpenOptions } from './ProfileModal.svelte';
@@ -178,6 +179,10 @@
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectionAnchorId = $state<string | null>(null);
   let bulkBusy = $state(false);
+  let healthRunning = $state(false);
+  let profileHealth = $state<Record<string, ProfileHealthResult>>({});
+
+  const BULK_OPEN_CONFIRM_THRESHOLD = 4;
 
   const selectedProfiles = $derived(profilesFromSelection(filteredProfiles, selectedProfileIds));
   const hasProfileSelection = $derived(selectedProfileIds.size > 0);
@@ -234,20 +239,54 @@
   }
 
   async function bulkConnectSelected() {
-    const list = selectedProfiles.filter((p) => p.kind === 'ssh');
-    if (list.length === 0) return;
+    const sshList = selectedProfiles.filter((p) => p.kind === 'ssh');
+    const remoteList = selectedProfiles.filter((p) => p.kind === 'rdp' || p.kind === 'vnc');
+    if (sshList.length === 0 && remoteList.length === 0) {
+      onError(i18n.t('profiles.bulkConnectNone'));
+      return;
+    }
+    if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD) {
+      const ok = await appConfirm(
+        i18n.t('profiles.bulkOpenManyConfirm', { count: sshList.length }),
+        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
+      );
+      if (!ok) return;
+    }
     bulkBusy = true;
-    let opened = 0;
     try {
-      for (const p of list) {
+      for (const p of remoteList) {
         try {
-          await openProfile(p, 'new-tab');
-          opened += 1;
-        } catch {
-          /* onError already called in openProfile */
+          await rpc.call('remote.openProfile', { profile_id: p.id });
+        } catch (e) {
+          onError(`remote: ${(e as Error).message}`);
         }
       }
-      void opened;
+      if (sshList.length === 0) return;
+
+      let tabId = tabs.activeId ?? undefined;
+      let tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
+
+      for (let i = 0; i < sshList.length; i++) {
+        const p = sshList[i]!;
+        const meta = await rpc.call<SessionMeta>('session.openSsh', {
+          title: p.name,
+          rows: 24,
+          cols: 80,
+          profile: p.ssh,
+        });
+        const pane = { ...meta, profileId: p.id, sshProfile: p.ssh };
+        if (i === 0 && !tab) {
+          tabs.add(pane);
+          tabId = tabs.activeId ?? undefined;
+          tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
+        } else if (tabId) {
+          const direction: SplitDir = i % 2 === 0 ? 'row' : 'col';
+          tabs.addPane(tabId, pane, direction);
+        }
+      }
+      if (tabId) tabs.activate(tabId);
+    } catch (e) {
+      onError(`ssh: ${(e as Error).message}`);
     } finally {
       bulkBusy = false;
     }
@@ -255,25 +294,28 @@
 
   async function bulkHealthCheckSelected() {
     const ids = selectedProfiles.map((p) => p.id);
-    if (ids.length === 0 || bulkBusy) return;
+    if (ids.length === 0 || bulkBusy || healthRunning) return;
+    healthRunning = true;
     bulkBusy = true;
     try {
       const results = await withRpcTimeout(
         rpc.call<ProfileHealthResult[]>('profile.healthCheck', { ids, connect: true }),
-        60_000,
+        120_000,
         'profile.healthCheck',
       );
-      const failed = results.filter((r) => r.status === 'error').length;
-      if (failed > 0) {
-        onError(i18n.t('profiles.healthSummary', {
-          ok: results.filter((r) => r.status === 'ok').length,
-          warning: results.filter((r) => r.status === 'warning').length,
-          error: failed,
-        }));
-      }
+      profileHealth = {
+        ...profileHealth,
+        ...Object.fromEntries(results.map((r) => [r.id, r])),
+      };
+      const summary = summarizeHealthResults(results);
+      let message = i18n.t('profiles.healthSummary', summary);
+      const details = healthIssueDetailText(results);
+      if (details) message += `\n\n${details}`;
+      await appConfirm(message, { confirmLabel: i18n.t('common.ok') });
     } catch (e) {
       onError(`profile health: ${(e as Error).message}`);
     } finally {
+      healthRunning = false;
       bulkBusy = false;
     }
   }
@@ -558,9 +600,9 @@
                 onclick={() => { void bulkConnectSelected(); }}>
           {i18n.t('profiles.bulkConnect')}
         </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy || healthRunning}
                 onclick={() => { void bulkHealthCheckSelected(); }}>
-          {i18n.t('profiles.bulkHealthCheck')}
+          {healthRunning ? i18n.t('profiles.healthChecking') : i18n.t('profiles.bulkHealthCheck')}
         </button>
         <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
                 onclick={() => { void bulkMoveSelected(); }}>
@@ -585,6 +627,7 @@
         forceExpanded={forceExpandedPaths}
         focusedProfileId={focusedProfileId}
         selectedProfileIds={selectedProfileIds}
+        profileHealth={profileHealth}
         showSelection={hasProfileSelection}
         onToggleFolder={toggleFolder}
         onOpenProfile={(p) => openProfile(p)}
