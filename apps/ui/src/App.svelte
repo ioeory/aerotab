@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import Sidebar from './components/Sidebar.svelte';
   import TabBar from './components/TabBar.svelte';
   import PaneGrid from './components/PaneGrid.svelte';
@@ -28,6 +28,7 @@
   import { isModalOverlayActive } from './lib/modalFocus';
   import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
   import { b64encode } from './lib/rpc';
+  import { withRpcTimeout } from './lib/rpcTimeout';
   import { broadcastTargetIds } from './lib/broadcast';
   import {
     bootstrapSyncEngine,
@@ -86,6 +87,8 @@
   let pickerOpen = $state(false);
   let savedProfiles = $state<StoredProfile[]>([]);
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
+  let workspaceOpening = $state(false);
+  const WORKSPACE_SESSION_TIMEOUT_MS = 20_000;
   let sidebarVisible = $state(true);
   const SIDEBAR_WIDTH_MIN = 180;
   const SIDEBAR_WIDTH_MAX = 480;
@@ -219,6 +222,13 @@
     rpc.call('settings.set', { key: 'openTabs', value: out }).catch(() => { /* ignore */ });
   }
 
+  function restorableLabel(r: Restorable): string {
+    if (r.kind === 'ssh-profile') return `profile:${r.id}`;
+    if (r.kind === 'ssh') return r.title;
+    if (r.kind === 'shell') return r.label;
+    return r.kind;
+  }
+
   async function openRestorableSession(r: Restorable): Promise<OpenedRestorable> {
     if (r.kind === 'local') {
       const meta = await rpc.call<{ id: string; kind: string; title: string }>(
@@ -249,6 +259,14 @@
       session: { id: meta.id, kind: meta.kind, title: meta.title, sshProfile: r.profile as unknown as SshProfileSpec },
       restore: r,
     };
+  }
+
+  async function openRestorableSessionTimed(r: Restorable): Promise<OpenedRestorable> {
+    return withRpcTimeout(
+      openRestorableSession(r),
+      WORKSPACE_SESSION_TIMEOUT_MS,
+      restorableLabel(r),
+    );
   }
 
   async function replayRestorable(r: Restorable) {
@@ -384,39 +402,57 @@
   }
 
   async function openSessionWorkspace(workspace: SessionWorkspace) {
+    if (workspaceOpening) return;
+    workspaceOpening = true;
+    status = i18n.t('workspace.opening', { name: workspace.name });
     let openedTabs = 0;
-    for (const tab of workspace.tabs) {
-      const opened: Array<OpenedRestorable | null> = [];
-      for (const restore of tab.panes) {
-        try {
-          opened.push(await openRestorableSession(restore));
-        } catch (e) {
-          opened.push(null);
-          onError(`workspace: ${(e as Error).message}`);
+    const nextSftpOpen = { ...sftpDockOpen };
+    const nextSftpPinned = { ...sftpDockPinned };
+    const nextSftpCollapsed = { ...sftpDockCollapsed };
+    try {
+      for (const tab of workspace.tabs) {
+        const opened = await Promise.all(
+          tab.panes.map(async (restore) => {
+            try {
+              return await openRestorableSessionTimed(restore);
+            } catch (e) {
+              onError(`workspace ${restorableLabel(restore)}: ${(e as Error).message}`);
+              return null;
+            }
+          }),
+        );
+        const layout = instantiateWorkspaceNode(tab.layout, opened);
+        if (!layout) continue;
+        const active = opened[tab.activePaneIndex]?.session.id;
+        const maximized = typeof tab.maximizedPaneIndex === 'number'
+          ? opened[tab.maximizedPaneIndex]?.session.id ?? null
+          : null;
+        const created = tabs.addLayout(tab.title, layout, active, maximized);
+        for (const item of opened) {
+          if (item) restoreMap.set(item.session.id, item.restore);
         }
-      }
-      const layout = instantiateWorkspaceNode(tab.layout, opened);
-      if (!layout) continue;
-      const active = opened[tab.activePaneIndex]?.session.id;
-      const maximized = typeof tab.maximizedPaneIndex === 'number'
-        ? opened[tab.maximizedPaneIndex]?.session.id ?? null
-        : null;
-      const created = tabs.addLayout(tab.title, layout, active, maximized);
-      for (const item of opened) {
-        if (item) restoreMap.set(item.session.id, item.restore);
-      }
-      if (tab.sftpDock) {
-        sftpDockOpen = { ...sftpDockOpen, [created.id]: true };
-        if (typeof tab.sftpDock === 'object' && tab.sftpDock) {
-          sftpDockPinned = { ...sftpDockPinned, [created.id]: cloneJson(tab.sftpDock) };
+        if (tab.sftpDock) {
+          nextSftpOpen[created.id] = true;
+          if (typeof tab.sftpDock === 'object' && tab.sftpDock) {
+            nextSftpPinned[created.id] = cloneJson(tab.sftpDock);
+          }
+          nextSftpCollapsed[created.id] = !!tab.sftpDockCollapsed;
         }
-        sftpDockCollapsed = { ...sftpDockCollapsed, [created.id]: !!tab.sftpDockCollapsed };
+        openedTabs += 1;
+        await tick();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }
-      openedTabs += 1;
-    }
-    if (openedTabs > 0) {
-      persistOpenTabs();
-      status = i18n.t('workspace.opened', { name: workspace.name });
+      if (openedTabs > 0) {
+        sftpDockOpen = nextSftpOpen;
+        sftpDockPinned = nextSftpPinned;
+        sftpDockCollapsed = nextSftpCollapsed;
+        persistOpenTabs();
+        status = i18n.t('workspace.opened', { name: workspace.name });
+      } else {
+        onError(i18n.t('workspace.openFailed', { name: workspace.name }));
+      }
+    } finally {
+      workspaceOpening = false;
     }
   }
 
@@ -901,14 +937,17 @@
       return;
     }
     const opened: Array<OpenedRestorable | null> = [];
-    for (const restore of panes) {
-      try {
-        opened.push(await openRestorableSession(restore));
-      } catch (e) {
-        opened.push(null);
-        onError(`duplicate: ${(e as Error).message}`);
-      }
-    }
+    const dupOpened = await Promise.all(
+      panes.map(async (restore) => {
+        try {
+          return await openRestorableSessionTimed(restore);
+        } catch (e) {
+          onError(`duplicate ${restorableLabel(restore)}: ${(e as Error).message}`);
+          return null;
+        }
+      }),
+    );
+    opened.push(...dupOpened);
     const layout = instantiateWorkspaceNode(layoutSnap, opened);
     if (!layout) return;
     const activeIdx = paneIndex.get(source.activePaneId) ?? 0;
