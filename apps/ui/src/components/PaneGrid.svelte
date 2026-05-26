@@ -31,6 +31,7 @@
   }: Props = $props();
 
   $effect(() => {
+    if (!tabVisible) return;
     void tab.maximizedPaneId;
     void tab.activePaneId;
     const ids = tab.panes.map((p) => p.id);

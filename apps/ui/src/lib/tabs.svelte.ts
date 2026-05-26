@@ -285,7 +285,7 @@ class TabStore {
   /** Open a new tab containing a single pane. */
   add(session: SessionMeta): Tab {
     const tab: Tab = {
-      id: session.id,
+      id: uuidv4(),
       layout: leaf(session),
       panes: [session],
       activePaneId: session.id,
@@ -312,7 +312,7 @@ class TabStore {
     const first = panes[0];
     if (!first) throw new Error('cannot add empty tab layout');
     const tab: Tab = {
-      id: first.id,
+      id: uuidv4(),
       layout,
       panes,
       activePaneId: activePaneId && panes.some((pane) => pane.id === activePaneId) ? activePaneId : first.id,

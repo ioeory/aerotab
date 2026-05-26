@@ -1,6 +1,31 @@
 import type { Terminal } from '@xterm/xterm';
 
-/** Defer heavy xterm teardown so burst tab closes do not block the UI thread. */
+const teardownQueue: Array<() => void> = [];
+let teardownRaf: number | null = null;
+
+function drainTeardownQueue(): void {
+  teardownRaf = null;
+  const run = teardownQueue.shift();
+  if (run) {
+    try {
+      run();
+    } catch {
+      /* ignore */
+    }
+  }
+  if (teardownQueue.length > 0) {
+    teardownRaf = requestAnimationFrame(drainTeardownQueue);
+  }
+}
+
+function enqueueTeardown(run: () => void): void {
+  teardownQueue.push(run);
+  if (teardownRaf == null) {
+    teardownRaf = requestAnimationFrame(drainTeardownQueue);
+  }
+}
+
+/** Defer xterm teardown; at most one dispose per frame to avoid UI freezes on tab close. */
 export function scheduleTerminalTeardown(parts: {
   term: Terminal | null;
   search: { dispose: () => void } | null;
@@ -8,7 +33,7 @@ export function scheduleTerminalTeardown(parts: {
   beforeDispose?: () => void;
 }): void {
   const { term, search, rendererAddon, beforeDispose } = parts;
-  const run = () => {
+  enqueueTeardown(() => {
     try {
       beforeDispose?.();
     } catch {
@@ -29,10 +54,5 @@ export function scheduleTerminalTeardown(parts: {
     } catch {
       /* ignore */
     }
-  };
-  if (typeof requestIdleCallback === 'function') {
-    requestIdleCallback(() => run(), { timeout: 500 });
-  } else {
-    setTimeout(run, 0);
-  }
+  });
 }

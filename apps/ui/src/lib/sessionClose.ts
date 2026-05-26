@@ -2,9 +2,9 @@ import type { RpcClient } from './rpc';
 import { withRpcTimeout } from './rpcTimeout';
 
 /** Per-session close RPC timeout (tab chrome must not block on slow SSH teardown). */
-const SESSION_CLOSE_TIMEOUT_MS = 8_000;
-/** Avoid flooding the core with dozens of simultaneous SSH teardowns. */
-const MAX_CONCURRENT_CLOSES = 4;
+const SESSION_CLOSE_TIMEOUT_MS = 5_000;
+/** Avoid flooding the core with dozens of simultaneous teardowns (local PTY + SSH). */
+const MAX_CONCURRENT_CLOSES = 2;
 
 const closeQueue: string[] = [];
 const queuedIds = new Set<string>();

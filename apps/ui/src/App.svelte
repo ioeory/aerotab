@@ -933,6 +933,7 @@
   };
 
   function closeTabSessions(tab: Tab) {
+    if (!tabs.tabs.some((t) => t.id === tab.id)) return;
     queueTabClose(tab, tabCloseSink);
   }
 
