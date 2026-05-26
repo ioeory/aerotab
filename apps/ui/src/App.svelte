@@ -25,6 +25,7 @@
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
+  import { isModalOverlayActive } from './lib/modalFocus';
   import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
   import { b64encode } from './lib/rpc';
   import { broadcastTargetIds } from './lib/broadcast';
@@ -1308,7 +1309,7 @@
     })();
 
     kbdHandler = (e: KeyboardEvent) => {
-      if (document.querySelector('[data-aerotab-batch-command]')) return;
+      if (isModalOverlayActive()) return;
       if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'r' || e.key === 'R'))) {
         e.preventDefault();
         return;
@@ -1392,7 +1393,11 @@
   // Block wheel/pointer from reaching xterm while a full-screen modal is open.
   $effect(() => {
     const overlayOpen =
-      settingsOpen || paletteOpen || pickerOpen || batchCommandOpen;
+      settingsOpen
+      || paletteOpen
+      || pickerOpen
+      || batchCommandOpen
+      || sftpWindows.length > 0;
     if (overlayOpen) {
       document.body.dataset.modalOverlay = 'true';
       const active = document.activeElement;

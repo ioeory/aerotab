@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
   import { i18n } from '../lib/i18n.svelte';
+  import { scheduleModalFieldFocus } from '../lib/modalFocus';
 
   export interface Action {
     id: string;
@@ -57,13 +58,17 @@
   }
 
   onMount(() => {
-    requestAnimationFrame(() => inputEl?.focus());
+    scheduleModalFieldFocus(() => inputEl?.focus());
   });
 </script>
 
-<div role="dialog" aria-modal="true" aria-label={i18n.t('commandPalette.aria')}
+<div
+  data-aerotab-modal=""
+  role="dialog"
+  aria-modal="true"
+  aria-label={i18n.t('commandPalette.aria')}
   tabindex="-1"
-     class="fixed inset-0 z-[60] bg-black/50 grid place-items-start pt-[12vh] px-4"
+  class="fixed inset-0 z-[60] bg-black/50 grid place-items-start pt-[12vh] px-4"
      onclick={onClose}
      onkeydown={onKey}>
   <div class="panel w-full max-w-[560px] overflow-hidden"

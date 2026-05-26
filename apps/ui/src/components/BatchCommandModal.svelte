@@ -3,6 +3,7 @@
   import { X } from '@lucide/svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { isSshPane } from '../lib/broadcast';
+  import { scheduleModalFieldFocus } from '../lib/modalFocus';
   import type { Tab } from '../lib/tabs.svelte';
 
   export interface BatchPaneOption {
@@ -56,9 +57,13 @@
     if (next.size !== selectedIds.size) selectedIds = next;
   });
 
+  function focusCommandInput() {
+    commandInput?.focus();
+  }
+
   onMount(async () => {
     await tick();
-    commandInput?.focus();
+    scheduleModalFieldFocus(focusCommandInput);
   });
 
   function togglePane(id: string) {
@@ -126,6 +131,7 @@
 </script>
 
 <div
+  data-aerotab-modal=""
   data-aerotab-batch-command=""
   class="fixed inset-0 z-[70] bg-black/55 grid place-items-center p-6"
   role="dialog"

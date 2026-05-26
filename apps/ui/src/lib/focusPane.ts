@@ -1,7 +1,9 @@
 /** Ask the active (or given) terminal pane to focus its xterm instance. */
+import { shouldFocusTerminal } from './modalFocus';
 import { scheduleFitAllPanes, scheduleTerminalFit } from './terminalFit';
 
 export function dispatchFocusPane(sessionId?: string) {
+  if (!shouldFocusTerminal()) return;
   document.dispatchEvent(
     new CustomEvent('aerotab:focus-pane', { detail: { sessionId } }),
   );

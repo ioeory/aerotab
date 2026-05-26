@@ -15,6 +15,7 @@
   import type { RpcClient } from '../lib/rpc';
   import type { StoredProfile } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
+  import { scheduleModalFieldFocus } from '../lib/modalFocus';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
 
@@ -77,7 +78,7 @@
         if (Array.isArray(r.value)) recentIds = r.value.filter((x) => typeof x === 'string') as string[];
       } catch { recentIds = []; }
       await tick();
-      inputEl?.focus();
+      scheduleModalFieldFocus(() => inputEl?.focus());
     })();
   });
 
@@ -189,6 +190,7 @@
 </script>
 
 <div
+  data-aerotab-modal=""
   role="dialog"
   aria-modal="true"
   aria-label={i18n.t('picker.aria')}

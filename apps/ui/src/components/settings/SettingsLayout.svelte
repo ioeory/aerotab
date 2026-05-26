@@ -110,7 +110,7 @@
   }
 </script>
 
-<div class="settings-overlay-root fixed inset-0 z-50">
+<div class="settings-overlay-root fixed inset-0 z-50" data-aerotab-modal="">
   <!-- Full-screen backdrop: grid centering left gaps where wheel reached the terminal. -->
   <button
     type="button"

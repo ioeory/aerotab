@@ -31,6 +31,7 @@
     shouldSuppressMacSpuriousInput,
     trackMacBackspaceKeydown,
   } from '../lib/terminalInputMac';
+  import { focusTerminalIfAllowed } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
 
   interface Props {
@@ -654,7 +655,7 @@
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
       if (detail?.sessionId && detail.sessionId !== session.id) return;
       if (!active) return;
-      requestAnimationFrame(() => term?.focus());
+      requestAnimationFrame(() => focusTerminalIfAllowed(term));
     };
     const fitListener = (ev: Event) => {
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
@@ -769,7 +770,7 @@
     tabs.clearActivity(session.id);
     scheduleTerminalFit(() => {
       safeFit(true);
-      term?.focus();
+      if (!searchOpen) focusTerminalIfAllowed(term);
     });
   });
 
@@ -843,7 +844,7 @@
   function closeSearch() {
     searchOpen = false;
     search?.clearDecorations();
-    requestAnimationFrame(() => term?.focus());
+    requestAnimationFrame(() => focusTerminalIfAllowed(term));
   }
 
   // --- context menu ---

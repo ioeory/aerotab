@@ -1322,6 +1322,7 @@
   class={mode === 'modal'
     ? 'fixed inset-0 bg-black/60 z-50 grid place-items-center p-6'
     : 'h-full w-full min-w-0 bg-[var(--color-panel)]'}
+  data-aerotab-modal={mode === 'modal' ? '' : undefined}
   role={mode === 'modal' ? 'dialog' : 'complementary'}
   aria-modal={mode === 'modal'}
   aria-label={i18n.t('sftp.aria')}
@@ -1755,7 +1756,7 @@
 {/if}
 
 {#if editOpen}
-  <div class="fixed inset-0 z-[60] bg-black/50 grid place-items-center p-6" role="dialog" aria-modal="true">
+  <div class="fixed inset-0 z-[60] bg-black/50 grid place-items-center p-6" role="dialog" aria-modal="true" data-aerotab-modal="">
     <div class="bg-[var(--color-panel)] border border-[var(--color-border)] rounded-lg shadow-2xl w-full max-w-[720px] max-h-[80vh] flex flex-col">
       <header class="flex items-center gap-2 px-4 py-2 border-b border-[var(--color-border-soft)]">
         <span class="font-semibold text-[13px] truncate">{editName}</span>
