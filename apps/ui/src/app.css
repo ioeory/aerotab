@@ -65,6 +65,20 @@ html, body {
 #root { zoom: var(--ui-spaciness); }
 .terminal-surface { zoom: calc(1 / var(--ui-spaciness)); }
 
+/* Keep xterm grid aligned when flex panes grow/shrink or maximize restores. */
+.terminal-host {
+  flex: 1 1 0%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.terminal-host .xterm {
+  height: 100%;
+}
+.terminal-host .xterm-viewport {
+  overflow: hidden;
+}
+
 /* Full-screen modals (settings, palette, …): keep native <select> popups aligned and
  * stop scroll/wheel from reaching xterm under the overlay. */
 .settings-overlay-root {

@@ -1330,6 +1330,16 @@
     document.addEventListener('aerotab:settings-changed', onAppSettingsChanged);
     document.addEventListener('aerotab:session-replaced', onSessionReplaced);
     installPaneDragGlobalHandlers();
+    let winResizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const onWindowResize = () => {
+      if (winResizeTimer) clearTimeout(winResizeTimer);
+      winResizeTimer = setTimeout(() => {
+        winResizeTimer = null;
+        const ids = tabs.tabs.flatMap((t) => t.panes.map((p) => p.id));
+        if (ids.length) dispatchFitAllPanes(ids);
+      }, 100);
+    };
+    window.addEventListener('resize', onWindowResize);
     const unsubPaneDrop = subscribePanePointerDrop(({ source, hit }) => {
       if (hit.kind === 'pane') {
         tabs.movePaneBetweenTabs(source.tabId, source.paneId, hit.tabId, hit.paneId, hit.side);
@@ -1340,6 +1350,8 @@
       requestAnimationFrame(() => dispatchFocusPane(source.paneId));
     });
     return () => {
+      window.removeEventListener('resize', onWindowResize);
+      if (winResizeTimer) clearTimeout(winResizeTimer);
       document.removeEventListener('aerotab:session-replaced', onSessionReplaced);
       unsubPaneDrop();
     };

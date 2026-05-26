@@ -31,6 +31,7 @@
     shouldSuppressMacSpuriousInput,
     trackMacBackspaceKeydown,
   } from '../lib/terminalInputMac';
+  import { scheduleTerminalFit } from '../lib/terminalFit';
 
   interface Props {
     rpc: RpcClient;
@@ -152,7 +153,7 @@
 
   /** Skip fit while display:none (maximize hide) — zero-size fit clears canvas terminals. */
   function safeFit(redraw = false) {
-    if (!fit || !term || !layoutVisible || !hostHasLayout()) return;
+    if (!fit || !term || !layoutVisible || !tabVisible || !hostHasLayout()) return;
     try {
       fit.fit();
     } catch {
@@ -167,12 +168,16 @@
     }
   }
 
+  function scheduleSafeFit(redraw = false) {
+    scheduleTerminalFit(() => safeFit(redraw));
+  }
+
   function adjustFontSize(delta: number) {
     if (!term || !delta) return;
     sessionFontDelta += delta;
     const next = Math.min(32, Math.max(8, (term.options.fontSize ?? 13) + delta));
     term.options.fontSize = next;
-    requestAnimationFrame(() => safeFit());
+    scheduleSafeFit();
   }
 
   function onExitedKeydown(ev: KeyboardEvent) {
@@ -617,7 +622,7 @@
     term.loadAddon(new WebLinksAddon(linkHandler));
     term.open(host);
     await applyRenderer(cfg.renderer);
-    requestAnimationFrame(() => safeFit());
+    scheduleSafeFit();
 
     // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
     // macOS WKWebView: after Backspace, filter stray space only — xterm must encode keys (vim/zsh).
@@ -654,10 +659,7 @@
     const fitListener = (ev: Event) => {
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
       if (detail?.sessionId && detail.sessionId !== session.id) return;
-      requestAnimationFrame(() => {
-        safeFit(true);
-        requestAnimationFrame(() => safeFit(true));
-      });
+      scheduleSafeFit(true);
     };
     const copyListener = () => { if (active) void doCopy(); };
     const fontListener = (ev: Event) => {
@@ -717,7 +719,20 @@
       triggerBell();
     });
 
-    const ro = new ResizeObserver(() => safeFit());
+    let resizeFrame = 0;
+    const ro = new ResizeObserver((entries) => {
+      let ok = false;
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width >= 2 && height >= 2) ok = true;
+      }
+      if (!ok) return;
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        safeFit();
+      });
+    });
     if (host) ro.observe(host);
 
     await configureTransferFilter(cfg.experimentalTransferDetection);
@@ -740,20 +755,21 @@
   $effect(() => {
     void layoutVisible;
     if (!layoutVisible) return;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => safeFit(true));
-    });
+    scheduleSafeFit(true);
+  });
+
+  $effect(() => {
+    void tabVisible;
+    if (!tabVisible || !layoutVisible) return;
+    scheduleSafeFit(true);
   });
 
   $effect(() => {
     if (!active) return;
     tabs.clearActivity(session.id);
-    requestAnimationFrame(() => {
-      safeFit();
-      requestAnimationFrame(() => {
-        safeFit();
-        term?.focus();
-      });
+    scheduleTerminalFit(() => {
+      safeFit(true);
+      term?.focus();
     });
   });
 
@@ -784,7 +800,7 @@
     // atlas and pick up the new palette / font metrics. xterm only repaints
     // changed cells otherwise, which leaves stale colors on screen.
     try { term.refresh(0, term.rows - 1); } catch { /* renderer not ready */ }
-    requestAnimationFrame(() => safeFit());
+    scheduleSafeFit();
   }
 
   $effect(() => {
@@ -983,7 +999,8 @@
   bind:this={host}
   role="application"
   data-aerotab-context-menu=""
-  class="terminal-surface h-full w-full relative {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+  class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
+         {active ? '' : 'pointer-events-none opacity-[0.92]'}"
   oncontextmenu={onContextMenu}
   onpointerup={onPointerUp}
   ondragover={onTransferDragOver}
