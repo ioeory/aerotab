@@ -7,6 +7,7 @@
   import type { RpcClient } from '../../../lib/rpc';
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm } from '../../../lib/confirm.svelte';
+  import { pickAndReadPrivateKeyFile } from '../../../lib/localFiles';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -148,6 +149,22 @@
     } catch (e) { onError(`copy: ${(e as Error).message}`); }
   }
 
+  async function importPrivateKeyFromFile() {
+    if (!editing || editing.kind !== 'key') return;
+    busy = true;
+    try {
+      const text = await pickAndReadPrivateKeyFile();
+      if (text === null) return;
+      editing = { ...editing, secret: text };
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg === 'file_too_large') onError(i18n.t('vault.importKeyTooLarge'));
+      else onError(i18n.t('vault.importKeyFailed', { message: msg }));
+    } finally {
+      busy = false;
+    }
+  }
+
   async function changePassword() {
     if (!oldPw || !newPw) { onError('Both passwords required'); return; }
     if (newPw !== newPw2) { onError('New passwords do not match'); return; }
@@ -248,11 +265,24 @@
       </label>
       <label class="row">
         <span class="row-label">Secret</span>
-        {#if editing.kind === 'note' || editing.kind === 'key'}
-          <textarea rows="6" bind:value={editing.secret} disabled={busy}></textarea>
-        {:else}
-          <input type="password" bind:value={editing.secret} disabled={busy} />
-        {/if}
+        <div class="secret-field">
+          {#if editing.kind === 'note' || editing.kind === 'key'}
+            <textarea rows="6" bind:value={editing.secret} disabled={busy}></textarea>
+          {:else}
+            <input type="password" bind:value={editing.secret} disabled={busy} />
+          {/if}
+          {#if editing.kind === 'key'}
+            <button
+              type="button"
+              class="btn"
+              disabled={busy}
+              onclick={() => void importPrivateKeyFromFile()}
+            >
+              {i18n.t('vault.importKeyFromFile')}
+            </button>
+            <span class="hint inline-hint">{i18n.t('vault.importKeyFromFileHelp')}</span>
+          {/if}
+        </div>
       </label>
       <div class="actions">
         <button class="btn primary" disabled={busy} onclick={() => void saveEntry()}>Save</button>
@@ -330,6 +360,20 @@
     font-family: inherit;
   }
   .row textarea { font-family: var(--font-mono, monospace); resize: vertical; }
+  .secret-field {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    max-width: 380px;
+    width: 100%;
+  }
+  .secret-field textarea,
+  .secret-field input {
+    width: 100%;
+    max-width: none;
+  }
+  .inline-hint { margin: 0; }
   .row input:focus, .row select:focus, .row textarea:focus {
     outline: none; border-color: var(--color-accent);
   }

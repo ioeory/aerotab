@@ -189,6 +189,10 @@ const en: Messages = {
   'sync.recordDeleteConfirm': 'Delete local sync record {id}?',
   'configFile.removeKeyConfirm': 'Remove setting key "{key}"?',
   'vault.deleteEntryConfirm': 'Delete this vault entry? This cannot be undone.',
+  'vault.importKeyFromFile': 'Import from file…',
+  'vault.importKeyFromFileHelp': 'Reads PEM/OpenSSH private key text (.pem, .key, etc., max 512 KiB).',
+  'vault.importKeyTooLarge': 'Private key file is too large (max 512 KiB).',
+  'vault.importKeyFailed': 'Could not read private key file: {message}',
   'sync.vaultKeyringAutoHint': 'Sync now will auto-unlock the vault from the OS credential store.',
   'vault.unlockPromptTitle': 'Unlock credential vault',
   'vault.unlockPromptBody':
@@ -740,6 +744,10 @@ const zhCN: Messages = {
   'sync.recordDeleteConfirm': '删除本地同步记录 {id}？',
   'configFile.removeKeyConfirm': '移除设置项 "{key}"？',
   'vault.deleteEntryConfirm': '删除此凭据条目？此操作无法撤销。',
+  'vault.importKeyFromFile': '从文件导入…',
+  'vault.importKeyFromFileHelp': '读取 PEM/OpenSSH 私钥文本（.pem、.key 等，最大 512 KiB）。',
+  'vault.importKeyTooLarge': '私钥文件过大（最大 512 KiB）。',
+  'vault.importKeyFailed': '无法读取私钥文件：{message}',
   'sync.vaultKeyringAutoHint': '点击 Sync now 时会从系统凭据库自动解锁凭据库。',
   'vault.unlockPromptTitle': '解锁凭据库',
   'vault.unlockPromptBody':

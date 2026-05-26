@@ -256,6 +256,18 @@ fn pick_open_files(directory: Option<bool>) -> Result<Option<Vec<String>>, Strin
 }
 
 #[tauri::command]
+fn pick_open_private_key_file() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .add_filter(
+            "SSH private key",
+            &["pem", "key", "ppk", "pub", "txt", "asc"],
+        )
+        .add_filter("All files", &["*"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 fn pick_directory() -> Result<Option<String>, String> {
     Ok(rfd::FileDialog::new()
         .pick_folder()
@@ -707,6 +719,7 @@ fn main() {
             check_update,
             install_update,
             pick_open_files,
+            pick_open_private_key_file,
             pick_save_file,
             pick_directory,
             local_stat,
