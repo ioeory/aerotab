@@ -38,6 +38,7 @@
   import { bootstrapVault } from './lib/vaultBootstrap';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
+  import { startHorizontalPanelResize } from './lib/panelResize';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
   import logoUrl from './assets/logo.png';
 
@@ -86,6 +87,10 @@
   let savedProfiles = $state<StoredProfile[]>([]);
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
   let sidebarVisible = $state(true);
+  const SIDEBAR_WIDTH_MIN = 180;
+  const SIDEBAR_WIDTH_MAX = 480;
+  const SIDEBAR_WIDTH_DEFAULT = 240;
+  let sidebarWidthPx = $state(SIDEBAR_WIDTH_DEFAULT);
   const SFTP_DOCK_WIDTH_MIN = 280;
   const SFTP_DOCK_WIDTH_MAX = 720;
   let sftpDockWidthPx = $state(400);
@@ -517,6 +522,12 @@
       if (w.value && typeof w.value === 'object') {
         const value = w.value as Record<string, unknown>;
         if (typeof value.sidebarVisible === 'boolean') sidebarVisible = value.sidebarVisible;
+        if (typeof value.sidebarWidthPx === 'number') {
+          sidebarWidthPx = Math.max(
+            SIDEBAR_WIDTH_MIN,
+            Math.min(SIDEBAR_WIDTH_MAX, value.sidebarWidthPx),
+          );
+        }
         applyWindowSettings(value);
       }
     } catch { /* not configured yet */ }
@@ -930,6 +941,30 @@
     } catch { /* optional */ }
   }
 
+  async function persistSidebarWidth() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'window' });
+      const current = r.value && typeof r.value === 'object' ? (r.value as Record<string, unknown>) : {};
+      await rpc.call('settings.set', {
+        key: 'window',
+        value: { ...current, sidebarWidthPx: sidebarWidthPx },
+      });
+    } catch (e) {
+      onError(`window settings: ${(e as Error).message}`);
+    }
+  }
+
+  function onSidebarResizePointerDown(ev: PointerEvent) {
+    startHorizontalPanelResize(ev, {
+      startWidthPx: sidebarWidthPx,
+      minPx: SIDEBAR_WIDTH_MIN,
+      maxPx: SIDEBAR_WIDTH_MAX,
+      growWhenDraggingRight: true,
+      onWidth: (w) => { sidebarWidthPx = w; },
+      onEnd: () => { void persistSidebarWidth(); },
+    });
+  }
+
   async function persistSftpDockWidth() {
     try {
       const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sftp' });
@@ -944,20 +979,14 @@
   }
 
   function onSftpDockResizePointerDown(ev: PointerEvent) {
-    ev.preventDefault();
-    const startX = ev.clientX;
-    const startWidth = sftpDockWidthPx;
-    const onMove = (move: PointerEvent) => {
-      const delta = startX - move.clientX;
-      sftpDockWidthPx = Math.max(SFTP_DOCK_WIDTH_MIN, Math.min(SFTP_DOCK_WIDTH_MAX, startWidth + delta));
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      void persistSftpDockWidth();
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    startHorizontalPanelResize(ev, {
+      startWidthPx: sftpDockWidthPx,
+      minPx: SFTP_DOCK_WIDTH_MIN,
+      maxPx: SFTP_DOCK_WIDTH_MAX,
+      growWhenDraggingRight: false,
+      onWidth: (w) => { sftpDockWidthPx = w; },
+      onEnd: () => { void persistSftpDockWidth(); },
+    });
   }
 
   function openSftpDock(target: SftpDockTarget, tabId = tabs.activeId ?? GLOBAL_SFTP_KEY) {
@@ -1431,20 +1460,31 @@
   });
 </script>
 
-<div class="h-full w-full grid {sidebarVisible ? 'grid-cols-[auto_1fr]' : 'grid-cols-[1fr]'} grid-rows-1 overflow-hidden">
+<div class="h-full w-full flex flex-row overflow-hidden">
   {#if sidebarVisible}
-    <Sidebar
-      {rpc}
-      bind:this={sidebar}
-      openProfileModal={(p, opts) => profileModal?.open(p, opts)}
-      openSerialModal={() => serialModal?.open()}
-      openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
-      openSettings={() => openSettings()}
-      {onError}
-    />
+    <div
+      class="shrink-0 flex flex-col h-full min-w-0 border-r border-[var(--color-border-soft)]"
+      style="width: {sidebarWidthPx}px; min-width: {SIDEBAR_WIDTH_MIN}px; max-width: min({SIDEBAR_WIDTH_MAX}px, 40vw);"
+    >
+      <Sidebar
+        {rpc}
+        bind:this={sidebar}
+        openProfileModal={(p, opts) => profileModal?.open(p, opts)}
+        openSerialModal={() => serialModal?.open()}
+        openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
+        openSettings={() => openSettings()}
+        {onError}
+      />
+    </div>
+    <button
+      type="button"
+      aria-label={i18n.t('sidebar.resizeSidebar')}
+      class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
+      onpointerdown={onSidebarResizePointerDown}
+    ></button>
   {/if}
 
-  <main class="flex flex-col min-w-0 bg-[var(--color-panel)]">
+  <main class="flex flex-col flex-1 min-w-0 bg-[var(--color-panel)]">
     <TabBar
       {rpc}
       onAddTab={() => (pickerOpen = true)}

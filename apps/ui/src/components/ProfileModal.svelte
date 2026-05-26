@@ -5,6 +5,7 @@
   import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
   import { loadProfilesForJumps, parseJumpLines } from '../lib/jumpProfiles';
+  import { defaultPortForKind } from '../lib/profileDefaults';
   import { BUILTIN_PROFILE_ICONS, formatTags, parseTagsInput, suggestDuplicateProfileName } from '../lib/profileMeta';
   import { notifyProfilesChanged } from '../lib/profileEvents';
   import ProfileIcon from './ProfileIcon.svelte';
@@ -137,6 +138,20 @@
     }
   }
 
+  function onProfileKindChange() {
+    port = defaultPortForKind(profileKind);
+    if (profileKind !== 'ssh') {
+      user = '';
+      password = '';
+      keyPath = '';
+      keyPassphrase = '';
+      vaultEntryId = '';
+      vaultPassphraseEntryId = '';
+      jumpsText = '';
+      authKind = 'password';
+    }
+  }
+
   function resetNewProfileFields(groupDefault = '') {
     profileKind = 'ssh';
     name = '';
@@ -146,7 +161,7 @@
     iconKind = 'builtin';
     iconValue = 'server';
     host = '';
-    port = 22;
+    port = defaultPortForKind('ssh');
     user = '';
     authKind = 'password';
     password = '';
@@ -273,7 +288,7 @@
     </div>
 
     <label for="pm-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.kind')}</label>
-    <select id="pm-kind" bind:value={profileKind} class="input">
+    <select id="pm-kind" bind:value={profileKind} onchange={onProfileKindChange} class="input">
       <option value="ssh">{i18n.t('profileModal.kindSsh')}</option>
       <option value="rdp">{i18n.t('profileModal.kindRdp')}</option>
       <option value="vnc">{i18n.t('profileModal.kindVnc')}</option>

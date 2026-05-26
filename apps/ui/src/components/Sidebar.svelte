@@ -376,7 +376,7 @@
   }
 </script>
 
-<aside data-aerotab-context-menu="" class="w-[240px] shrink-0 border-r border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col shadow-[inset_-1px_0_0_var(--color-border-soft)]">
+<aside data-aerotab-context-menu="" class="w-full min-w-0 h-full bg-[var(--color-panel)] flex flex-col shadow-[inset_-1px_0_0_var(--color-border-soft)]">
   <div class="px-4 py-3 border-b border-[var(--color-border-soft)] flex items-center gap-2">
     <img src={logoUrl} alt="" class="aerotab-logo" width="24" height="24" />
     <h1 class="text-[13px] font-semibold tracking-wide font-mono">AeroTab</h1>
