@@ -44,6 +44,29 @@ async function readPathAsUtf8(path: string): Promise<string> {
   return new TextDecoder().decode(b64decode(chunk.data));
 }
 
+function pickPrivateKeyPathBrowser(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = KEY_FILE_ACCEPT;
+    input.onchange = () => {
+      const file = input.files?.[0];
+      resolve(file?.name ?? null);
+    };
+    input.click();
+  });
+}
+
+/** Pick a private-key file and return its absolute path, or `null` if cancelled. */
+export async function pickPrivateKeyPath(): Promise<string | null> {
+  const picked = await tauriInvoke<string | null>('pick_open_private_key_file');
+  if (picked !== null) return picked || null;
+
+  const paths = await tauriInvoke<string[] | null>('pick_open_files', { directory: false });
+  if (paths === null) return pickPrivateKeyPathBrowser();
+  return paths.length ? paths[0]! : null;
+}
+
 /** Pick a private-key file and return its UTF-8 text, or `null` if cancelled. */
 export async function pickAndReadPrivateKeyFile(): Promise<string | null> {
   const picked = await tauriInvoke<string | null>('pick_open_private_key_file');

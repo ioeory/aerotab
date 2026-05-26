@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { X } from '@lucide/svelte';
+  import { FolderOpen, X } from '@lucide/svelte';
+  import { pickPrivateKeyPath } from '../lib/localFiles';
   import type { RpcClient } from '../lib/rpc';
   import { uuidv4 } from '../lib/rpc';
   import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
@@ -202,6 +203,15 @@
     dialog?.close();
   }
 
+  async function browsePrivateKeyPath() {
+    try {
+      const path = await pickPrivateKeyPath();
+      if (path) keyPath = path;
+    } catch (e) {
+      onError(i18n.t('profileModal.browsePrivateKeyFailed', { message: (e as Error).message }));
+    }
+  }
+
   async function submit(ev: Event) {
     ev.preventDefault();
     const base = {
@@ -391,7 +401,24 @@
         <input id="pm-pw" type="password" bind:value={password} class="input" />
       {:else}
         <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.privateKeyPath')}</label>
-        <input id="pm-keypath" bind:value={keyPath} placeholder="~/.ssh/id_ed25519" class="input" />
+        <div class="path-field">
+          <input
+            id="pm-keypath"
+            bind:value={keyPath}
+            placeholder="~/.ssh/id_ed25519"
+            class="input path-field-input"
+          />
+          <button
+            type="button"
+            class="btn-secondary path-field-btn"
+            title={i18n.t('profileModal.browsePrivateKey')}
+            aria-label={i18n.t('profileModal.browsePrivateKey')}
+            onclick={() => { void browsePrivateKeyPath(); }}
+          >
+            <FolderOpen size={14} />
+            <span>{i18n.t('profileModal.browsePrivateKey')}</span>
+          </button>
+        </div>
         <label for="pm-keypass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
           {i18n.t('profileModal.keyPassphrase')}
         </label>
@@ -438,5 +465,21 @@
     min-height: 31px;
     font-size: 12px;
     color: var(--color-fg-muted);
+  }
+  .path-field {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .path-field-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .path-field-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 </style>
