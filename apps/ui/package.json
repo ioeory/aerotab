@@ -1,6 +1,6 @@
 {
   "name": "@aerotab/ui",
-  "version": "2.0.10",
+  "version": "0.2.10",
   "private": true,
   "type": "module",
   "description": "AeroTab frontend shell (Tauri webview).",
