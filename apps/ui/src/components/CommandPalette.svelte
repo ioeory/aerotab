@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { X } from '@lucide/svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
@@ -22,6 +22,7 @@
   let query = $state('');
   let selected = $state(0);
   let inputEl: HTMLInputElement | null = $state(null);
+  let listEl: HTMLUListElement | null = $state(null);
 
   const filtered = $derived(
     actions.filter((a) => {
@@ -35,6 +36,16 @@
   $effect(() => {
     void filtered;
     selected = 0;
+  });
+
+  $effect(() => {
+    const idx = selected;
+    void filtered.length;
+    void tick().then(() => {
+      if (!listEl || idx < 0) return;
+      const row = listEl.querySelector<HTMLElement>(`[data-palette-index="${idx}"]`);
+      row?.scrollIntoView({ block: 'nearest' });
+    });
   });
 
   function onKey(e: KeyboardEvent) {
@@ -81,9 +92,12 @@
       <button type="button" class="btn-ghost p-1"
               onclick={onClose} aria-label={i18n.t('common.close')}><X size={13} /></button>
     </div>
-    <ul class="max-h-[50vh] overflow-y-auto py-1" role="listbox">
+    <ul bind:this={listEl} class="max-h-[50vh] overflow-y-auto py-1" role="listbox">
       {#each filtered as a, i (a.id)}
-        <li role="option" aria-selected={i === selected}
+        <li
+            role="option"
+            aria-selected={i === selected}
+            data-palette-index={i}
             tabindex="-1"
             class="list-item mx-1 text-[12.5px] {i === selected ? 'list-item-active' : ''}"
             onmouseenter={() => (selected = i)}
