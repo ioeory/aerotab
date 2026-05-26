@@ -38,11 +38,14 @@ export type PendingDialog = PendingConfirm | PendingPrompt;
 
 class ConfirmUi {
   pending = $state<PendingDialog | null>(null);
+  /** Set when confirm/cancel handlers run; suppresses spurious `dialog` close cancel. */
+  private settled = false;
   /** Bound from AppConfirmDialog for prompt input. */
   promptValue = $state('');
 
   confirm(message: string, options: ConfirmOptions = {}): Promise<boolean> {
     return new Promise((resolve) => {
+      this.settled = false;
       this.pending = {
         kind: 'confirm',
         message,
@@ -58,6 +61,7 @@ class ConfirmUi {
   prompt(message: string, options: PromptOptions = {}): Promise<string | null> {
     this.promptValue = options.defaultValue ?? '';
     return new Promise((resolve) => {
+      this.settled = false;
       this.pending = {
         kind: 'prompt',
         message,
@@ -74,6 +78,7 @@ class ConfirmUi {
   finishConfirm(ok: boolean): void {
     const p = this.pending;
     if (!p || p.kind !== 'confirm') return;
+    this.settled = true;
     this.pending = null;
     p.resolve(ok);
   }
@@ -81,6 +86,7 @@ class ConfirmUi {
   finishPrompt(value: string | null): void {
     const p = this.pending;
     if (!p || p.kind !== 'prompt') return;
+    this.settled = true;
     this.pending = null;
     p.resolve(value);
   }
@@ -88,9 +94,19 @@ class ConfirmUi {
   cancel(): void {
     const p = this.pending;
     if (!p) return;
+    this.settled = true;
     this.pending = null;
     if (p.kind === 'confirm') p.resolve(false);
     else p.resolve(null);
+  }
+
+  /** True after confirm/cancel; ignore native `close` until next dialog opens. */
+  wasSettled(): boolean {
+    return this.settled;
+  }
+
+  resetSettled(): void {
+    this.settled = false;
   }
 }
 

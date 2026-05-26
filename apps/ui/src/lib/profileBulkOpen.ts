@@ -1,13 +1,55 @@
+import { tick } from 'svelte';
 import type { RpcClient } from './rpc';
-import { tabs, type SplitDir } from './tabs.svelte';
+import { withRpcTimeout } from './rpcTimeout';
+import { tabs } from './tabs.svelte';
 import type { SessionMeta, StoredProfile } from './types';
 
 export const BULK_OPEN_CONFIRM_THRESHOLD = 4;
+/** Per-profile SSH connect timeout during bulk open (unreachable hosts must not block the rest). */
+const BULK_SSH_CONNECT_TIMEOUT_MS = 20_000;
 
 export interface ProfileBulkOpenDeps {
   rpc: RpcClient;
   onError: (msg: string) => void;
   confirmMany?: (count: number) => Promise<boolean>;
+}
+
+async function openSshSession(rpc: RpcClient, p: StoredProfile & { kind: 'ssh' }): Promise<SessionMeta> {
+  const meta = await rpc.call<SessionMeta>('session.openSshProfile', { profile_id: p.id });
+  return { ...meta, profileId: p.id, sshProfile: p.ssh };
+}
+
+async function tryOpenSshSession(
+  rpc: RpcClient,
+  p: StoredProfile & { kind: 'ssh' },
+): Promise<SessionMeta> {
+  return withRpcTimeout(
+    openSshSession(rpc, p),
+    BULK_SSH_CONNECT_TIMEOUT_MS,
+    p.name,
+  );
+}
+
+type SshOpenOutcome =
+  | { ok: true; meta: SessionMeta }
+  | { ok: false; name: string; error: string };
+
+async function openSshProfilesParallel(
+  rpc: RpcClient,
+  sshList: StoredProfile[],
+): Promise<SshOpenOutcome[]> {
+  return Promise.all(
+    sshList.map((p) => {
+      const ssh = p as StoredProfile & { kind: 'ssh' };
+      return tryOpenSshSession(rpc, ssh)
+        .then((meta): SshOpenOutcome => ({ ok: true, meta }))
+        .catch((e): SshOpenOutcome => ({
+          ok: false,
+          name: p.name,
+          error: (e as Error).message,
+        }));
+    }),
+  );
 }
 
 /** Open each profile in its own tab (SSH pane or system remote viewer). */
@@ -22,13 +64,7 @@ export async function openProfilesEachInNewTab(
         await rpc.call('remote.openProfile', { profile_id: p.id });
         continue;
       }
-      const meta = await rpc.call<SessionMeta>('session.openSsh', {
-        title: p.name,
-        rows: 24,
-        cols: 80,
-        profile: p.ssh,
-      });
-      tabs.add({ ...meta, profileId: p.id, sshProfile: p.ssh });
+      tabs.add(await tryOpenSshSession(rpc, p as StoredProfile & { kind: 'ssh' }));
     } catch (e) {
       onError(`${p.name}: ${(e as Error).message}`);
     }
@@ -48,6 +84,7 @@ export async function openProfilesInSameTab(
   if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD && confirmMany) {
     const ok = await confirmMany(sshList.length);
     if (!ok) return;
+    await tick();
   }
 
   for (const p of remoteList) {
@@ -59,26 +96,25 @@ export async function openProfilesInSameTab(
   }
   if (sshList.length === 0) return;
 
-  let tabId = tabs.activeId ?? undefined;
-  let tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
+  const outcomes = await openSshProfilesParallel(rpc, sshList);
+  const opened = outcomes.filter((o): o is Extract<SshOpenOutcome, { ok: true }> => o.ok).map((o) => o.meta);
+  const failures = outcomes.filter((o): o is Extract<SshOpenOutcome, { ok: false }> => !o.ok);
 
-  for (let i = 0; i < sshList.length; i++) {
-    const p = sshList[i]!;
-    const meta = await rpc.call<SessionMeta>('session.openSsh', {
-      title: p.name,
-      rows: 24,
-      cols: 80,
-      profile: p.ssh,
-    });
-    const pane = { ...meta, profileId: p.id, sshProfile: p.ssh };
-    if (i === 0 && !tab) {
-      tabs.add(pane);
-      tabId = tabs.activeId ?? undefined;
-      tab = tabId ? tabs.tabs.find((t) => t.id === tabId) : undefined;
-    } else if (tabId) {
-      const direction: SplitDir = i % 2 === 0 ? 'row' : 'col';
-      tabs.addPane(tabId, pane, direction);
-    }
+  if (opened.length === 0) {
+    const detail = failures.map((f) => `${f.name}: ${f.error}`).slice(0, 5).join('; ');
+    onError(detail || 'SSH open failed');
+    return;
   }
-  if (tabId) tabs.activate(tabId);
+
+  const tabTitle = opened.length === 1 ? opened[0]!.title : `SSH ×${opened.length}`;
+  const tab = tabs.addSessionsInTab(opened, tabTitle, tabs.activeId);
+  if (!tab) {
+    onError('Failed to add sessions to tab layout');
+    return;
+  }
+
+  if (failures.length > 0) {
+    const detail = failures.map((f) => `${f.name}: ${f.error}`).slice(0, 5).join('; ');
+    onError(`Opened ${opened.length}/${sshList.length}. ${detail}`);
+  }
 }

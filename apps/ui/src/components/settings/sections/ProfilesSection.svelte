@@ -3,13 +3,13 @@
   // ~/.ssh/config entries imported from the host. Mirrors the sidebar's
   // profile list but with grouping, search, and inline edit/delete.
 
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { Activity, Plus, Trash2, Pencil, Plug, Search, ShieldAlert, ShieldCheck, ShieldX, Star } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm, appPrompt } from '../../../lib/confirm.svelte';
-  import { openProfilesInSameTab } from '../../../lib/profileBulkOpen';
+  import { BULK_OPEN_CONFIRM_THRESHOLD, openProfilesInSameTab } from '../../../lib/profileBulkOpen';
   import {
     defaultGroupForMove,
     normalizeProfileGroupInput,
@@ -244,16 +244,18 @@
       onError(i18n.t('profiles.bulkConnectNone'));
       return;
     }
+    const sshList = list.filter((p) => p.kind === 'ssh');
+    if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD) {
+      const ok = await appConfirm(
+        i18n.t('profiles.bulkOpenManyConfirm', { count: sshList.length }),
+        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
+      );
+      if (!ok) return;
+      await tick();
+    }
     bulkBusy = true;
     try {
-      await openProfilesInSameTab(list, {
-        rpc,
-        onError,
-        confirmMany: async (count: number) =>
-          appConfirm(i18n.t('profiles.bulkOpenManyConfirm', { count }), {
-            confirmLabel: i18n.t('profiles.bulkOpenConfirm'),
-          }),
-      });
+      await openProfilesInSameTab(list, { rpc, onError });
     } catch (e) {
       onError(`connect: ${(e as Error).message}`);
     } finally {

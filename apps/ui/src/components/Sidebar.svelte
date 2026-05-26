@@ -14,7 +14,11 @@
     profileSidebarBindingLabel,
     type ProfileSidebarActionKey,
   } from '../lib/profileSidebarShortcuts';
-  import { openProfilesEachInNewTab, openProfilesInSameTab } from '../lib/profileBulkOpen';
+  import {
+    BULK_OPEN_CONFIRM_THRESHOLD,
+    openProfilesEachInNewTab,
+    openProfilesInSameTab,
+  } from '../lib/profileBulkOpen';
   import {
     buildProfileTree,
     collectProfilesInFolder,
@@ -253,9 +257,18 @@
       onError(i18n.t('profiles.bulkConnectNone'));
       return;
     }
+    const sshList = list.filter((p) => p.kind === 'ssh');
+    if (sshList.length > BULK_OPEN_CONFIRM_THRESHOLD) {
+      const ok = await appConfirm(
+        i18n.t('profiles.bulkOpenManyConfirm', { count: sshList.length }),
+        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
+      );
+      if (!ok) return;
+      await tick();
+    }
     bulkBusy = true;
     try {
-      await openProfilesInSameTab(list, bulkOpenDeps);
+      await openProfilesInSameTab(list, { rpc, onError });
     } catch (e) {
       onError(`ssh: ${(e as Error).message}`);
     } finally {
@@ -444,9 +457,17 @@
       onError(i18n.t('sidebar.groupNoSsh'));
       return;
     }
+    if (list.length > BULK_OPEN_CONFIRM_THRESHOLD) {
+      const ok = await appConfirm(
+        i18n.t('profiles.bulkOpenManyConfirm', { count: list.length }),
+        { confirmLabel: i18n.t('profiles.bulkOpenConfirm') },
+      );
+      if (!ok) return;
+      await tick();
+    }
     bulkBusy = true;
     try {
-      await openProfilesInSameTab(list, bulkOpenDeps);
+      await openProfilesInSameTab(list, { rpc, onError });
     } catch (e) {
       onError(`ssh: ${(e as Error).message}`);
     } finally {

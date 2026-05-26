@@ -39,18 +39,25 @@
     return i18n.t('common.cancel');
   }
 
-  function onConfirm() {
+  function onConfirm(ev?: MouseEvent) {
+    ev?.stopPropagation();
+    ev?.preventDefault();
     if (!pending) return;
     if (pending.kind === 'confirm') confirmUi.finishConfirm(true);
     else confirmUi.finishPrompt(confirmUi.promptValue.trim() || null);
   }
 
-  function onCancel() {
+  function onCancel(ev?: MouseEvent) {
+    ev?.stopPropagation();
+    ev?.preventDefault();
     confirmUi.cancel();
   }
 
   function onDialogClose() {
-    confirmUi.cancel();
+    if (!confirmUi.wasSettled() && confirmUi.pending) {
+      confirmUi.cancel();
+    }
+    confirmUi.resetSettled();
   }
 
   function onKeydown(ev: KeyboardEvent) {

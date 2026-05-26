@@ -267,19 +267,53 @@ class TabStore {
   }
 
   /** Split the active pane in an existing tab and focus the new pane. */
-  addPane(tabId: string, session: SessionMeta, direction: SplitDir = 'row', side: SplitSide = 'after') {
+  addPane(tabId: string, session: SessionMeta, direction: SplitDir = 'row', side: SplitSide = 'after'): boolean {
     const tab = this.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab) return;
+    if (!tab) return false;
     const target = tab.activePaneId || tab.panes[0]?.id;
-    if (!target) return;
+    if (!target) return false;
     const result = insertRelative(tab.layout, target, session, direction, side);
-    if (!result.inserted) return;
+    if (!result.inserted) return false;
     tab.layout = result.node;
     tab.activePaneId = session.id;
     tab.maximizedPaneId = null;
     this.activeId = tab.id;
     this.refreshTab(tab);
     this.bump();
+    return true;
+  }
+
+  /** Add multiple sessions into one tab using a split layout (reliable for bulk open). */
+  addSessionsInTab(sessions: SessionMeta[], title?: string, tabId?: string | null): Tab | null {
+    if (sessions.length === 0) return null;
+    const first = sessions[0]!;
+    let layout: PaneNode = leaf(first);
+    for (let i = 1; i < sessions.length; i++) {
+      const dir: SplitDir = i % 2 === 0 ? 'row' : 'col';
+      layout = split(dir, [layout, leaf(sessions[i]!)]);
+    }
+    const existing = tabId ? this.tabs.find((t) => t.id === tabId) : undefined;
+    if (existing && existing.panes.length > 0) {
+      let added = 0;
+      for (let i = 0; i < sessions.length; i++) {
+        if (this.addPane(existing.id, sessions[i]!, i % 2 === 0 ? 'row' : 'col')) added += 1;
+      }
+      if (added > 0) {
+        this.activate(existing.id);
+        return existing;
+      }
+      // Could not merge into the active tab (layout full) — open a fresh tab with all sessions.
+    }
+    if (existing && existing.panes.length === 0) {
+      existing.layout = layout;
+      existing.activePaneId = first.id;
+      existing.maximizedPaneId = null;
+      this.refreshTab(existing);
+      this.activeId = existing.id;
+      this.bump();
+      return existing;
+    }
+    return this.addLayout(title ?? first.title ?? 'SSH', layout, first.id);
   }
 
   /** Remove a tab entirely. */
