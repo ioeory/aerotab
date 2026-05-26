@@ -15,6 +15,7 @@
   import { onMount } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
+  import { closeSessionsInBackground } from '../lib/sessionClose';
 
   interface Props {
     rpc: RpcClient;
@@ -53,11 +54,11 @@
   const maximized = $derived(tab.maximizedPaneId ?? null);
   const hiddenByMaximize = $derived(!!maximized && !tabs.nodeContains(node, maximized));
 
-  async function closePane(sessionId: string, ev: Event) {
+  function closePane(sessionId: string, ev: Event) {
     ev.stopPropagation();
     const result = tabs.removePane(tab.id, sessionId);
     if (!result) return;
-    try { await rpc.call('session.close', { id: sessionId }); } catch (e) { console.warn(e); }
+    closeSessionsInBackground(rpc, [sessionId]);
   }
 
   function focusPane(sessionId: string) {

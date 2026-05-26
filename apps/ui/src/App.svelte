@@ -29,6 +29,7 @@
   import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
   import { b64encode } from './lib/rpc';
   import { withRpcTimeout } from './lib/rpcTimeout';
+  import { closeSessionsInBackground } from './lib/sessionClose';
   import { broadcastTargetIds } from './lib/broadcast';
   import {
     bootstrapSyncEngine,
@@ -877,13 +878,13 @@
     requestAnimationFrame(() => focusActivePane());
   }
 
-  async function closeActivePane() {
+  function closeActivePane() {
     const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
     if (!tab) return;
     const sid = tab.activePaneId;
     const r = tabs.removePane(tab.id, sid);
     if (!r) return;
-    try { await rpc.call('session.close', { id: sid }); } catch (e) { console.warn(e); }
+    closeSessionsInBackground(rpc, [sid]);
   }
 
   function toggleActivePaneMaximize() {
@@ -893,37 +894,42 @@
     dispatchFitAllPanes(tab.panes.map((p) => p.id));
   }
 
-  async function closeTabSessions(tab: Tab) {
-    const pane_ids = tab.panes.map((p) => p.id);
+  function clearSftpDockForTabIds(tabIds: Iterable<string>) {
+    const drop = new Set(tabIds);
+    if (drop.size === 0) return;
+    sftpDockOpen = Object.fromEntries(Object.entries(sftpDockOpen).filter(([k]) => !drop.has(k)));
+    sftpDockPinned = Object.fromEntries(Object.entries(sftpDockPinned).filter(([k]) => !drop.has(k)));
+    sftpDockCollapsed = Object.fromEntries(Object.entries(sftpDockCollapsed).filter(([k]) => !drop.has(k)));
+  }
+
+  function closeTabSessions(tab: Tab) {
+    const paneIds = tab.panes.map((p) => p.id);
     tabs.remove(tab.id);
-    for (const id of pane_ids) {
-      try { await rpc.call('session.close', { id }); } catch (e) { console.warn(e); }
-    }
-    const { [tab.id]: _o, ...restOpen } = sftpDockOpen;
-    const { [tab.id]: _p, ...restPinned } = sftpDockPinned;
-    const { [tab.id]: _c, ...restCollapsed } = sftpDockCollapsed;
-    sftpDockOpen = restOpen;
-    sftpDockPinned = restPinned;
-    sftpDockCollapsed = restCollapsed;
+    clearSftpDockForTabIds([tab.id]);
+    closeSessionsInBackground(rpc, paneIds);
   }
 
-  async function closeOtherTabs(keepId: string) {
-    for (const tab of [...tabs.tabs]) {
-      if (tab.id !== keepId) await closeTabSessions(tab);
+  function closeTabsBatch(tabList: Tab[]) {
+    if (tabList.length === 0) return;
+    const sessionIds = tabList.flatMap((t) => t.panes.map((p) => p.id));
+    const tabIds = tabList.map((t) => t.id);
+    for (const tab of tabList) {
+      tabs.remove(tab.id);
     }
+    clearSftpDockForTabIds(tabIds);
+    closeSessionsInBackground(rpc, sessionIds);
   }
 
-  async function closeTabsToRight(fromIndex: number) {
-    for (let i = tabs.tabs.length - 1; i > fromIndex; i--) {
-      const tab = tabs.tabs[i];
-      if (tab) await closeTabSessions(tab);
-    }
+  function closeOtherTabs(keepId: string) {
+    closeTabsBatch(tabs.tabs.filter((t) => t.id !== keepId));
   }
 
-  async function closeAllTabs() {
-    for (const tab of [...tabs.tabs]) {
-      await closeTabSessions(tab);
-    }
+  function closeTabsToRight(fromIndex: number) {
+    closeTabsBatch(tabs.tabs.slice(fromIndex + 1));
+  }
+
+  function closeAllTabs() {
+    closeTabsBatch([...tabs.tabs]);
   }
 
   async function duplicateTab(source: Tab) {
@@ -1550,9 +1556,10 @@
       onSplit={(direction) => { void splitActive(direction); }}
       onOpenSftp={() => { void openSftpForActivePane(); }}
       onDuplicateTab={(tab) => { void duplicateTab(tab); }}
-      onCloseOthers={(id) => { void closeOtherTabs(id); }}
-      onCloseToRight={(idx) => { void closeTabsToRight(idx); }}
-      onCloseAll={() => { void closeAllTabs(); }}
+      onCloseTab={(tab) => { closeTabSessions(tab); }}
+      onCloseOthers={(id) => { closeOtherTabs(id); }}
+      onCloseToRight={(idx) => { closeTabsToRight(idx); }}
+      onCloseAll={() => { closeAllTabs(); }}
     />
 
     <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">

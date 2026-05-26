@@ -21,6 +21,7 @@
     onSplit?: (direction: SplitDir) => void;
     onOpenSftp?: () => void;
     onDuplicateTab?: (tab: Tab) => void;
+    onCloseTab?: (tab: Tab) => void;
     onCloseOthers?: (tabId: string) => void;
     onCloseToRight?: (tabIndex: number) => void;
     onCloseAll?: () => void;
@@ -31,6 +32,7 @@
     onSplit,
     onOpenSftp,
     onDuplicateTab,
+    onCloseTab,
     onCloseOthers,
     onCloseToRight,
     onCloseAll,
@@ -61,10 +63,14 @@
     if (ws.confirmCloseWithMultipleTabs !== false && tab.panes.length > 1) {
       if (!(await appConfirm(i18n.t('tabbar.closeMultiPaneConfirm', { count: tab.panes.length })))) return;
     }
-    const pane_ids = tab.panes.map((p) => p.id);
+    if (onCloseTab) {
+      onCloseTab(tab);
+      return;
+    }
+    const paneIds = tab.panes.map((p) => p.id);
     tabs.remove(tab.id);
-    for (const id of pane_ids) {
-      try { await rpc.call('session.close', { id }); } catch (e) { console.warn(e); }
+    for (const id of paneIds) {
+      void rpc.call('session.close', { id }).catch((e) => { console.warn(e); });
     }
   }
 
