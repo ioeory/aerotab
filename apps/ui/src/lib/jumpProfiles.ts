@@ -49,6 +49,17 @@ export function jumpLineForProfile(profile: StoredProfile): string {
   return `@${profile.name}`;
 }
 
+/** Resolve profiles in the given id order (skips unknown ids). */
+export function profilesInSelectionOrder(
+  profiles: StoredProfile[],
+  orderedIds: string[],
+): StoredProfile[] {
+  const byId = new Map(profiles.map((p) => [p.id, p]));
+  return orderedIds
+    .map((id) => byId.get(id))
+    .filter((p): p is StoredProfile => !!p && p.kind === 'ssh');
+}
+
 /** Merge profile jump lines into existing textarea content (deduped). */
 export function appendJumpProfileLines(existingText: string, profiles: StoredProfile[]): string {
   const lines = existingText
