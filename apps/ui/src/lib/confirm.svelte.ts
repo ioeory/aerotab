@@ -6,6 +6,8 @@ export type ConfirmOptions = {
   cancelLabel?: string;
   /** Style the primary action as destructive (e.g. delete). */
   danger?: boolean;
+  /** Optional viewport position for focus-anchored dialogs. */
+  position?: { x: number; y: number };
 };
 
 export type PromptOptions = ConfirmOptions & {
@@ -20,6 +22,7 @@ type PendingConfirm = {
   confirmLabel: string;
   cancelLabel: string;
   danger: boolean;
+  position?: { x: number; y: number };
   resolve: (ok: boolean) => void;
 };
 
@@ -31,6 +34,7 @@ type PendingPrompt = {
   placeholder: string | null;
   confirmLabel: string;
   cancelLabel: string;
+  position?: { x: number; y: number };
   resolve: (value: string | null) => void;
 };
 
@@ -53,6 +57,7 @@ class ConfirmUi {
         confirmLabel: options.confirmLabel ?? '',
         cancelLabel: options.cancelLabel ?? '',
         danger: !!options.danger,
+        position: options.position,
         resolve,
       };
     });
@@ -70,6 +75,7 @@ class ConfirmUi {
         placeholder: options.placeholder ?? null,
         confirmLabel: options.confirmLabel ?? '',
         cancelLabel: options.cancelLabel ?? '',
+        position: options.position,
         resolve,
       };
     });

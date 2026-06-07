@@ -113,6 +113,7 @@ interface StoredProfileBase {
   name: string;
   group?: string | null;
   tags?: string[];
+  note?: string | null;
   icon?: ProfileIcon | null;
   favorite?: boolean;
 }

@@ -80,3 +80,20 @@ export async function pickAndReadPrivateKeyFile(): Promise<string | null> {
   if (!paths.length) return null;
   return readPathAsUtf8(paths[0]!);
 }
+
+
+/** Pick an image file for profile icons and return its path or object URL fallback. */
+export async function pickIconFilePath(): Promise<string | null> {
+  const paths = await tauriInvoke<string[] | null>('pick_open_files', { directory: false });
+  if (paths !== null) return paths.length ? paths[0]! : null;
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/svg+xml,image/webp,image/jpeg,.png,.svg,.webp,.jpg,.jpeg,.ico';
+    input.onchange = () => {
+      const file = input.files?.[0];
+      resolve(file ? URL.createObjectURL(file) : null);
+    };
+    input.click();
+  });
+}

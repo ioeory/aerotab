@@ -1,4 +1,4 @@
-import type { LocalEntry } from './types';
+import type { LocalEntry, SshProfileSpec } from './types';
 
 export const SFTP_DRAG_LOCAL = 'application/x-aerotab-sftp-local';
 export const SFTP_DRAG_REMOTE = 'application/x-aerotab-sftp-remote';
@@ -38,6 +38,10 @@ export interface RemoteDragPayload {
   name: string;
   kind: 'File' | 'Dir';
   size: number;
+  sourceSessionId?: string;
+  sourceRegistryId?: string;
+  sourceLabel?: string;
+  sourceProfile?: SshProfileSpec;
 }
 
 export function joinLocalPath(base: string, name: string): string {

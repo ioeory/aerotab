@@ -13,6 +13,7 @@
   import SftpLocalPane from './SftpLocalPane.svelte';
   import { sftpSessionRegistry, type RegisteredSftpSession } from '../lib/sftpSessionRegistry.svelte';
   import { portal } from '../lib/portal';
+  import type { LocalUploadTransferRequest, RemoteCrossTransferRequest } from '../lib/sftpTransferTypes';
   import {
     SFTP_DRAG_LOCAL,
     SFTP_DRAG_REMOTE,
@@ -43,6 +44,10 @@
     onClose: () => void;
     onCollapse?: () => void;
     onPopOut?: (sudo: boolean) => void;
+    showLocalPane?: boolean;
+    onRemoteCrossTransfer?: (request: RemoteCrossTransferRequest) => void;
+    onLocalUploadTransfer?: (request: LocalUploadTransferRequest) => void;
+    refreshToken?: number;
     onError: (msg: string) => void;
   }
   let {
@@ -55,6 +60,10 @@
     onClose,
     onCollapse,
     onPopOut,
+    showLocalPane = true,
+    onRemoteCrossTransfer,
+    onLocalUploadTransfer,
+    refreshToken = 0,
     onError,
   }: Props = $props();
   const target = $derived.by((): SftpSource | null => {
@@ -82,6 +91,7 @@
   let processingTransfers = false;
   let needsRefreshAfterTransfers = false;
   let transferSeq = 0;
+  let appliedRefreshToken: number | null = null;
   const uploadFiles = new Map<string, File>();
   const downloadEntries = new Map<string, SftpEntry>();
   const knownRemoteDirs = new Set<string>();
@@ -105,6 +115,10 @@
   let remoteMenuY = $state(0);
   let remoteMenuEntry = $state<SftpEntry | null>(null);
   let remoteMenuEl = $state<HTMLDivElement | null>(null);
+  let remotePaneEl = $state<HTMLDivElement | null>(null);
+  let selectedRemoteNames = $state<Set<string>>(new Set());
+  let focusedRemoteName = $state<string | null>(null);
+  let lastSelectedRemoteName = $state<string | null>(null);
   let renamingName = $state<string | null>(null);
   let renameDraft = $state('');
 
@@ -219,8 +233,29 @@
     const localRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_LOCAL);
     if (localRaw) {
       const payload = parseLocalDrag(localRaw);
-      if (payload) await enqueueUploadFromLocal(payload);
+      if (payload && onLocalUploadTransfer && sessionId) {
+        onLocalUploadTransfer({
+          sourcePath: payload.path,
+          sourceKind: payload.kind === 'dir' ? 'Dir' : 'File',
+          sourceSize: payload.size,
+          destSessionId: sessionId,
+          destLabel: target?.name ?? i18n.t('sftp.sshSession'),
+          destDir: cwd,
+          destPath: joinPath(cwd, payload.name),
+          name: payload.name,
+        });
+      } else if (payload) {
+        await enqueueUploadFromLocal(payload);
+      }
       return;
+    }
+    const remoteRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE);
+    if (remoteRaw && sessionId) {
+      const payload = parseRemoteDrag(remoteRaw);
+      if (payload?.sourceSessionId && payload.sourceSessionId !== sessionId) {
+        await receiveRemoteDrop(payload);
+        return;
+      }
     }
     const files = Array.from(e.dataTransfer?.files ?? []);
     if (files.length > 0) {
@@ -337,6 +372,10 @@
       name: entry.name,
       kind: entry.kind === 'Dir' ? 'Dir' : 'File',
       size: entry.size,
+      sourceSessionId: sessionId ?? undefined,
+      sourceRegistryId: registryId,
+      sourceLabel: target?.name ?? i18n.t('sftp.sshSession'),
+      sourceProfile: target?.ssh,
     };
     setSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE, JSON.stringify(payload));
   }
@@ -468,6 +507,7 @@
       const list = await rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: cwd });
       if (seq !== listSeq) return;
       entries = sortEntries(list);
+      pruneRemoteSelection();
     } catch (e) {
       if (seq !== listSeq) return;
       const msg = (e as Error).message;
@@ -574,33 +614,45 @@
   }
 
   async function enter(e: SftpEntry) {
-    if (e.kind !== 'Dir') return;
+    if (loading || e.kind !== 'Dir') return;
     cwd = joinPath(cwd, e.name);
+    clearRemoteSelection();
     await refresh();
   }
 
   async function goUp() {
+    if (loading) return;
     cwd = parentPath(cwd);
+    clearRemoteSelection();
     await refresh();
   }
 
   async function goHome() {
-    if (!sessionId) return;
+    if (loading || !sessionId) return;
     const real = await rpc.call<{ path: string }>('sftp.realpath', { id: sessionId, path: '.' });
     cwd = real.path || '.';
+    clearRemoteSelection();
     await refresh();
   }
 
   async function removeEntry(e: SftpEntry) {
-    if (!sessionId) return;
-    if (!(await appConfirm(i18n.t('sftp.deleteConfirm', { name: e.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
-    const path = joinPath(cwd, e.name);
+    await removeEntries([e]);
+  }
+
+  async function removeEntries(items: SftpEntry[]) {
+    if (!sessionId || items.length === 0) return;
+    const label = items.length === 1 ? items[0]?.name ?? '' : i18n.t('sftp.deleteManyLabel', { count: items.length });
+    if (!(await appConfirm(i18n.t('sftp.deleteConfirm', { name: label }), { danger: true, confirmLabel: i18n.t('common.delete'), position: focusedDialogPosition() }))) return;
     try {
-      if (e.kind === 'Dir') {
-        await rpc.call('sftp.removeDir', { id: sessionId, path });
-      } else {
-        await rpc.call('sftp.removeFile', { id: sessionId, path });
+      for (const entry of items) {
+        const path = joinPath(cwd, entry.name);
+        if (entry.kind === 'Dir') {
+          await rpc.call('sftp.removeDir', { id: sessionId, path });
+        } else {
+          await rpc.call('sftp.removeFile', { id: sessionId, path });
+        }
       }
+      clearRemoteSelection();
       await refresh();
     } catch (err) {
       onError((err as Error).message);
@@ -759,10 +811,10 @@
     const sid = sessionId;
     const path = cwd;
     const label = target?.name ?? i18n.t('sftp.sshSession');
-    const snap = `${sid ?? ''}:${path}:${label}`;
+    const snap = `${sid ?? ''}:${path}:${label}:${target?.ssh.host ?? ''}:${target?.ssh.user ?? ''}:${target?.ssh.port ?? ''}`;
     if (sid && snap !== registrySnapshot) {
       registrySnapshot = snap;
-      sftpSessionRegistry.register({ registryId, label, sessionId: sid, cwd: path });
+      sftpSessionRegistry.register({ registryId, label, sessionId: sid, cwd: path, profile: target?.ssh });
     }
   });
 
@@ -790,6 +842,17 @@
     })();
   });
 
+  $effect(() => {
+    const token = refreshToken;
+    if (appliedRefreshToken === null) {
+      appliedRefreshToken = token;
+      return;
+    }
+    if (token === appliedRefreshToken) return;
+    appliedRefreshToken = token;
+    if (sessionId) void refresh();
+  });
+
   function clampMenuToViewport(x: number, y: number, el: HTMLDivElement | null): { x: number; y: number } {
     if (!el) return { x, y };
     const pad = 8;
@@ -801,9 +864,111 @@
     };
   }
 
+  function clearRemoteSelection() {
+    selectedRemoteNames = new Set();
+    focusedRemoteName = null;
+    lastSelectedRemoteName = null;
+  }
+
+  function pruneRemoteSelection() {
+    const names = new Set(entries.map((entry) => entry.name));
+    selectedRemoteNames = new Set([...selectedRemoteNames].filter((name) => names.has(name)));
+    if (focusedRemoteName && !names.has(focusedRemoteName)) focusedRemoteName = null;
+    if (lastSelectedRemoteName && !names.has(lastSelectedRemoteName)) lastSelectedRemoteName = null;
+  }
+
+  function remoteEntryByName(name: string | null): SftpEntry | null {
+    if (!name) return null;
+    return entries.find((entry) => entry.name === name) ?? null;
+  }
+
+  function selectedRemoteEntries(): SftpEntry[] {
+    return entries.filter((entry) => selectedRemoteNames.has(entry.name));
+  }
+
+  function selectRemoteEntry(entry: SftpEntry, ev?: MouseEvent) {
+    if (loading) return;
+    remotePaneEl?.focus();
+    focusedRemoteName = entry.name;
+    const next = new Set(selectedRemoteNames);
+    if (ev?.shiftKey && lastSelectedRemoteName) {
+      const from = entries.findIndex((item) => item.name === lastSelectedRemoteName);
+      const to = entries.findIndex((item) => item.name === entry.name);
+      if (from >= 0 && to >= 0) {
+        next.clear();
+        const [start, end] = from <= to ? [from, to] : [to, from];
+        for (const item of entries.slice(start, end + 1)) next.add(item.name);
+      }
+    } else if (ev?.ctrlKey || ev?.metaKey) {
+      if (next.has(entry.name)) next.delete(entry.name);
+      else next.add(entry.name);
+      lastSelectedRemoteName = entry.name;
+    } else {
+      next.clear();
+      next.add(entry.name);
+      lastSelectedRemoteName = entry.name;
+    }
+    selectedRemoteNames = next;
+  }
+
+  function focusRelativeRemote(delta: number) {
+    if (loading || entries.length === 0) return;
+    const current = focusedRemoteName ? entries.findIndex((entry) => entry.name === focusedRemoteName) : -1;
+    const nextIdx = Math.min(entries.length - 1, Math.max(0, current + delta));
+    selectRemoteEntry(entries[nextIdx]!);
+  }
+
+  function focusedDialogPosition(): { x: number; y: number } | undefined {
+    const active = document.activeElement as HTMLElement | null;
+    const rect = active?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return undefined;
+    return { x: Math.round(rect.left + Math.min(rect.width, 24)), y: Math.round(rect.bottom + 6) };
+  }
+
+  function onRemotePaneKeydown(ev: KeyboardEvent) {
+    if (renamingName) return;
+    if (ev.key === 'F5') {
+      ev.preventDefault();
+      if (!loading) void refresh();
+      return;
+    }
+    if (ev.key === 'Delete' || ev.key === 'Backspace') {
+      const selected = selectedRemoteEntries();
+      if (selected.length > 0) {
+        ev.preventDefault();
+        void removeEntries(selected);
+      }
+      return;
+    }
+    if (ev.key === 'F2') {
+      const selected = selectedRemoteEntries();
+      if (selected.length === 1) {
+        ev.preventDefault();
+        startInlineRename(selected[0]!);
+      }
+      return;
+    }
+    if (ev.key === 'Enter') {
+      const focused = remoteEntryByName(focusedRemoteName);
+      if (focused?.kind === 'Dir') {
+        ev.preventDefault();
+        void enter(focused);
+      }
+      return;
+    }
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      focusRelativeRemote(1);
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      focusRelativeRemote(-1);
+    }
+  }
+
   async function openRemoteMenu(entry: SftpEntry, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
+    if (!selectedRemoteNames.has(entry.name)) selectRemoteEntry(entry);
     remoteMenuEntry = entry;
     remoteMenuX = ev.clientX;
     remoteMenuY = ev.clientY;
@@ -898,11 +1063,65 @@
     }
   }
 
+  async function receiveRemoteDrop(payload: RemoteDragPayload) {
+    if (!sessionId || !payload.sourceSessionId) return;
+    const destPath = joinPath(cwd, payload.name);
+    if (onRemoteCrossTransfer) {
+      onRemoteCrossTransfer({
+        sourceSessionId: payload.sourceSessionId,
+        sourceLabel: payload.sourceLabel,
+        sourceProfile: payload.sourceProfile,
+        sourcePath: payload.path,
+        sourceKind: payload.kind,
+        sourceSize: payload.size,
+        destSessionId: sessionId,
+        destLabel: target?.name ?? i18n.t('sftp.sshSession'),
+        destProfile: target?.ssh,
+        destDir: cwd,
+        destPath,
+        name: payload.name,
+      });
+      return;
+    }
+    const dirCache = new Set<string>();
+    try {
+      if (payload.kind === 'Dir') {
+        await copyRemoteDirBetweenSessions(payload.sourceSessionId, payload.path, sessionId, destPath, dirCache);
+      } else {
+        const destDir = parentPath(destPath);
+        if (destDir !== '/' && destDir !== '.') {
+          await ensureRemoteDirOn(sessionId, destDir, dirCache);
+        }
+        await copyRemoteFileBetweenSessions(payload.sourceSessionId, payload.path, sessionId, destPath, payload.size);
+      }
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('sftp.crossTransferFailed', { message: (e as Error).message }));
+    }
+  }
+
   async function sendEntryToSession(entry: SftpEntry, dest: RegisteredSftpSession) {
     if (!sessionId) return;
     closeRemoteMenu();
     const srcPath = joinPath(cwd, entry.name);
     const destPath = joinPath(dest.cwd, entry.name);
+    if (onRemoteCrossTransfer && (entry.kind === 'File' || entry.kind === 'Dir')) {
+      onRemoteCrossTransfer({
+        sourceSessionId: sessionId,
+        sourceLabel: target?.name ?? i18n.t('sftp.sshSession'),
+        sourceProfile: target?.ssh,
+        sourcePath: srcPath,
+        sourceKind: entry.kind,
+        sourceSize: entry.size,
+        destSessionId: dest.sessionId,
+        destLabel: dest.label,
+        destProfile: dest.profile,
+        destDir: dest.cwd,
+        destPath,
+        name: entry.name,
+      });
+      return;
+    }
     const dirCache = new Set<string>();
     try {
       if (entry.kind === 'Dir') {
@@ -1061,6 +1280,8 @@
   }
 
   function startInlineRename(e: SftpEntry) {
+    if (loading) return;
+    selectRemoteEntry(e);
     renamingName = e.name;
     renameDraft = e.name;
   }
@@ -1280,7 +1501,9 @@
   });
 
   async function jumpTo(p: string) {
+    if (loading) return;
     cwd = p;
+    clearRemoteSelection();
     await refresh();
   }
 
@@ -1421,7 +1644,7 @@
     {/if}
 
     <div class="flex-1 min-h-0 flex">
-      {#if localCwd}
+      {#if showLocalPane && localCwd}
         <div class="w-[42%] min-w-[200px] max-w-[50%] flex flex-col min-h-0">
           <SftpLocalPane
             cwd={localCwd}
@@ -1439,16 +1662,20 @@
         </div>
       {/if}
       <div
-        class="flex-1 min-w-0 flex flex-col min-h-0"
-        role="region"
+        bind:this={remotePaneEl}
+        class="flex-1 min-w-0 flex flex-col min-h-0 outline-none"
+        role="listbox"
+        tabindex="0"
+        aria-busy={loading}
         aria-label={i18n.t('sftp.remotePane')}
+        onkeydown={onRemotePaneKeydown}
         ondragover={preventDragDefaults}
-        ondrop={(e) => { void handleRemotePaneDrop(e); }}
+        ondrop={(e) => { if (!loading) void handleRemotePaneDrop(e); }}
       >
         <div class="px-2 py-1 shell-section-title border-b border-[var(--color-border-soft)]">
           {i18n.t('sftp.remotePane')}
         </div>
-        <div class="flex-1 min-h-0 overflow-y-auto">
+        <div class="relative flex-1 min-h-0 overflow-y-auto {loading && entries.length > 0 ? 'pointer-events-none opacity-70' : ''}">
           {#if loading && entries.length === 0 && !listError}
             <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
           {:else if entries.length === 0 && !listError}
@@ -1472,10 +1699,14 @@
               >
                 {#each entries as e (e.name)}
                   <tr
-                    class="hover:bg-[var(--color-panel-2)] group"
-                    draggable={e.kind === 'File' || e.kind === 'Dir'}
+                    class="hover:bg-[var(--color-panel-2)] group {selectedRemoteNames.has(e.name) ? 'bg-[var(--color-accent-soft)]' : ''} {focusedRemoteName === e.name ? 'outline outline-1 outline-[var(--color-accent)] outline-offset-[-1px]' : ''}"
+                    draggable={!loading && (e.kind === 'File' || e.kind === 'Dir')}
+                    role="option"
+                    aria-selected={selectedRemoteNames.has(e.name)}
                     ondragstart={(ev) => onRemoteDragStart(ev, e)}
                     oncontextmenu={(ev) => { void openRemoteMenu(e, ev); }}
+                    onclick={(ev) => selectRemoteEntry(e, ev)}
+                    ondblclick={() => { void enter(e); }}
                   >
                     <td class="px-3 py-1 truncate">
                       {#if renamingName === e.name}
@@ -1504,8 +1735,8 @@
                         <button
                           type="button"
                           class="flex items-center gap-2 w-full text-left"
-                          ondblclick={() => enter(e)}
-                          onclick={() => e.kind === 'Dir' && enter(e)}
+                          ondblclick={(ev) => { ev.stopPropagation(); void enter(e); }}
+                          onclick={(ev) => { ev.stopPropagation(); selectRemoteEntry(e, ev); }}
                         >
                           {#if e.kind === 'Dir'}
                             <Folder size={13} class="text-[var(--color-accent)]" />
@@ -1527,7 +1758,7 @@
                         <button
                           type="button"
                           class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                          onclick={() => { void openTextEditor(e); }}
+                          onclick={(ev) => { ev.stopPropagation(); void openTextEditor(e); }}
                           title={i18n.t('sftp.editFile')}
                           aria-label={i18n.t('sftp.editFile')}
                         >
@@ -1538,7 +1769,7 @@
                         <button
                           type="button"
                           class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                          onclick={() => downloadEntry(e)}
+                          onclick={(ev) => { ev.stopPropagation(); downloadEntry(e); }}
                           title={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
                           aria-label={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
                         >
@@ -1548,7 +1779,7 @@
                       <button
                         type="button"
                         class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                        onclick={() => startInlineRename(e)}
+                        onclick={(ev) => { ev.stopPropagation(); startInlineRename(e); }}
                         title={i18n.t('common.rename')}
                         aria-label={i18n.t('common.rename')}
                       >
@@ -1557,7 +1788,7 @@
                       <button
                         type="button"
                         class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
-                        onclick={() => removeEntry(e)}
+                        onclick={(ev) => { ev.stopPropagation(); void removeEntry(e); }}
                         title={i18n.t('common.delete')}
                         aria-label={i18n.t('common.delete')}
                       >
@@ -1748,8 +1979,8 @@
         {/each}
       {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item text-[var(--color-danger)]" onmousedown={runRemoteMenuAction((en) => { void removeEntry(en); })}>
-        {i18n.t('sftp.contextDelete')}
+      <button type="button" class="menu-item text-[var(--color-danger)]" onmousedown={runRemoteMenuAction((en) => { const selected = selectedRemoteEntries(); void removeEntries(selected.length > 1 && selected.some((item) => item.name === en.name) ? selected : [en]); })}>
+        {selectedRemoteNames.size > 1 ? i18n.t('sftp.contextDeleteSelected', { count: selectedRemoteNames.size }) : i18n.t('sftp.contextDelete')}
       </button>
     </div>
   </div>

@@ -283,7 +283,7 @@ mod login_shell_tests {
         let cmd = build_shell_command("/bin/zsh", &[]);
         let args: Vec<String> = cmd
             .get_argv()
-            .into_iter()
+            .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
         assert!(args.windows(2).any(|w| w == ["/bin/zsh", "-l"]));

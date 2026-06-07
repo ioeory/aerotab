@@ -29,6 +29,7 @@
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
     tabVisible?: boolean;
+    onError?: (msg: string) => void;
   }
 
   let {
@@ -42,6 +43,7 @@
     broadcastEnabled = false,
     broadcastTargetIds = [],
     tabVisible = true,
+    onError,
   }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
   let dragHandle: HTMLDivElement | null = $state(null);
@@ -157,21 +159,24 @@
         <span>{tabs.paneIndex(tab, node.pane.id) + 1}</span>
       </div>
     {/if}
-    <TerminalPane
-      {rpc}
-      session={node.pane}
-      active={focused}
-      layoutVisible={!hiddenByMaximize}
-      {tabVisible}
-      {settingsRev}
-      onClosePane={() => closePane(node.pane.id, new Event('close'))}
-      {onOpenSftp}
-      {onSplitRight}
-      {onSplitDown}
-      onMaximize={() => toggleMaximize(node.pane.id, new Event('click'))}
-      {broadcastEnabled}
-      {broadcastTargetIds}
-    />
+    {#key node.pane.id}
+      <TerminalPane
+        {rpc}
+        session={node.pane}
+        active={focused}
+        layoutVisible={!hiddenByMaximize}
+        {tabVisible}
+        {settingsRev}
+        onClosePane={() => closePane(node.pane.id, new Event('close'))}
+        {onOpenSftp}
+        {onSplitRight}
+        {onSplitDown}
+        onMaximize={() => toggleMaximize(node.pane.id, new Event('click'))}
+        {broadcastEnabled}
+        {broadcastTargetIds}
+        {onError}
+      />
+    {/key}
     {#if tab.panes.length > 1}
       <button
         type="button"
@@ -231,6 +236,7 @@
           {onSplitDown}
           {broadcastEnabled}
           {broadcastTargetIds}
+          {onError}
         />
       </div>
       {#if idx < node.children.length - 1 && !maximized}

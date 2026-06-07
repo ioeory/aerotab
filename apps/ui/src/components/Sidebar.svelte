@@ -1,13 +1,14 @@
 <script lang="ts">
   import {
-    Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X, RefreshCw,
+    Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X, RefreshCw, ArrowLeftRight,
   } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
   import { tabs } from '../lib/tabs.svelte';
   import { healthIssueDetailText, summarizeHealthResults } from '../lib/profileHealthUi';
   import { focusProfileInTabs } from '../lib/focusProfileSession';
-  import { matchesProfileQuery } from '../lib/profileMeta';
+  import { formatTags, matchesProfileQuery, parseProfileIconInput, parseTagsInput, profileEndpointLabel } from '../lib/profileMeta';
+  import { pickIconFilePath } from '../lib/localFiles';
   import type { ProfileModalOpenOptions } from './ProfileModal.svelte';
   import {
     handleProfileSidebarShortcut,
@@ -21,10 +22,12 @@
   } from '../lib/profileBulkOpen';
   import {
     buildProfileTree,
+    collectProfileGroupPaths,
     collectProfilesInFolder,
     expandPathsForGroup,
     expandPathsForMatches,
     loadCollapsedPaths,
+    normalizeGroupPath,
     saveCollapsedPaths,
     type ProfileTreeFolder,
   } from '../lib/profileTree';
@@ -57,26 +60,84 @@
     openSerialModal: () => void;
     openSftp: (p: StoredProfile) => void;
     openSettings: () => void;
+    workspaceView?: 'terminal' | 'transfer';
+    onShowTerminal?: () => void;
+    onShowTransfer?: () => void;
   }
-  let { rpc, onError, openProfileModal, openSerialModal, openSftp, openSettings }: Props = $props();
+  let {
+    rpc,
+    onError,
+    openProfileModal,
+    openSerialModal,
+    openSftp,
+    openSettings,
+    workspaceView = 'terminal',
+    onShowTerminal,
+    onShowTransfer,
+  }: Props = $props();
 
   let profiles = $state<StoredProfile[]>([]);
   let profilesRefreshing = $state(false);
   let profileQuery = $state('');
   let collapsedPaths = $state<Set<string>>(loadCollapsedPaths());
+  let explicitGroupPaths = $state<string[]>([]);
+
+  const PROFILE_GROUPS_SETTINGS_KEY = 'profile.groups';
 
   const filteredProfiles = $derived(
     profiles.filter((p) => matchesProfileQuery(p, profileQuery)),
   );
-  const profileTree = $derived(buildProfileTree(filteredProfiles));
+  const allGroupPaths = $derived.by(() => {
+    const groups = new Set<string>(explicitGroupPaths);
+    for (const group of collectProfileGroupPaths(profiles)) groups.add(group);
+    return [...groups].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  });
+  const visibleExplicitGroupPaths = $derived.by(() => {
+    const query = profileQuery.trim().toLowerCase();
+    if (!query) return explicitGroupPaths;
+    return explicitGroupPaths.filter((group) => group.toLowerCase().includes(query));
+  });
+  const profileTree = $derived(buildProfileTree(filteredProfiles, visibleExplicitGroupPaths));
   const forceExpandedPaths = $derived(
     profileQuery.trim()
       ? expandPathsForMatches(profiles, (p) => matchesProfileQuery(p, profileQuery))
       : new Set<string>(),
   );
   const hasVisibleProfiles = $derived(
-    filteredProfiles.length > 0,
+    filteredProfiles.length > 0 || profileTree.folders.length > 0,
   );
+
+  function normalizeGroupList(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    const out = new Set<string>();
+    for (const raw of value) {
+      if (typeof raw !== 'string') continue;
+      const normalized = normalizeGroupPath(raw);
+      if (normalized) out.add(normalized);
+    }
+    return [...out].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }
+
+  async function loadExplicitGroups() {
+    try {
+      const r = await rpc.call<{ value: unknown }>('settings.get', { key: PROFILE_GROUPS_SETTINGS_KEY });
+      explicitGroupPaths = normalizeGroupList(r.value);
+    } catch {
+      explicitGroupPaths = [];
+    }
+  }
+
+  async function saveExplicitGroups(paths: string[]) {
+    const normalized = normalizeGroupList(paths);
+    explicitGroupPaths = normalized;
+    await rpc.call('settings.set', { key: PROFILE_GROUPS_SETTINGS_KEY, value: normalized });
+  }
+
+  async function ensureExplicitGroup(group: string | null | undefined) {
+    const normalized = normalizeGroupPath(group);
+    if (!normalized || explicitGroupPaths.includes(normalized)) return;
+    await saveExplicitGroups([...explicitGroupPaths, normalized]);
+  }
 
   function toggleFolder(path: string) {
     const next = new Set(collapsedPaths);
@@ -88,6 +149,27 @@
 
   function clearProfileSearch() {
     profileQuery = '';
+  }
+
+  async function createGroup(parentPath: string | null = null) {
+    closeMenu();
+    const prefix = normalizeGroupPath(parentPath);
+    const defaultValue = prefix ? `${prefix}/` : '';
+    const value = await appPrompt(i18n.t('sidebar.createGroupPrompt'), {
+      defaultValue,
+      placeholder: i18n.t('profileModal.groupPlaceholder'),
+      confirmLabel: i18n.t('sidebar.createGroup'),
+    });
+    if (value === null) return;
+    const normalized = normalizeGroupPath(value);
+    if (!normalized) return;
+    try {
+      await saveExplicitGroups([...explicitGroupPaths, normalized]);
+      expandFoldersForGroup(normalized);
+      notifyProfilesChanged({ group: normalized });
+    } catch (e) {
+      onError(i18n.t('sidebar.createGroupFailed', { message: (e as Error).message }));
+    }
   }
 
   function expandFoldersForGroup(group: string | null | undefined) {
@@ -103,11 +185,15 @@
     if (profilesRefreshing) return;
     profilesRefreshing = true;
     try {
-      profiles = await withRpcTimeout(
-        rpc.call<StoredProfile[]>('profile.list'),
-        20_000,
-        'profile.list',
-      );
+      const [profileList] = await Promise.all([
+        withRpcTimeout(
+          rpc.call<StoredProfile[]>('profile.list'),
+          20_000,
+          'profile.list',
+        ),
+        loadExplicitGroups(),
+      ]);
+      profiles = profileList;
     } catch (e) {
       profiles = [];
       onError(`profile.list: ${(e as Error).message}`);
@@ -168,7 +254,7 @@
         tabs.add({ ...meta, profileId: p.id, sshProfile: p.ssh });
       }
     } catch (e) {
-      onError(`ssh: ${(e as Error).message}`);
+      onError(`ssh ${p.name} (${profileEndpointLabel(p)}): ${(e as Error).message}`);
     }
   }
 
@@ -333,6 +419,47 @@
     return [context];
   }
 
+
+  function profilesForAction(context: StoredProfile): StoredProfile[] {
+    return selectedProfileIds.has(context.id) && selectedProfileIds.size > 0 ? selectedProfiles : [context];
+  }
+
+  async function deleteProfilesForAction(context: StoredProfile) {
+    const list = profilesForAction(context);
+    if (list.length > 1) {
+      await bulkDeleteProfiles(list);
+      return;
+    }
+    await deleteProfile(context);
+  }
+
+  async function openProfilesForAction(context: StoredProfile, mode: 'new-tab' | 'split-right' | 'split-down') {
+    const list = profilesForAction(context);
+    if (list.length <= 1) {
+      await openProfile(context, mode);
+      return;
+    }
+    bulkBusy = true;
+    try {
+      const deps = {
+        ...bulkOpenDeps,
+        confirmMany:
+          list.filter((p) => p.kind === 'ssh').length > BULK_OPEN_CONFIRM_THRESHOLD
+            ? async (count: number) => bulkOpenConfirmMany(count, 'profiles.bulkOpenManyConfirmEachNewTab')
+            : undefined,
+      };
+      if (mode === 'new-tab') {
+        await openProfilesEachInNewTab(list, deps);
+      } else {
+        await openProfilesInSameTab(list, deps, { tabTarget: 'active' });
+      }
+    } catch (e) {
+      onError(`connect: ${(e as Error).message}`);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
   async function moveProfilesToGroup(profiles: StoredProfile[], group: string | null) {
     if (profiles.length === 0 || bulkBusy) return;
     closeMenu();
@@ -340,6 +467,7 @@
     try {
       const moved = await upsertProfilesGroup(rpc, profiles, group);
       if (moved > 0) {
+        await ensureExplicitGroup(group);
         notifyProfilesChanged({ group });
         expandFoldersForGroup(group);
       }
@@ -365,12 +493,15 @@
     await moveProfilesToGroup(profiles, normalizeProfileGroupInput(value));
   }
 
+  async function moveProfilesToExistingGroup(list: StoredProfile[], group: string | null) {
+    await moveProfilesToGroup(list, group);
+  }
+
   async function bulkMoveSelected() {
     await promptAndMoveProfiles(selectedProfiles);
   }
 
-  async function bulkDeleteSelected() {
-    const list = selectedProfiles;
+  async function bulkDeleteProfiles(list: StoredProfile[]) {
     if (list.length === 0) return;
     if (!(await appConfirm(i18n.t('profiles.bulkDeleteConfirm', { count: list.length }), {
       danger: true,
@@ -389,6 +520,10 @@
     } finally {
       bulkBusy = false;
     }
+  }
+
+  async function bulkDeleteSelected() {
+    await bulkDeleteProfiles(selectedProfiles);
   }
 
   function showProfileMenu(p: StoredProfile, ev: MouseEvent) {
@@ -411,15 +546,15 @@
 
   function menuOpenInNewTab(p: StoredProfile) {
     closeMenu();
-    void openProfile(p, 'new-tab');
+    void openProfilesForAction(p, 'new-tab');
   }
   function menuSplitRight(p: StoredProfile) {
     closeMenu();
-    void openProfile(p, 'split-right');
+    void openProfilesForAction(p, 'split-right');
   }
   function menuSplitDown(p: StoredProfile) {
     closeMenu();
-    void openProfile(p, 'split-down');
+    void openProfilesForAction(p, 'split-down');
   }
   function menuOpenSftp(p: StoredProfile) {
     closeMenu();
@@ -429,8 +564,95 @@
     closeMenu();
     void editProfile(p);
   }
+  function groupDepth(path: string): number {
+    return path.split('/').filter(Boolean).length;
+  }
+
+  function groupLabel(path: string): string {
+    const parts = path.split('/').filter(Boolean);
+    return parts[parts.length - 1] ?? path;
+  }
+
   function menuMoveToGroup(p: StoredProfile) {
     void promptAndMoveProfiles(profilesToMove(p));
+  }
+  function menuMoveToExistingGroup(p: StoredProfile, group: string | null) {
+    void moveProfilesToExistingGroup(profilesToMove(p), group);
+  }
+  async function menuEditTags(p: StoredProfile) {
+    closeMenu();
+    const value = await appPrompt(i18n.t('sidebar.editTagsPrompt'), {
+      defaultValue: formatTags(p.tags),
+      placeholder: 'prod, db, singapore',
+      confirmLabel: i18n.t('common.save'),
+    });
+    if (value === null) return;
+    try {
+      const fresh = await latestProfile(p);
+      await rpc.call('profile.upsert', { ...fresh, tags: parseTagsInput(value) });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+  async function menuEditNote(p: StoredProfile) {
+    closeMenu();
+    const value = await appPrompt(i18n.t('sidebar.editNotePrompt'), {
+      defaultValue: p.note ?? '',
+      placeholder: i18n.t('profileModal.notePlaceholder'),
+      confirmLabel: i18n.t('common.save'),
+    });
+    if (value === null) return;
+    try {
+      const fresh = await latestProfile(p);
+      await rpc.call('profile.upsert', { ...fresh, note: value.trim() || null });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+  async function menuViewNote(p: StoredProfile) {
+    closeMenu();
+    await appConfirm(p.note?.trim() || i18n.t('sidebar.noNote'), {
+      title: p.name,
+      confirmLabel: i18n.t('common.ok'),
+    });
+  }
+  async function menuEditIcon(p: StoredProfile) {
+    closeMenu();
+    const defaultValue = p.icon?.kind === 'selfhst' ? `selfhst:${p.icon.value}` : p.icon?.kind === 'remote' ? `remote:${p.icon.value}` : p.icon?.value ?? '';
+    const value = await appPrompt(i18n.t('sidebar.editIconPrompt'), {
+      defaultValue,
+      placeholder: 'selfhst:home-assistant, server, emoji:rocket, remote:https://host/a.svg|https://host/b.png',
+      confirmLabel: i18n.t('common.save'),
+    });
+    if (value === null) return;
+    try {
+      const fresh = await latestProfile(p);
+      await rpc.call('profile.upsert', {
+        ...fresh,
+        icon: parseProfileIconInput(value),
+      });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+  async function menuChooseIconFile(p: StoredProfile) {
+    closeMenu();
+    const path = await pickIconFilePath();
+    if (!path) return;
+    try {
+      const fresh = await latestProfile(p);
+      await rpc.call('profile.upsert', { ...fresh, icon: { kind: 'file', value: path } });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
   }
   function menuMoveSelectedToFolder(groupPath: string) {
     const group = groupPath.trim() ? groupPath.trim() : null;
@@ -450,11 +672,14 @@
   }
   function menuDelete(p: StoredProfile) {
     closeMenu();
-    void deleteProfile(p);
+    void deleteProfilesForAction(p);
   }
   function menuNewProfileInGroup(groupPath: string) {
     closeMenu();
     openProfileModal(undefined, { group: groupPath });
+  }
+  function menuCreateGroup(parentPath: string | null = null) {
+    void createGroup(parentPath);
   }
 
   async function menuOpenGroupProfiles(folder: ProfileTreeFolder) {
@@ -526,10 +751,10 @@
   const profileShortcutHandlers = {
     onEdit: (p: StoredProfile) => { void editProfile(p); },
     onClone: (p: StoredProfile) => { void cloneProfile(p); },
-    onRemove: (p: StoredProfile) => { void deleteProfile(p); },
-    onOpenNewTab: (p: StoredProfile) => { void openProfile(p, 'new-tab'); },
-    onSplitRight: (p: StoredProfile) => { void openProfile(p, 'split-right'); },
-    onSplitDown: (p: StoredProfile) => { void openProfile(p, 'split-down'); },
+    onRemove: (p: StoredProfile) => { void deleteProfilesForAction(p); },
+    onOpenNewTab: (p: StoredProfile) => { void openProfilesForAction(p, 'new-tab'); },
+    onSplitRight: (p: StoredProfile) => { void openProfilesForAction(p, 'split-right'); },
+    onSplitDown: (p: StoredProfile) => { void openProfilesForAction(p, 'split-down'); },
     onOpenSftp: (p: StoredProfile) => { openSftp(p); },
   };
 
@@ -539,6 +764,118 @@
       ev.preventDefault();
       ev.stopPropagation();
     }
+  }
+
+  type ProfileDragPayload = { kind: 'profiles'; ids: string[] } | { kind: 'group'; path: string };
+  const PROFILE_DND_MIME = 'application/x-aerotab-profile-drag';
+
+  function setProfileDragData(ev: DragEvent, payload: ProfileDragPayload) {
+    ev.dataTransfer?.setData(PROFILE_DND_MIME, JSON.stringify(payload));
+    ev.dataTransfer?.setData('text/plain', payload.kind === 'group' ? payload.path : payload.ids.join(','));
+    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+  }
+
+  function readProfileDragData(ev: DragEvent): ProfileDragPayload | null {
+    const raw = ev.dataTransfer?.getData(PROFILE_DND_MIME);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as ProfileDragPayload;
+      if (parsed.kind === 'profiles' && Array.isArray(parsed.ids)) return parsed;
+      if (parsed.kind === 'group' && typeof parsed.path === 'string') return parsed;
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  function profileDragList(p: StoredProfile): StoredProfile[] {
+    return selectedProfileIds.has(p.id) && selectedProfileIds.size > 0 ? selectedProfiles : [p];
+  }
+
+  function onProfileDragStart(p: StoredProfile, ev: DragEvent) {
+    const list = profileDragList(p);
+    selectedProfileIds = new Set(list.map((x) => x.id));
+    selectionAnchorId = p.id;
+    focusProfile(p);
+    setProfileDragData(ev, { kind: 'profiles', ids: list.map((x) => x.id) });
+  }
+
+  function onFolderDragStart(folder: ProfileTreeFolder, ev: DragEvent) {
+    setProfileDragData(ev, { kind: 'group', path: folder.path });
+  }
+
+  function onFolderDragOver(_folder: ProfileTreeFolder, ev: DragEvent) {
+    const dataTransfer = ev.dataTransfer;
+    if (!Array.from(dataTransfer?.types ?? []).includes(PROFILE_DND_MIME)) return;
+    ev.preventDefault();
+    if (dataTransfer) dataTransfer.dropEffect = 'move';
+  }
+
+  async function moveGroupTo(sourcePath: string, targetParentPath: string | null) {
+    const source = normalizeGroupPath(sourcePath);
+    const targetParent = normalizeGroupPath(targetParentPath);
+    if (!source) return;
+    if (targetParent === source || (targetParent?.startsWith(`${source}/`) ?? false)) {
+      onError(i18n.t('sidebar.moveGroupIntoSelf'));
+      return;
+    }
+    const name = source.split('/').pop() ?? source;
+    const target = targetParent ? `${targetParent}/${name}` : name;
+    if (target === source) return;
+    bulkBusy = true;
+    try {
+      const changedProfiles = profiles.filter((p) => {
+        const group = normalizeGroupPath(p.group);
+        return group === source || group?.startsWith(`${source}/`);
+      });
+      for (const profile of changedProfiles) {
+        const group = normalizeGroupPath(profile.group);
+        if (!group) continue;
+        const nextGroup = `${target}${group.slice(source.length)}`;
+        await rpc.call('profile.upsert', { ...profile, group: nextGroup });
+      }
+      const nextGroups = explicitGroupPaths.map((group) => {
+        if (group === source || group.startsWith(`${source}/`)) return `${target}${group.slice(source.length)}`;
+        return group;
+      });
+      await saveExplicitGroups([...nextGroups, target]);
+      expandFoldersForGroup(target);
+      notifyProfilesChanged({ group: target });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function handleDropToGroup(targetGroup: string | null, ev: DragEvent) {
+    const payload = readProfileDragData(ev);
+    if (!payload) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (payload.kind === 'profiles') {
+      const ids = new Set(payload.ids);
+      const list = profiles.filter((p) => ids.has(p.id));
+      await moveProfilesToGroup(list, targetGroup);
+    } else {
+      await moveGroupTo(payload.path, targetGroup);
+    }
+  }
+
+  function onFolderDrop(folder: ProfileTreeFolder, ev: DragEvent) {
+    void handleDropToGroup(folder.path, ev);
+  }
+
+  function onRootDragOver(ev: DragEvent) {
+    const dataTransfer = ev.dataTransfer;
+    if (!Array.from(dataTransfer?.types ?? []).includes(PROFILE_DND_MIME)) return;
+    ev.preventDefault();
+    if (dataTransfer) dataTransfer.dropEffect = 'move';
+  }
+
+  function onRootDrop(ev: DragEvent) {
+    void handleDropToGroup(null, ev);
   }
 
   function shortcutKbd(key: ProfileSidebarActionKey): string {
@@ -559,6 +896,31 @@
       aria-label={i18n.t('sidebar.settings')}
     >
       <SettingsIcon size={14} />
+    </button>
+  </div>
+
+  <div class="px-2 pt-2 pb-1 border-b border-[var(--color-border-soft)] grid grid-cols-2 gap-1">
+    <button
+      type="button"
+      onclick={() => onShowTerminal?.()}
+      class="workspace-switch {workspaceView === 'terminal' ? 'workspace-switch--active' : ''}"
+      aria-pressed={workspaceView === 'terminal'}
+      title={i18n.t('workspace.terminal')}
+      aria-label={i18n.t('workspace.terminal')}
+    >
+      <TerminalIcon size={14} />
+      <span>{i18n.t('workspace.terminal')}</span>
+    </button>
+    <button
+      type="button"
+      onclick={() => onShowTransfer?.()}
+      class="workspace-switch {workspaceView === 'transfer' ? 'workspace-switch--active' : ''}"
+      aria-pressed={workspaceView === 'transfer'}
+      title={i18n.t('workspace.fileTransfer')}
+      aria-label={i18n.t('workspace.fileTransfer')}
+    >
+      <ArrowLeftRight size={14} />
+      <span>{i18n.t('workspace.fileTransfer')}</span>
     </button>
   </div>
 
@@ -595,6 +957,15 @@
   <div class="px-2 pt-2 pb-1 flex flex-col gap-1.5">
     <div class="px-1 flex items-center gap-1 min-h-[22px]">
       <div class="shell-section-title flex-1 min-w-0">{i18n.t('sidebar.sshProfiles')}</div>
+      <button
+        type="button"
+        class="btn-ghost p-1 shrink-0 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+        title={i18n.t('sidebar.createGroup')}
+        aria-label={i18n.t('sidebar.createGroup')}
+        onclick={() => menuCreateGroup(null)}
+      >
+        <Plus size={13} />
+      </button>
       <button
         type="button"
         class="btn-ghost p-1 shrink-0 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
@@ -669,7 +1040,7 @@
       </div>
     {/if}
   </div>
-  <div class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0">
+  <div role="presentation" class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" ondragover={onRootDragOver} ondrop={onRootDrop}>
     {#if !hasVisibleProfiles}
       <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)] italic">
         {profileQuery.trim() ? i18n.t('sidebar.noSearchResults') : i18n.t('sidebar.noProfiles')}
@@ -684,13 +1055,17 @@
         profileHealth={profileHealth}
         showSelection={hasProfileSelection}
         onToggleFolder={toggleFolder}
-        onOpenProfile={(p) => openProfile(p)}
+        onOpenProfile={(p) => { void openProfilesForAction(p, 'new-tab'); }}
         onProfileClick={onProfileRowClick}
         onProfileCheckboxToggle={toggleProfileCheckbox}
         onProfileFocus={focusProfile}
         onProfileKeydown={onProfileKeydown}
         onProfileContextMenu={showProfileMenu}
+        onProfileDragStart={onProfileDragStart}
         onFolderContextMenu={showFolderMenu}
+        onFolderDragStart={onFolderDragStart}
+        onFolderDragOver={onFolderDragOver}
+        onFolderDrop={onFolderDrop}
         showUngroupedLabel={profileTree.folders.length > 0}
       />
     {/if}
@@ -713,8 +1088,8 @@
     role="menu"
     tabindex="-1"
     data-aerotab-context-menu=""
-    class="panel fixed z-[56] min-w-[200px] py-1 text-[12.5px] text-[var(--color-fg)]"
-    style="left: {menuX}px; top: {menuY}px;"
+    class="panel context-menu-scroll fixed z-[56] min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
+    style="left: {menuX}px; top: {menuY}px; --submenu-x: {menuX}px; --submenu-y: {menuY}px;"
     onkeydown={(e) => e.stopPropagation()}
     onclick={(e) => e.stopPropagation()}
   >
@@ -740,17 +1115,41 @@
           </button>
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         {/if}
+        <button type="button" class="menu-item" onclick={() => menuCreateGroup(groupPath)}>{i18n.t('sidebar.createSubgroup')}</button>
         <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
           {i18n.t('sidebar.newProfileInGroup')}
         </button>
       {:else}
         {@const mp = menuTarget.profile}
         {@const moveCount = selectedProfileIds.has(mp.id) ? selectedProfileIds.size : 1}
-        <button type="button" class="menu-item" onclick={() => menuMoveToGroup(mp)}>
-          {moveCount > 1
-            ? i18n.t('sidebar.moveProfilesToGroup', { count: moveCount })
-            : i18n.t('sidebar.moveProfileToGroup')}
-        </button>
+        <div class="menu-with-submenu">
+          <button type="button" class="menu-item menu-item--submenu" onclick={() => menuMoveToGroup(mp)}>
+            <span>{moveCount > 1
+              ? i18n.t('sidebar.moveProfilesToGroup', { count: moveCount })
+              : i18n.t('sidebar.moveProfileToGroup')}</span>
+            <span class="submenu-arrow">›</span>
+          </button>
+          <div class="submenu-panel" role="menu">
+            <button type="button" class="menu-item" onclick={() => menuMoveToExistingGroup(mp, null)}>{i18n.t('sidebar.ungrouped')}</button>
+            {#each allGroupPaths as group (group)}
+              <button
+                type="button"
+                class="menu-item group-menu-item"
+                style="padding-left: {10 + Math.max(0, groupDepth(group) - 1) * 12}px"
+                title={group}
+                onclick={() => menuMoveToExistingGroup(mp, group)}
+              >
+                <span class="truncate">{groupLabel(group)}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        <button type="button" class="menu-item" onclick={() => { void menuEditTags(mp); }}>{i18n.t('sidebar.editTags')}</button>
+        <button type="button" class="menu-item" onclick={() => { void menuEditNote(mp); }}>{i18n.t('sidebar.editNote')}</button>
+        <button type="button" class="menu-item" onclick={() => { void menuViewNote(mp); }}>{i18n.t('sidebar.viewNote')}</button>
+        <button type="button" class="menu-item" onclick={() => { void menuEditIcon(mp); }}>{i18n.t('sidebar.editIcon')}</button>
+        <button type="button" class="menu-item" onclick={() => { void menuChooseIconFile(mp); }}>{i18n.t('sidebar.chooseIconFile')}</button>
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuEdit(mp)}>
           <span>{i18n.t('sidebar.editProfile')}</span>
@@ -788,3 +1187,75 @@
   </div>
   </div>
 {/if}
+
+<style>
+  .workspace-switch {
+    min-width: 0;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--color-fg-muted);
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .workspace-switch span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .workspace-switch:hover {
+    color: var(--color-fg);
+    background: var(--color-panel-2);
+  }
+  .workspace-switch--active {
+    color: var(--color-fg);
+    border-color: var(--color-border-soft);
+    background: var(--color-bg);
+    box-shadow: inset 0 -2px 0 var(--color-accent);
+  }
+  .context-menu-scroll {
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    overflow-x: visible;
+  }
+  .menu-with-submenu {
+    position: relative;
+  }
+  .menu-item--submenu {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .submenu-arrow {
+    color: var(--color-fg-muted);
+  }
+  .submenu-panel {
+    display: none;
+    position: fixed;
+    left: min(calc(var(--submenu-x, 0px) + 220px), calc(100vw - 240px));
+    top: max(8px, min(var(--submenu-y, 0px), calc(100vh - 320px)));
+    z-index: 57;
+    min-width: 220px;
+    max-width: min(320px, calc(100vw - 24px));
+    max-height: min(320px, calc(100vh - 16px));
+    overflow: auto;
+    padding: 4px 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-panel);
+    box-shadow: var(--shadow-lg);
+  }
+  .menu-with-submenu:hover .submenu-panel,
+  .menu-with-submenu:focus-within .submenu-panel {
+    display: block;
+  }
+  .group-menu-item {
+    padding-left: calc(10px + max(0, var(--group-depth, 1) - 1) * 12px);
+  }
+</style>

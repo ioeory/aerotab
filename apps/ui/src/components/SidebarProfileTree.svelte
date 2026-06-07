@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ChevronDown, ChevronRight, ShieldAlert, ShieldCheck, ShieldX, Star } from '@lucide/svelte';
+  import { ChevronDown, ChevronRight, ShieldAlert, ShieldCheck, ShieldX, Star, StickyNote } from '@lucide/svelte';
   import type { ProfileHealthResult, StoredProfile } from '../lib/types';
   import type { ProfileTreeFolder } from '../lib/profileTree';
   import { profileEndpointLabel } from '../lib/profileMeta';
@@ -23,7 +23,12 @@
     onProfileFocus: (p: StoredProfile) => void;
     onProfileKeydown: (p: StoredProfile, ev: KeyboardEvent) => void;
     onProfileContextMenu: (p: StoredProfile, ev: MouseEvent) => void;
+    onProfileNoteClick?: (p: StoredProfile, ev: MouseEvent) => void;
+    onProfileDragStart: (p: StoredProfile, ev: DragEvent) => void;
     onFolderContextMenu: (folder: ProfileTreeFolder, ev: MouseEvent) => void;
+    onFolderDragStart: (folder: ProfileTreeFolder, ev: DragEvent) => void;
+    onFolderDragOver: (folder: ProfileTreeFolder, ev: DragEvent) => void;
+    onFolderDrop: (folder: ProfileTreeFolder, ev: DragEvent) => void;
     showUngroupedLabel?: boolean;
   }
 
@@ -44,7 +49,12 @@
     onProfileFocus,
     onProfileKeydown,
     onProfileContextMenu,
+    onProfileNoteClick,
+    onProfileDragStart,
     onFolderContextMenu,
+    onFolderDragStart,
+    onFolderDragOver,
+    onFolderDrop,
   }: Props = $props();
 
   function isExpanded(path: string): boolean {
@@ -72,6 +82,10 @@
       role="presentation"
       class="folder-header w-full flex items-center gap-1 py-1 pr-1 rounded-md
              hover:bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]"
+      draggable="true"
+      ondragstart={(e) => onFolderDragStart(child, e)}
+      ondragover={(e) => onFolderDragOver(child, e)}
+      ondrop={(e) => onFolderDrop(child, e)}
       oncontextmenu={(e) => onFolderContextMenu(child, e)}
     >
       <button
@@ -116,7 +130,12 @@
           {onProfileFocus}
           {onProfileKeydown}
           {onProfileContextMenu}
+          {onProfileNoteClick}
+          {onProfileDragStart}
           {onFolderContextMenu}
+          {onFolderDragStart}
+          {onFolderDragOver}
+          {onFolderDrop}
         />
       </div>
     {/if}
@@ -131,6 +150,7 @@
 
 {#each folder.profiles as p (p.id)}
   {@const h = profileHealth[p.id]}
+  {@const rowTitle = `${profileEndpointLabel(p)} — ${i18n.t('sidebar.profileRowHint')}${p.note ? `\n${p.note}` : ''}`}
   <div
     class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer
            {focusedProfileId === p.id ? 'profile-row--focused' : ''}
@@ -138,7 +158,9 @@
     style="--depth: {depth}"
     role="button"
     tabindex="0"
-    title="{profileEndpointLabel(p)} — {i18n.t('sidebar.profileRowHint')}"
+    title={rowTitle}
+    draggable="true"
+    ondragstart={(e) => onProfileDragStart(p, e)}
     onclick={(ev) => (onProfileClick ? onProfileClick(p, ev) : onProfileFocus(p))}
     onfocus={() => onProfileFocus(p)}
     ondblclick={() => onOpenProfile(p)}
@@ -162,8 +184,8 @@
       }}
       aria-label={p.name}
     />
-    <ProfileIcon icon={p.icon} name={p.name} size={13} />
-    <div class="flex-1 min-w-0 text-left py-1.5 text-[12px]">
+    <ProfileIcon icon={p.icon} name={p.name} size={12} />
+    <div class="flex-1 min-w-0 text-left py-1 text-[11.5px]">
       <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
         <span class="truncate">{p.name}</span>
         {#if h}
@@ -180,12 +202,27 @@
         {#if p.favorite}
           <Star size={10} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
         {/if}
+        <button
+          type="button"
+          class="note-chip shrink-0 {p.note ? 'has-note' : ''}"
+          title={p.note?.trim() || i18n.t('sidebar.editNote')}
+          aria-label={i18n.t('sidebar.editNote')}
+          onclick={(ev) => {
+            ev.stopPropagation();
+            onProfileNoteClick?.(p, ev);
+          }}
+        >
+          <StickyNote size={10} />
+        </button>
       </div>
-      <div class="truncate text-[10.5px] text-[var(--color-fg-muted)]">
+      <div class="truncate text-[10px] text-[var(--color-fg-muted)]">
         {profileEndpointLabel(p)}
       </div>
+      {#if p.note}
+        <div class="truncate text-[10px] text-[var(--color-fg-muted)] opacity-80">{p.note}</div>
+      {/if}
       {#if (p.tags ?? []).length > 0}
-        <div class="mt-1 flex gap-1 overflow-hidden">
+        <div class="mt-0.5 flex gap-1 overflow-hidden">
           {#each (p.tags ?? []).slice(0, 3) as tag (tag)}
             <span
               class="shrink-0 max-w-[64px] truncate rounded-full border border-[var(--color-border-soft)]
@@ -213,7 +250,7 @@
     padding-left: calc(var(--depth, 0) * 10px);
   }
   .profile-row-indent {
-    width: 14px;
+    width: 12px;
   }
   .folder-children {
     display: flex;
@@ -232,5 +269,22 @@
   }
   .profile-row--selected {
     background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
+  }
+  .note-chip {
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    color: var(--color-fg-muted);
+    opacity: 0;
+  }
+  .profile-row:hover .note-chip,
+  .note-chip.has-note {
+    opacity: 0.9;
+  }
+  .note-chip:hover {
+    color: var(--color-accent);
+    background: var(--color-panel-2);
   }
 </style>

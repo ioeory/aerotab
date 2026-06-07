@@ -12,7 +12,7 @@ use std::{io::SeekFrom, time::SystemTime};
 
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::known_hosts::KnownHosts;
@@ -35,7 +35,7 @@ pub struct SftpEntry {
     pub mtime: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum SftpKind {
     File,
     Dir,

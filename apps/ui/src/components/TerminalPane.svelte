@@ -36,6 +36,7 @@
   import { focusTerminalIfAllowed } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
+  import { NativeEngineController } from '../lib/nativeTerminal';
 
   interface Props {
     rpc: RpcClient;
@@ -57,6 +58,7 @@
     /** When true, keystrokes are sent to every SSH pane in the tab. */
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
+    onError?: (msg: string) => void;
   }
   let {
     rpc,
@@ -72,6 +74,7 @@
     onMaximize,
     broadcastEnabled = false,
     broadcastTargetIds = [],
+    onError,
   }: Props = $props();
 
   let host: HTMLDivElement | null = null;
@@ -80,6 +83,8 @@
   let search: SearchAddon | null = null;
   let rendererAddon: { dispose: () => void } | null = null;
   let activeRenderer: 'dom' | 'canvas' | 'webgl' = 'dom';
+  let engineController: NativeEngineController | null = null;
+  let engineCanvas: HTMLCanvasElement | null = null;
   let pollHandle: number | null = null;
   let pollIntervalMs = 0;
   /** Bumped to drop in-flight `session.poll` results when the pane or tab is closing. */
@@ -146,6 +151,10 @@
     exited = true;
     term?.write('\r\n\x1b[31m[session ended]\x1b[0m The process exited or the connection was closed.\r\n');
     tabs.markActivity(session.id, 'bell');
+    focusExitedOverlay();
+  }
+
+  function focusExitedOverlay() {
     requestAnimationFrame(() => exitedOverlayEl?.focus());
   }
 
@@ -201,6 +210,12 @@
     }
   }
 
+  function reconnectTargetLabel(): string {
+    if (!session.sshProfile) return session.title;
+    const port = session.sshProfile.port === 22 ? '' : `:${session.sshProfile.port}`;
+    return `${session.title} (${session.sshProfile.user}@${session.sshProfile.host}${port})`;
+  }
+
   async function reconnectSession() {
     if (!canReconnect || reconnecting) return;
     reconnecting = true;
@@ -238,6 +253,8 @@
       );
       try { await rpc.call('session.close', { id: oldId }); } catch { /* old session may already be gone */ }
     } catch (err) {
+      const message = `reconnect ${reconnectTargetLabel()}: ${(err as Error).message}`;
+      onError?.(message);
       console.warn('reconnect failed', err);
     } finally {
       reconnecting = false;
@@ -672,6 +689,10 @@
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
       if (detail?.sessionId && detail.sessionId !== session.id) return;
       if (!active) return;
+      if (exited) {
+        focusExitedOverlay();
+        return;
+      }
       requestAnimationFrame(() => focusTerminalIfAllowed(term));
     };
     const fitListener = (ev: Event) => {
@@ -771,6 +792,20 @@
   let cleanupHost: (() => void) | null = null;
   let cleanupSearchListener: (() => void) | null = null;
   let macTextareaGuard: (() => void) | null = null;
+  let lastSessionId: string | null = null;
+
+  $effect(() => {
+    const currentSessionId = session.id;
+    if (lastSessionId === null) {
+      lastSessionId = currentSessionId;
+      return;
+    }
+    if (currentSessionId === lastSessionId) return;
+    lastSessionId = currentSessionId;
+    exited = false;
+    reconnecting = false;
+    exitedOverlayEl = null;
+  });
 
   $effect(() => {
     void active;
@@ -1038,6 +1073,36 @@
       if (text) await pasteText(text);
     }
   }
+
+  async function startNativeEngine() {
+    if (!engineCanvas) return;
+    try {
+      engineController = new NativeEngineController(rpc);
+      await engineController.start(engineCanvas, 80, 24);
+      engineCanvas?.focus();
+    } catch (err: any) {
+      console.warn('[native-engine] failed:', err);
+      engineController = null;
+    }
+  }
+
+  function stopNativeEngine() {
+    engineController?.close();
+    engineController = null;
+  }
+
+  function onEngineKeydown(e: KeyboardEvent) {
+    if (!engineController) return;
+    let s = e.key;
+    if (s === 'Enter') s = '\r';
+    if (s === 'Backspace') s = '\x7f';
+    if (s === 'Tab') s = '\t';
+    if (s === 'Escape') s = '\x1b';
+    if (s.length === 1 || s === '\r' || s === '\x7f' || s === '\t' || s === '\x1b') {
+      e.preventDefault();
+      engineController.send(s);
+    }
+  }
 </script>
 
 <div
@@ -1046,18 +1111,28 @@
   data-aerotab-context-menu=""
   class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
          {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+  class:hidden={!!engineController}
   oncontextmenu={onContextMenu}
   onpointerup={onPointerUp}
   ondragover={onTransferDragOver}
   ondrop={onTransferDrop}
 ></div>
 
+{#if engineController}
+  <canvas
+    bind:this={engineCanvas}
+    class="absolute inset-0 w-full h-full outline-none"
+    onkeydown={onEngineKeydown}
+    tabindex="0"
+  ></canvas>
+{/if}
+
 {#if exited}
   <div class="absolute bottom-3 right-3 z-20 max-w-[min(320px,calc(100%-24px))] pointer-events-none">
     <div
       bind:this={exitedOverlayEl}
       tabindex="0"
-      role="group"
+      role="toolbar"
       aria-label={i18n.t('terminal.sessionEnded')}
       class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
                 rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur outline-none"
@@ -1231,6 +1306,12 @@
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       <button type="button" class="menu-item" onclick={doSearchAction}>{i18n.t('terminal.searchAction')}</button>
       <button type="button" class="menu-item" onclick={doClear}>{i18n.t('common.clearScreen')}</button>
+      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      {#if !engineController}
+        <button type="button" class="menu-item" onclick={() => { menuOpen = false; void startNativeEngine(); }}>Try Native Engine (Canvas)</button>
+      {:else}
+        <button type="button" class="menu-item" onclick={() => { menuOpen = false; stopNativeEngine(); }}>Stop Native Engine</button>
+      {/if}
     </div>
   </div>
 {/if}

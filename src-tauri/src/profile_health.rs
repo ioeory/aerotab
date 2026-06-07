@@ -315,6 +315,7 @@ mod tests {
                 value: "server".into(),
             }),
             favorite: false,
+            note: None,
             spec: ProfileKind::Ssh {
                 ssh: SshProfile {
                     host: "example.com".into(),

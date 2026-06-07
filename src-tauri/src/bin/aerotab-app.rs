@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use aerotab_core::commands::{register_all, AppState};
+use aerotab_core::commands::{register_all, set_app_handle, set_parent_hwnd, AppState};
 use aerotab_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
 use aerotab_core::settings::SettingsStore;
 use aerotab_core::CORE_VERSION;
@@ -28,7 +28,7 @@ use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -103,6 +103,67 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     reveal_main_window(&app)
 }
 
+/// Convert a DOM rect (CSS pixels) to physical screen coordinates for native
+/// terminal embedding. The frontend sends `{ x, y, width, height,
+/// devicePixelRatio }` from `getBoundingClientRect()`, and we return the
+/// adjusted screen position accounting for the window's own top-left and DPI.
+#[tauri::command]
+fn get_window_screen_rect(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    device_pixel_ratio: f64,
+) -> Result<serde_json::Value, String> {
+    let window = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| "main window not found".to_string())?;
+    let outer = window.outer_position().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().unwrap_or(device_pixel_ratio);
+
+    Ok(serde_json::json!({
+        "x": outer.x as f64 + x * scale,
+        "y": outer.y as f64 + y * scale,
+        "width": width * scale,
+        "height": height * scale,
+        "scale": scale,
+    }))
+}
+
+/// Returns the raw native window handle of the main Tauri window, cast to
+/// `usize`. On Windows this is the `HWND` (isize → usize), on X11 the
+/// `x11_window::Window` ID, and 0 on Wayland/macOS.
+#[tauri::command]
+fn get_main_window_hwnd(app: tauri::AppHandle) -> Result<usize, String> {
+    #[cfg(windows)]
+    {
+        let window = app
+            .get_webview_window(MAIN_WINDOW_LABEL)
+            .ok_or_else(|| "main window not found".to_string())?;
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        Ok(hwnd.0 as usize)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // On X11, return the X11 window ID if available
+        let window = app
+            .get_webview_window(MAIN_WINDOW_LABEL)
+            .ok_or_else(|| "main window not found".to_string())?;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(wh) = window.window_handle() {
+            if let RawWindowHandle::Xlib(handle) = wh.as_raw() {
+                return Ok(handle.window as usize);
+            }
+        }
+        Ok(0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(0)
+    }
+}
+
 fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return Ok(());
@@ -112,6 +173,50 @@ fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     }
     let _ = window.set_focus();
     Ok(())
+}
+
+fn query_safe(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect()
+}
+
+#[tauri::command]
+fn open_file_transfer_window(
+    app: tauri::AppHandle,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let label = format!("file-transfer-{stamp}");
+    let mut path = "index.html?view=file-transfer".to_string();
+    if let Some(profile_id) = profile_id.as_deref() {
+        let safe = query_safe(profile_id);
+        if !safe.is_empty() {
+            path.push_str("&profileId=");
+            path.push_str(&safe);
+        }
+    }
+    let window = WebviewWindowBuilder::new(&app, label, WebviewUrl::App(path.into()))
+        .title("AeroTab File Transfer")
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(900.0, 560.0)
+        .resizable(true)
+        .transparent(true)
+        .disable_drag_drop_handler()
+        .build()
+        .map_err(|e| e.to_string())?;
+    disable_native_webview_context_menus(&window);
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn close_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -668,11 +773,27 @@ fn main() {
                 settings: settings_store,
                 tray_available,
             });
+            set_app_handle(app.handle().clone());
             if tray_available {
                 spawn_minimize_to_tray_watcher(app.handle().clone());
             }
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 disable_native_webview_context_menus(&window);
+                #[cfg(windows)]
+                {
+                    if let Ok(hwnd) = window.hwnd() {
+                        set_parent_hwnd(hwnd.0 as usize);
+                    }
+                }
+                #[cfg(all(unix, not(target_os = "macos")))]
+                {
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    if let Ok(wh) = window.window_handle() {
+                        if let RawWindowHandle::Xlib(h) = wh.as_raw() {
+                            set_parent_hwnd(h.window as usize);
+                        }
+                    }
+                }
             }
             // Ensure the shell is visible even if the webview has not called show yet.
             if let Err(e) = reveal_main_window(app.handle()) {
@@ -715,6 +836,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             show_main_window,
+            get_window_screen_rect,
+            get_main_window_hwnd,
+            open_file_transfer_window,
+            close_current_window,
             rpc,
             check_update,
             install_update,

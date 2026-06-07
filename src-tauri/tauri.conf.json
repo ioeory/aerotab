@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "cd apps/ui && npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "cd apps/ui && npm run build",
+    "beforeBuildCommand": "cd apps/ui && npx vite build",
     "frontendDist": "../apps/ui/dist"
   },
   "app": {

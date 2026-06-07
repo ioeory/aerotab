@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { Boxes, Cloud, Cpu, Database, KeyRound, Router, Server, Terminal } from '@lucide/svelte';
+  import { Boxes, Cloud, Cpu, Database, Globe2, KeyRound, LockKeyhole, Monitor, Router, Server, Terminal } from '@lucide/svelte';
   import type { ProfileIcon as ProfileIconData } from '../lib/types';
+  import { selfhstIconUrl } from '../lib/profileMeta';
 
   interface Props {
     icon?: ProfileIconData | null;
@@ -13,6 +14,10 @@
   const value = $derived((icon?.value ?? '').trim());
   const normalized = $derived(value.toLowerCase());
   const initial = $derived((name.trim().charAt(0) || '?').toUpperCase());
+  let remoteIndex = $state(0);
+  const selfhstUrl = $derived(icon?.kind === 'selfhst' && value ? selfhstIconUrl(value) : '');
+  const remoteUrls = $derived(icon?.kind === 'remote' ? value.split(/[|,\n]/).map((part) => part.trim()).filter(Boolean) : []);
+  const remoteUrl = $derived(remoteUrls[Math.min(remoteIndex, Math.max(0, remoteUrls.length - 1))] ?? '');
 </script>
 
 <span class="profile-icon" title={value || name}>
@@ -32,6 +37,25 @@
     <Cpu {size} />
   {:else if normalized === 'cluster'}
     <Boxes {size} />
+  {:else if normalized === 'desktop'}
+    <Monitor {size} />
+  {:else if normalized === 'globe'}
+    <Globe2 {size} />
+  {:else if normalized === 'lock'}
+    <LockKeyhole {size} />
+  {:else if selfhstUrl}
+    <img src={selfhstUrl} alt="" class="custom-icon" loading="lazy" referrerpolicy="no-referrer" />
+  {:else if remoteUrl}
+    <img
+      src={remoteUrl}
+      alt=""
+      class="custom-icon"
+      loading="lazy"
+      referrerpolicy="no-referrer"
+      onerror={() => { if (remoteIndex < remoteUrls.length - 1) remoteIndex += 1; }}
+    />
+  {:else if (icon?.kind === 'file' || icon?.kind === 'data') && value}
+    <img src={value} alt="" class="custom-icon" loading="lazy" referrerpolicy="no-referrer" />
   {:else if normalized === 'server' || icon?.kind === 'builtin'}
     <Server {size} />
   {:else}
@@ -51,6 +75,11 @@
     background: var(--color-panel-2);
     border: 1px solid var(--color-border-soft);
     overflow: hidden;
+  }
+  .custom-icon {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
   .emoji,
   .initial {

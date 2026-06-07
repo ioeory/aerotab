@@ -1,3 +1,5 @@
+import type { SshProfileSpec } from './types';
+
 /** Tracks open SFTP browser sessions for cross-session file transfer. */
 
 export interface RegisteredSftpSession {
@@ -5,6 +7,7 @@ export interface RegisteredSftpSession {
   label: string;
   sessionId: string;
   cwd: string;
+  profile?: SshProfileSpec;
 }
 
 class SftpSessionRegistry {

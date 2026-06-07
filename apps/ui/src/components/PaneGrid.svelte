@@ -16,6 +16,7 @@
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
     tabVisible?: boolean;
+    onError?: (msg: string) => void;
   }
 
   let {
@@ -28,6 +29,7 @@
     broadcastEnabled = false,
     broadcastTargetIds = [],
     tabVisible = true,
+    onError,
   }: Props = $props();
 
   $effect(() => {
@@ -50,5 +52,5 @@
     if (isPaneDragActive()) e.preventDefault();
   }}
 >
-  <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} />
+  <PaneNodeView {rpc} {tab} node={tab.layout} {settingsRev} {tabVisible} {onOpenSftp} {onSplitRight} {onSplitDown} {broadcastEnabled} {broadcastTargetIds} {onError} />
 </div>

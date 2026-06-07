@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen } from '@lucide/svelte';
+  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
   import {
@@ -10,8 +10,9 @@
     subscribePaneDragHit,
   } from '../lib/paneDrag';
   import { getWindowSettings } from '../lib/windowSettings';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
+  import { clampMenuToViewport } from '../lib/contextMenuPosition';
   import { appConfirm, appPrompt } from '../lib/confirm.svelte';
   import type { RpcClient } from '../lib/rpc';
 
@@ -44,7 +45,9 @@
   let menuY = $state(0);
   let menuTab = $state<Tab | null>(null);
   let menuTabIndex = $state(-1);
+  let menuEl = $state<HTMLDivElement | null>(null);
   let paneDropTabId = $state<string | null>(null);
+  let tabListOpen = $state(false);
 
   onMount(() => subscribePaneDragHit(() => {
     const hit = getPaneDragHit();
@@ -67,20 +70,32 @@
     onCloseTab?.(tab);
   }
 
-  function showTabMenu(tab: Tab, index: number, ev: MouseEvent) {
+  async function showTabMenu(tab: Tab, index: number, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
     menuTab = tab;
     menuTabIndex = index;
-    menuX = ev.clientX;
-    menuY = ev.clientY;
+    const anchor = ev.currentTarget instanceof HTMLElement ? ev.currentTarget.getBoundingClientRect() : null;
+    menuX = anchor ? Math.round(anchor.left) : ev.clientX;
+    menuY = anchor ? Math.round(anchor.bottom + 2) : ev.clientY;
     menuOpen = true;
+    await tick();
+    const clamped = clampMenuToViewport(menuX, menuY, menuEl);
+    menuX = clamped.x;
+    menuY = clamped.y;
   }
 
   function closeMenu() {
     menuOpen = false;
     menuTab = null;
     menuTabIndex = -1;
+    tabListOpen = false;
+  }
+
+  function toggleTabList(ev: MouseEvent) {
+    ev.stopPropagation();
+    menuOpen = false;
+    tabListOpen = !tabListOpen;
   }
 
   function onTabHover(tab: Tab) {
@@ -153,7 +168,8 @@
 
 <svelte:window onclick={closeMenu} />
 
-<div data-aerotab-context-menu="" class="flex items-stretch gap-1 px-2 pt-2 overflow-x-auto select-none">
+<div data-aerotab-context-menu="" class="tabbar-shell flex items-stretch gap-1 px-2 pt-2 select-none">
+  <div class="tab-strip flex items-stretch gap-1 min-w-0 overflow-x-auto">
   {#each tabs.tabs as tab, i (tab.id)}
     {@const tabChromeRev = tabs.revision}
     {@const first = tabs.firstPane(tab)}
@@ -211,21 +227,21 @@
       </button>
     </div>
   {/each}
+  </div>
   {#if tabs.tabs.length === 0}
-    <div class="text-[var(--color-fg-muted)] px-3 py-1.5 text-[12px] italic">
+    <div class="text-[var(--color-fg-muted)] px-3 py-1.5 text-[12px] italic shrink-0">
       {i18n.t('tabbar.noOpenSessions')}
     </div>
-    <div class="ml-auto flex items-center gap-1 pr-1">
-      <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
-              class="btn-ghost p-1" onclick={() => onAddTab?.()}>
-        <Plus size={14} />
-      </button>
-    </div>
-  {:else}
-    <div class="ml-auto flex items-center gap-1 pr-1">
-      <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
-              class="btn-ghost p-1" onclick={() => onAddTab?.()}>
-        <Plus size={14} />
+  {/if}
+  <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
+          class="tab-new-button btn-ghost p-1 shrink-0" onclick={() => onAddTab?.()}>
+    <Plus size={14} />
+  </button>
+  {#if tabs.tabs.length > 0}
+    <div class="tab-actions ml-auto flex items-center gap-1 pr-1 shrink-0">
+      <button type="button" title={i18n.t('tabbar.tabList')} aria-label={i18n.t('tabbar.tabList')}
+              class="btn-ghost p-1" onclick={toggleTabList}>
+        <ListTree size={14} />
       </button>
       <button type="button" title={i18n.t('tabbar.splitRight')} aria-label={i18n.t('tabbar.splitRight')}
               class="btn-ghost p-1" onclick={(e) => splitActive('row', e)}>
@@ -243,8 +259,44 @@
   {/if}
 </div>
 
+{#if tabListOpen}
+  <div
+    data-aerotab-context-menu=""
+    class="panel fixed right-2 top-10 z-[200] w-[min(360px,calc(100vw-16px))] max-h-[min(520px,calc(100vh-64px))] overflow-y-auto py-1 text-[12px]"
+    role="menu"
+  >
+    <div class="px-3 py-1.5 text-[10px] uppercase tracking-wide text-[var(--color-fg-muted)]">
+      {i18n.t('tabbar.tabListCount', { count: tabs.tabs.length })}
+    </div>
+    {#each tabs.tabs as tab, i (tab.id)}
+      {@const first = tabs.firstPane(tab)}
+      {@const Icon = iconFor(first ? first.kind : 'Local')}
+      {@const isActive = tabs.activeId === tab.id}
+      {@const act = tabs.tabActivity(tab)}
+      <button
+        type="button"
+        role="menuitem"
+        class="ctx-item w-full gap-2 {isActive ? 'text-[var(--color-accent)] bg-[var(--color-panel-2)]' : ''}"
+        onclick={() => { tabListOpen = false; activateTab(tab.id); }}
+      >
+        <Icon size={13} class="shrink-0" />
+        <span class="min-w-0 flex-1 truncate text-left">{i + 1}. {tabs.displayTitle(tab)}</span>
+        {#if tab.panes.length > 1}
+          <span class="shrink-0 text-[10px] text-[var(--color-fg-muted)]">{tab.panes.length}</span>
+        {/if}
+        {#if act === 'bell'}
+          <span class="shrink-0 w-1.5 h-1.5 rounded-full bg-[var(--color-danger)]"></span>
+        {:else if act === 'output'}
+          <span class="shrink-0 w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]"></span>
+        {/if}
+      </button>
+    {/each}
+  </div>
+{/if}
+
 {#if menuOpen && menuTab}
   <div
+    bind:this={menuEl}
     data-aerotab-context-menu=""
     class="panel fixed z-[200] min-w-[180px] py-1 text-[12px]"
     style="left: {menuX}px; top: {menuY}px;"
@@ -291,3 +343,21 @@
   </div>
 {/if}
 
+
+<style>
+  .tabbar-shell {
+    min-width: 0;
+  }
+  .tab-strip {
+    scrollbar-width: thin;
+  }
+  .tab-actions {
+    position: sticky;
+    right: 0;
+    background: var(--color-panel);
+    box-shadow: -10px 0 12px color-mix(in srgb, var(--color-panel) 80%, transparent);
+  }
+  .tab-shell {
+    flex: 0 0 auto;
+  }
+</style>

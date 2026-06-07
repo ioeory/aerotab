@@ -39,6 +39,14 @@
     return i18n.t('common.cancel');
   }
 
+  function dialogStyle(): string {
+    const pos = pending?.position;
+    if (!pos) return '';
+    const x = Math.max(8, Math.min(window.innerWidth - 380, pos.x));
+    const y = Math.max(8, Math.min(window.innerHeight - 160, pos.y));
+    return `margin: 0; left: ${x}px; top: ${y}px;`;
+  }
+
   function onConfirm(ev?: MouseEvent) {
     ev?.stopPropagation();
     ev?.preventDefault();
@@ -73,6 +81,7 @@
     <dialog
       bind:this={dialog}
       class="app-confirm-dialog min-w-[360px] max-w-[min(440px,calc(100vw-32px))]"
+      style={dialogStyle()}
       onclose={onDialogClose}
       onkeydown={onKeydown}
       aria-labelledby="app-confirm-message"

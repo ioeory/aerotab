@@ -236,11 +236,13 @@ async fn spawn_local_tunnel(
         &profile,
         known_hosts,
         SshTransportSettings::default(),
-        move |hop, _| TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: false,
+        move |hop, _| {
+            TrustingClient::new(
+                format!("{}:{}", hop.host, hop.port),
+                kh.clone(),
+                false,
+                false,
+            )
         },
     )
     .await?;
@@ -301,12 +303,12 @@ async fn spawn_remote_tunnel(
         known_hosts,
         SshTransportSettings::default(),
         |hop, is_final| {
-            let trusting = TrustingClient {
-                host_port: format!("{}:{}", hop.host, hop.port),
-                known_hosts: kh.clone(),
-                pinned_host_key_b64: None,
-                x11_forward: false,
-            };
+            let trusting = TrustingClient::new(
+                format!("{}:{}", hop.host, hop.port),
+                kh.clone(),
+                false,
+                false,
+            );
             ForwardingClient {
                 trusting,
                 local_target: if is_final {
@@ -351,11 +353,13 @@ async fn spawn_dynamic_tunnel(
         &profile,
         known_hosts,
         SshTransportSettings::default(),
-        move |hop, _| TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: false,
+        move |hop, _| {
+            TrustingClient::new(
+                format!("{}:{}", hop.host, hop.port),
+                kh.clone(),
+                false,
+                false,
+            )
         },
     )
     .await?;

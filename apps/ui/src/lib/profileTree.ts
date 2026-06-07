@@ -46,8 +46,22 @@ function sortFolder(node: ProfileTreeFolder): void {
   for (const child of node.folders) sortFolder(child);
 }
 
-/** Build group → subgroup → … → profiles tree from profile.group paths. */
-export function buildProfileTree(profiles: StoredProfile[]): ProfileTreeFolder {
+export function normalizeGroupPath(group: string | null | undefined): string | null {
+  const segments = parseGroupSegments(group);
+  return segments.length > 0 ? segments.join('/') : null;
+}
+
+export function collectProfileGroupPaths(profiles: StoredProfile[]): string[] {
+  const out = new Set<string>();
+  for (const profile of profiles) {
+    const normalized = normalizeGroupPath(profile.group);
+    if (normalized) out.add(normalized);
+  }
+  return [...out].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+/** Build group → subgroup → … → profiles tree from explicit group paths and profile.group paths. */
+export function buildProfileTree(profiles: StoredProfile[], explicitGroups: string[] = []): ProfileTreeFolder {
   const root: ProfileTreeFolder = {
     name: '',
     path: '',
@@ -55,6 +69,15 @@ export function buildProfileTree(profiles: StoredProfile[]): ProfileTreeFolder {
     profiles: [],
   };
   const map = new Map<string, ProfileTreeFolder>([['', root]]);
+
+  for (const group of explicitGroups) {
+    const segments = parseGroupSegments(group);
+    let path = '';
+    for (const segment of segments) {
+      path = path ? `${path}/${segment}` : segment;
+      ensureFolder(map, root, path, segment);
+    }
+  }
 
   for (const profile of profiles) {
     const segments = parseGroupSegments(profile.group);

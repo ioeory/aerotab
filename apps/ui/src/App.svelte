@@ -9,6 +9,7 @@
   import VaultUnlockModal from './components/VaultUnlockModal.svelte';
   import SerialModal from './components/SerialModal.svelte';
   import SftpBrowser from './components/SftpBrowser.svelte';
+  import FileTransferWindow from './components/FileTransferWindow.svelte';
   import BatchCommandModal from './components/BatchCommandModal.svelte';
   import SettingsLayout from './components/settings/SettingsLayout.svelte';
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
@@ -42,6 +43,7 @@
   import { bootstrapVault } from './lib/vaultBootstrap';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
+  import { profileEndpointLabel } from './lib/profileMeta';
   import { startHorizontalPanelResize } from './lib/panelResize';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
   import logoUrl from './assets/logo.png';
@@ -118,6 +120,11 @@
   let sftpDockCollapsed = $state<Record<string, boolean>>({});
   let sftpWindows = $state<SftpWindow[]>([]);
   let sftpWindowSeq = 0;
+  type WorkspaceView = 'terminal' | 'transfer';
+  let workspaceView = $state<WorkspaceView>('terminal');
+  let transferWorkspaceMounted = $state(false);
+  let transferInitialTarget = $state<SftpDockTarget | null>(null);
+  let transferInitialProfileId = $state<string | null>(null);
   let paneSftpTarget = $state<SftpDockTarget | null>(null);
   let paneSftpTargetSeq = 0;
   /** Per-tab broadcast mode: one keystroke → all SSH panes in the tab. */
@@ -1092,6 +1099,18 @@
     sftpWindows = sftpWindows.filter((window) => window.id !== id);
   }
 
+  function showTerminalWorkspace() {
+    workspaceView = 'terminal';
+    requestAnimationFrame(() => focusActivePane());
+  }
+
+  function openFileTransferWindow(initialTarget: SftpDockTarget | null = null, initialProfileId: string | null = null) {
+    transferInitialTarget = initialTarget;
+    transferInitialProfileId = initialProfileId;
+    transferWorkspaceMounted = true;
+    workspaceView = 'transfer';
+  }
+
   function closeSftpDock(tabId = activeSftpKey) {
     const { [tabId]: _open, ...restOpen } = sftpDockOpen;
     const { [tabId]: _pin, ...restPinned } = sftpDockPinned;
@@ -1178,6 +1197,11 @@
     void loadHostStatsSettings();
   }
 
+  function sshSpecEndpointLabel(ssh: SshProfileSpec): string {
+    const port = ssh.port === 22 ? '' : `:${ssh.port}`;
+    return `${ssh.user}@${ssh.host}${port}`;
+  }
+
   async function connectProfile(p: StoredProfile) {
     try {
       if (p.kind === 'rdp' || p.kind === 'vnc') {
@@ -1190,7 +1214,7 @@
       tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, profileId: p.id, sshProfile: p.ssh });
       recordRestore(meta.id, { kind: 'ssh-profile', id: p.id });
     } catch (e) {
-      onError(`connect: ${(e as Error).message}`);
+      onError(`connect ${p.name} (${profileEndpointLabel(p)}): ${(e as Error).message}`);
     }
   }
 
@@ -1236,7 +1260,7 @@
         );
         tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, sshProfile });
         recordRestore(meta.id, { kind: 'ssh', title: item.entry.alias, profile: sshProfile as unknown as Record<string, unknown> });
-      } catch (e) { onError(`ssh-config: ${(e as Error).message}`); }
+      } catch (e) { onError(`ssh-config ${item.entry.alias} (${sshSpecEndpointLabel(sshProfile)}): ${(e as Error).message}`); }
       return;
     }
     if (item.kind === 'address') {
@@ -1255,7 +1279,7 @@
         );
         tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, sshProfile });
         recordRestore(meta.id, { kind: 'ssh', title: host, profile: sshProfile as unknown as Record<string, unknown> });
-      } catch (e) { onError(`quick-connect: ${(e as Error).message}`); }
+      } catch (e) { onError(`quick-connect ${sshSpecEndpointLabel(sshProfile)}: ${(e as Error).message}`); }
     }
   }
 
@@ -1334,6 +1358,13 @@
           keywords: ['sftp', 'transfer', ...profileCommandKeywords(p)],
           run: () => openSftpDock({ name: p.name, ssh: p.ssh }),
         });
+        acts.push({
+          id: `file-transfer-${p.id}`,
+          title: i18n.t('action.fileTransferProfile', { name: p.name }),
+          subtitle: profileCommandSubtitle(p),
+          keywords: ['file', 'transfer', 'sftp', ...profileCommandKeywords(p)],
+          run: () => { void openFileTransferWindow({ name: p.name, ssh: p.ssh }, p.id); },
+        });
       }
     }
     acts.push({
@@ -1346,6 +1377,12 @@
       id: 'open-sftp-window',
       title: i18n.t('action.openSftpWindowCurrent'),
       run: () => { void openSftpWindowForActivePane(); },
+    });
+    acts.push({
+      id: 'open-file-transfer-window',
+      title: i18n.t('action.openFileTransferWindow'),
+      keywords: ['file', 'transfer', 'sftp', 'remote'],
+      run: () => { void openFileTransferWindow(); },
     });
     acts.push({
       id: 'toggle-sftp-dock',
@@ -1559,6 +1596,9 @@
         openSerialModal={() => serialModal?.open()}
         openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
         openSettings={() => openSettings()}
+        workspaceView={workspaceView}
+        onShowTerminal={showTerminalWorkspace}
+        onShowTransfer={() => openFileTransferWindow()}
         {onError}
       />
     </div>
@@ -1571,96 +1611,112 @@
   {/if}
 
   <main class="flex flex-col flex-1 min-w-0 bg-[var(--color-panel)]">
-    <TabBar
-      {rpc}
-      onAddTab={() => (pickerOpen = true)}
-      onSplit={(direction) => { void splitActive(direction); }}
-      onOpenSftp={() => { void openSftpForActivePane(); }}
-      onDuplicateTab={(tab) => { void duplicateTab(tab); }}
-      onCloseTab={(tab) => { closeTabSessions(tab); }}
-      onCloseOthers={(id) => { closeOtherTabs(id); }}
-      onCloseToRight={(idx) => { closeTabsToRight(idx); }}
-      onCloseAll={() => { closeAllTabs(); }}
-    />
+    <div class="{workspaceView === 'terminal' ? 'flex' : 'hidden'} flex-col flex-1 min-h-0 min-w-0">
+      <TabBar
+        {rpc}
+        onAddTab={() => (pickerOpen = true)}
+        onSplit={(direction) => { void splitActive(direction); }}
+        onOpenSftp={() => { void openSftpForActivePane(); }}
+        onDuplicateTab={(tab) => { void duplicateTab(tab); }}
+        onCloseTab={(tab) => { closeTabSessions(tab); }}
+        onCloseOthers={(id) => { closeOtherTabs(id); }}
+        onCloseToRight={(idx) => { closeTabsToRight(idx); }}
+        onCloseAll={() => { closeAllTabs(); }}
+      />
 
-    <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">
-      <div class="relative flex-1 min-w-0 min-h-0">
-        {#each tabs.tabs as tab (tab.id)}
-          <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
-            <PaneGrid
-              {rpc}
-              {tab}
-              settingsRev={settingsRev}
-              tabVisible={tabs.activeId === tab.id}
-              broadcastEnabled={broadcastOn}
-              broadcastTargetIds={broadcastTargets}
-              onOpenSftp={() => { void openSftpForActivePane(); }}
-              onSplitRight={() => { void splitActive('row'); }}
-              onSplitDown={() => { void splitActive('col'); }}
-            />
-          </div>
-        {/each}
-        {#if tabs.tabs.length === 0}
-          <div class="absolute inset-0 grid place-items-center text-[var(--color-fg-muted)] text-[12.5px]">
-            <div class="text-center max-w-[280px]">
-              <img src={logoUrl} alt="" class="aerotab-logo mx-auto mb-3 w-12 h-12 rounded-lg opacity-90" width="48" height="48" />
-              <div class="text-[var(--color-fg)] font-medium">{i18n.t('app.empty.title')}</div>
-              <div class="opacity-70 mt-1">{i18n.t('app.empty.subtitle')}</div>
-            </div>
-          </div>
-        {/if}
-      </div>
-      {#if currentSftpDock}
-        {#if currentSftpCollapsed}
-          <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2 shadow-[inset_1px_0_0_var(--color-border-soft)]">
-            <button
-              type="button"
-              class="btn-ghost p-1.5 text-[var(--color-accent)]"
-              title={i18n.t('sftp.expandDock')}
-              aria-label={i18n.t('sftp.expandDock')}
-              onclick={() => setCurrentSftpCollapsed(false)}
-            >
-              <PanelRightOpen size={15} />
-            </button>
-            <FolderOpen size={14} class="text-[var(--color-fg-muted)]" />
-            <button
-              type="button"
-              class="btn-ghost mt-auto p-1 hover:!text-[var(--color-danger)]"
-              title={i18n.t('sftp.closeDock')}
-              aria-label={i18n.t('sftp.closeDock')}
-              onclick={() => closeSftpDock()}
-            >
-              <X size={13} />
-            </button>
-          </div>
-        {:else}
-          <button
-            type="button"
-            aria-label={i18n.t('sftp.resizeDock')}
-            class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
-            onpointerdown={onSftpDockResizePointerDown}
-          ></button>
-          <div
-            class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
-            style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
-          >
-            {#if currentSftpDock}
-              <SftpBrowser
+      <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">
+        <div class="relative flex-1 min-w-0 min-h-0">
+          {#each tabs.tabs as tab (tab.id)}
+            <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
+              <PaneGrid
                 {rpc}
-                registryId={`dock-${activeSftpKey}`}
-                terminalSessionId={sftpDockSessionId}
-                source={currentSftpDock}
-                mode="dock"
-                onClose={() => closeSftpDock()}
-                onCollapse={() => setCurrentSftpCollapsed(true)}
-                onPopOut={(sudo) => openSftpWindow({ ...currentSftpDock, sudo })}
+                {tab}
+                settingsRev={settingsRev}
+                tabVisible={workspaceView === 'terminal' && tabs.activeId === tab.id}
+                broadcastEnabled={broadcastOn}
+                broadcastTargetIds={broadcastTargets}
+                onOpenSftp={() => { void openSftpForActivePane(); }}
+                onSplitRight={() => { void splitActive('row'); }}
+                onSplitDown={() => { void splitActive('col'); }}
                 {onError}
               />
-            {/if}
-          </div>
+            </div>
+          {/each}
+          {#if tabs.tabs.length === 0}
+            <div class="absolute inset-0 grid place-items-center text-[var(--color-fg-muted)] text-[12.5px]">
+              <div class="text-center max-w-[280px]">
+                <img src={logoUrl} alt="" class="aerotab-logo mx-auto mb-3 w-12 h-12 rounded-lg opacity-90" width="48" height="48" />
+                <div class="text-[var(--color-fg)] font-medium">{i18n.t('app.empty.title')}</div>
+                <div class="opacity-70 mt-1">{i18n.t('app.empty.subtitle')}</div>
+              </div>
+            </div>
+          {/if}
+        </div>
+        {#if currentSftpDock}
+          {#if currentSftpCollapsed}
+            <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2 shadow-[inset_1px_0_0_var(--color-border-soft)]">
+              <button
+                type="button"
+                class="btn-ghost p-1.5 text-[var(--color-accent)]"
+                title={i18n.t('sftp.expandDock')}
+                aria-label={i18n.t('sftp.expandDock')}
+                onclick={() => setCurrentSftpCollapsed(false)}
+              >
+                <PanelRightOpen size={15} />
+              </button>
+              <FolderOpen size={14} class="text-[var(--color-fg-muted)]" />
+              <button
+                type="button"
+                class="btn-ghost mt-auto p-1 hover:!text-[var(--color-danger)]"
+                title={i18n.t('sftp.closeDock')}
+                aria-label={i18n.t('sftp.closeDock')}
+                onclick={() => closeSftpDock()}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          {:else}
+            <button
+              type="button"
+              aria-label={i18n.t('sftp.resizeDock')}
+              class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
+              onpointerdown={onSftpDockResizePointerDown}
+            ></button>
+            <div
+              class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
+              style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
+            >
+              {#if currentSftpDock}
+                <SftpBrowser
+                  {rpc}
+                  registryId={`dock-${activeSftpKey}`}
+                  terminalSessionId={sftpDockSessionId}
+                  source={currentSftpDock}
+                  mode="dock"
+                  onClose={() => closeSftpDock()}
+                  onCollapse={() => setCurrentSftpCollapsed(true)}
+                  onPopOut={(sudo) => openSftpWindow({ ...currentSftpDock, sudo })}
+                  {onError}
+                />
+              {/if}
+            </div>
+          {/if}
         {/if}
-      {/if}
+      </div>
     </div>
+
+    {#if transferWorkspaceMounted}
+      <div class="{workspaceView === 'transfer' ? 'block' : 'hidden'} flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)]">
+        <FileTransferWindow
+          {rpc}
+          embedded={true}
+          initialTarget={transferInitialTarget}
+          initialProfileId={transferInitialProfileId}
+          onClose={showTerminalWorkspace}
+          {onError}
+        />
+      </div>
+    {/if}
 
     <footer class="px-3 py-1.5 border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] flex items-center gap-3
                    text-[11px] text-[var(--color-fg-muted)] font-mono">

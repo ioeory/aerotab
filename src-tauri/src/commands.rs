@@ -30,6 +30,7 @@
 //! | `sftp.removeDir`        | `{ id, path }`                      | `null`            |
 //! | `sftp.rename`           | `{ id, from, to }`                  | `null`            |
 //! | `sftp.realpath`         | `{ id, path }`                      | `{ path }`        |
+//! | `sftp.directTransfer`  | `{ source_profile, source_path, kind, target }` | transfer output |
 //! | `settings.configure`    | `{ path }`                          | `null`            |
 //! | `settings.get`          | `{ key }`                           | `{ value }`       |
 //! | `settings.set`          | `{ key, value }`                    | `null`            |
@@ -47,16 +48,20 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::core::session_manager::{SessionId, SessionKind, SessionManager, SessionMeta};
 use crate::ipc::{Dispatcher, ErrorCode, RpcError};
+use crate::native_terminal::{EmbedRectDip, EmbeddedTerminalRegistry, EngineRegistry};
 use crate::plugins::wasm_host::WasmHost;
 use crate::profile::{Profile, ProfileKind, ProfileStore, RemoteDesktopSpec};
 use crate::remote;
@@ -64,7 +69,7 @@ use crate::secret;
 use crate::serial::{SerialChannel, SerialProfile};
 use crate::settings::SettingsStore;
 use crate::ssh::known_hosts::KnownHosts;
-use crate::ssh::sftp::{Sftp, SftpOpenOptions};
+use crate::ssh::sftp::{Sftp, SftpKind, SftpOpenOptions};
 use crate::ssh::tunnel::{TunnelKind, TunnelManager, TunnelOpenRequest};
 use crate::ssh::{self, SshProfile, SshShell, X11ForwardOptions};
 use crate::sync::backends::git::GitBackend;
@@ -74,6 +79,8 @@ use crate::sync::oauth::{self, OAuthProvider};
 use crate::sync::persistence::SledStore;
 use crate::sync::{Group, RecordId, SyncEngine, SyncStats};
 use crate::terminal::{PtyChannel, PtySize};
+
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct OpenLocalParams {
@@ -179,6 +186,9 @@ pub struct AppState {
     pub git_backend: Mutex<Option<GitBackend>>,
     /// Open SFTP sessions, keyed by an opaque per-session id.
     pub sftp_sessions: Mutex<HashMap<Uuid, Arc<Sftp>>>,
+    /// Resolved SSH profile for each SFTP session, stored so transfer RPCs
+    /// can look up auth info from just the session id.
+    pub sftp_profiles: Mutex<HashMap<Uuid, SshProfile>>,
     /// SSH port-forwarding tunnels (`-L` / `-R` / `-D`).
     pub tunnels: TunnelManager,
     /// Persistent settings store. Configured via `settings.configure`.
@@ -187,6 +197,22 @@ pub struct AppState {
     pub vault: Mutex<Option<crate::vault::VaultStore>>,
     /// WASM plugin host. Configured via `plugin.configure`.
     pub wasm_host: Arc<WasmHost>,
+    /// Native terminal embed registry (in-pane child windows on supported platforms).
+    pub embedded_terminals: EmbeddedTerminalRegistry,
+    /// Native terminal engines (alacritty_terminal + PTY, renders cell grids).
+    pub native_engine: EngineRegistry,
+}
+
+/// Set the parent window HWND. Called once from the Tauri desktop shell after
+/// the main window is created.
+pub fn set_parent_hwnd(hwnd: usize) {
+    crate::native_terminal::embed::set_parent_hwnd(hwnd);
+}
+
+/// Store the Tauri AppHandle so native-terminal RPCs can access the window.
+pub fn set_app_handle(app: tauri::AppHandle) {
+    crate::native_terminal::embed::set_app_handle(app.clone());
+    let _ = APP_HANDLE.set(app);
 }
 
 /// Discriminated union over the channel kinds we know how to drive.
@@ -1134,6 +1160,27 @@ struct SftpRenameParams {
     to: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SftpDirectTransferParams {
+    source_session_id: Uuid,
+    dest_session_id: Uuid,
+    source_path: String,
+    kind: crate::remote_transfer::DirectTransferKind,
+    dest_path: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SftpRelayTransferParams {
+    transfer_id: String,
+    source_session_id: Uuid,
+    dest_session_id: Uuid,
+    source_path: String,
+    source_kind: SftpKind,
+    dest_path: String,
+}
+
 async fn require_sftp(state: &AppState, id: Uuid) -> Result<Arc<Sftp>, RpcError> {
     state
         .sftp_sessions
@@ -1142,6 +1189,230 @@ async fn require_sftp(state: &AppState, id: Uuid) -> Result<Arc<Sftp>, RpcError>
         .get(&id)
         .cloned()
         .ok_or_else(|| RpcError::new(ErrorCode::SessionNotFound, format!("sftp session {id}")))
+}
+
+async fn require_sftp_profile(state: &AppState, id: Uuid) -> Result<SshProfile, RpcError> {
+    state
+        .sftp_profiles
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::SessionNotFound,
+                format!("sftp session profile {id}"),
+            )
+        })
+}
+
+const RELAY_TRANSFER_CHUNK_SIZE: u32 = 1024 * 1024;
+
+fn normalize_remote_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return ".".into();
+    }
+    let absolute = trimmed.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in trimmed.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop();
+        } else {
+            parts.push(part);
+        }
+    }
+    let joined = parts.join("/");
+    if absolute {
+        if joined.is_empty() {
+            "/".into()
+        } else {
+            format!("/{joined}")
+        }
+    } else if joined.is_empty() {
+        ".".into()
+    } else {
+        joined
+    }
+}
+
+fn join_remote_path(base: &str, name: &str) -> String {
+    let b = if base.is_empty() { "." } else { base };
+    if b == "/" {
+        format!("/{name}")
+    } else if b.ends_with('/') {
+        format!("{b}{name}")
+    } else {
+        format!("{b}/{name}")
+    }
+}
+
+fn parent_remote_path(path: &str) -> String {
+    let normalized = normalize_remote_path(path);
+    if normalized == "/" || normalized == "." {
+        return normalized;
+    }
+    let Some(idx) = normalized.rfind('/') else {
+        return ".".into();
+    };
+    if idx == 0 {
+        "/".into()
+    } else {
+        normalized[..idx].into()
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct RelayTransferProgressEvent {
+    transfer_id: String,
+    path: String,
+    offset: u64,
+    total: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct RelayTransferFileEvent {
+    transfer_id: String,
+    path: String,
+    total: u64,
+}
+
+fn emit_relay_progress(transfer_id: &str, path: &str, offset: u64, total: u64) {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit(
+            "transfer:relay-progress",
+            RelayTransferProgressEvent {
+                transfer_id: transfer_id.to_string(),
+                path: path.to_string(),
+                offset,
+                total,
+            },
+        );
+    } else {
+        tracing::warn!("relay progress event dropped: AppHandle not set");
+    }
+}
+
+fn emit_relay_file(transfer_id: &str, path: &str, total: u64) {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit(
+            "transfer:relay-file",
+            RelayTransferFileEvent {
+                transfer_id: transfer_id.to_string(),
+                path: path.to_string(),
+                total,
+            },
+        );
+    } else {
+        tracing::warn!("relay file event dropped: AppHandle not set");
+    }
+}
+
+async fn ensure_remote_dir(sftp: &Sftp, path: &str) -> Result<(), RpcError> {
+    let normalized = normalize_remote_path(path);
+    if normalized == "/" || normalized == "." {
+        return Ok(());
+    }
+    let absolute = normalized.starts_with('/');
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    let mut cursor = if absolute {
+        "/".to_string()
+    } else {
+        ".".to_string()
+    };
+    for segment in segments {
+        cursor = join_remote_path(&cursor, segment);
+        match sftp.stat(&cursor).await {
+            Ok(entry) if entry.kind == SftpKind::Dir => {}
+            Ok(_) => return Err(internal(format!("{cursor} exists and is not a directory"))),
+            Err(_) => {
+                if let Err(e) = sftp.mkdir(&cursor).await {
+                    match sftp.stat(&cursor).await {
+                        Ok(entry) if entry.kind == SftpKind::Dir => {}
+                        _ => return Err(internal(e.to_string())),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn relay_copy_file(
+    transfer_id: &str,
+    src: &Sftp,
+    src_path: &str,
+    dest: &Sftp,
+    dest_path: &str,
+    size: u64,
+) -> Result<u64, RpcError> {
+    ensure_remote_dir(dest, &parent_remote_path(dest_path)).await?;
+    if size == 0 {
+        dest.write_file_chunk(dest_path, 0, &[], true)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        emit_relay_progress(transfer_id, dest_path, 0, 0);
+        return Ok(0);
+    }
+    let mut offset = 0_u64;
+    while offset < size {
+        let len = RELAY_TRANSFER_CHUNK_SIZE.min((size - offset) as u32);
+        let bytes = src
+            .read_file_chunk(src_path, offset, len)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        if bytes.is_empty() {
+            break;
+        }
+        dest.write_file_chunk(dest_path, offset, &bytes, offset == 0)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        offset += bytes.len() as u64;
+        emit_relay_progress(transfer_id, dest_path, offset, size);
+    }
+    Ok(offset)
+}
+
+async fn relay_copy_dir(
+    transfer_id: &str,
+    src: &Sftp,
+    src_path: &str,
+    dest: &Sftp,
+    dest_path: &str,
+) -> Result<u64, RpcError> {
+    ensure_remote_dir(dest, dest_path).await?;
+    let entries = src
+        .read_dir(src_path)
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    let mut copied = 0_u64;
+    for entry in entries {
+        let child_src = join_remote_path(src_path, &entry.name);
+        let child_dest = join_remote_path(dest_path, &entry.name);
+        match entry.kind {
+            SftpKind::Dir => {
+                copied += Box::pin(relay_copy_dir(
+                    transfer_id,
+                    src,
+                    &child_src,
+                    dest,
+                    &child_dest,
+                ))
+                .await?
+            }
+            SftpKind::File => {
+                emit_relay_file(transfer_id, &child_dest, entry.size);
+                copied +=
+                    relay_copy_file(transfer_id, src, &child_src, dest, &child_dest, entry.size)
+                        .await?
+            }
+            _ => {}
+        }
+    }
+    Ok(copied)
 }
 
 fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
@@ -1165,6 +1436,7 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 .map_err(|e| internal(e.to_string()))?;
                 let id = Uuid::new_v4();
                 st.sftp_sessions.lock().await.insert(id, Arc::new(sftp));
+                st.sftp_profiles.lock().await.insert(id, profile);
                 Ok(json!({ "id": id }))
             }
         });
@@ -1206,6 +1478,7 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: SftpIdParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 st.sftp_sessions.lock().await.remove(&p.id);
+                st.sftp_profiles.lock().await.remove(&p.id);
                 Ok(Value::Null)
             }
         });
@@ -1389,6 +1662,88 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     .await
                     .map_err(|e| internal(e.to_string()))?;
                 Ok(json!({ "path": real }))
+            }
+        });
+    }
+
+    {
+        let st = state.clone();
+        dispatcher.register("sftp.directTransfer", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpDirectTransferParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let source_profile = require_sftp_profile(&st, p.source_session_id).await?;
+                let dest_profile = require_sftp_profile(&st, p.dest_session_id).await?;
+                let target = crate::remote_transfer::DirectTransferTarget {
+                    user: dest_profile.user.clone(),
+                    host: dest_profile.host.clone(),
+                    port: dest_profile.port,
+                    path: p.dest_path,
+                };
+                let kh = st.known_hosts.lock().await.clone();
+                let transport = load_ssh_transport_settings(&st).await;
+                let timeout_ms = p
+                    .timeout_ms
+                    .unwrap_or(24 * 60 * 60 * 1000)
+                    .clamp(1_000, 7 * 24 * 60 * 60 * 1000);
+                let dest_key_path = match &dest_profile.auth {
+                    crate::ssh::AuthMethod::PublicKey { key_path, .. } => Some(key_path.as_path()),
+                    _ => None,
+                };
+                let output = crate::remote_transfer::run_direct_transfer(
+                    &source_profile,
+                    &p.source_path,
+                    p.kind,
+                    &target,
+                    kh,
+                    transport,
+                    Duration::from_millis(timeout_ms),
+                    dest_key_path,
+                )
+                .await
+                .map_err(|e| internal(e.to_string()))?;
+                serde_json::to_value(output).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sftp.relayTransfer", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpRelayTransferParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let src = require_sftp(&st, p.source_session_id).await?;
+                let dest = require_sftp(&st, p.dest_session_id).await?;
+                let copied = match p.source_kind {
+                    SftpKind::Dir => {
+                        relay_copy_dir(&p.transfer_id, &src, &p.source_path, &dest, &p.dest_path)
+                            .await?
+                    }
+                    SftpKind::File => {
+                        let stat = src
+                            .stat(&p.source_path)
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                        emit_relay_file(&p.transfer_id, &p.dest_path, stat.size);
+                        relay_copy_file(
+                            &p.transfer_id,
+                            &src,
+                            &p.source_path,
+                            &dest,
+                            &p.dest_path,
+                            stat.size,
+                        )
+                        .await?
+                    }
+                    _ => {
+                        return Err(invalid_params(
+                            "relay transfer only supports files and directories",
+                        ))
+                    }
+                };
+                Ok(json!({ "method": "relay", "bytes": copied }))
             }
         });
     }
@@ -2718,6 +3073,215 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         other => internal(other.to_string()),
                     })?;
                 Ok(Value::Null)
+            }
+        });
+    }
+    // -----------------------------------------------------------
+    // nativeTerminal.*
+    // -----------------------------------------------------------
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.embedCapabilities", move |_p| {
+            let st = st.clone();
+            async move {
+                let caps = st.embedded_terminals.embed_capabilities();
+                serde_json::to_value(caps).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.embedStart", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    #[serde(default)]
+                    program: Option<String>,
+                    #[serde(default)]
+                    title: String,
+                    #[serde(default)]
+                    argv: Vec<String>,
+                    rect: EmbedRectDip,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let result = st
+                    .embedded_terminals
+                    .embed_start(p.program.as_deref(), &p.title, &p.argv, &p.rect)
+                    .map_err(|e| internal(e.to_string()))?;
+                serde_json::to_value(result).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.embedSyncGeometry", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    instance_id: String,
+                    rect: EmbedRectDip,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                st.embedded_terminals
+                    .embed_sync_geometry(&p.instance_id, &p.rect)
+                    .map_err(|e| internal(e.to_string()))?;
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.embedEnd", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    instance_id: String,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let removed = st
+                    .embedded_terminals
+                    .embed_end(&p.instance_id)
+                    .map_err(|e| internal(e.to_string()))?;
+                Ok(json!({ "removed": removed }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.embedCleanup", move |_p| {
+            let st = st.clone();
+            async move {
+                st.embedded_terminals.embed_cleanup();
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.embedList", move |_p| {
+            let st = st.clone();
+            async move {
+                let list = st.embedded_terminals.embed_list();
+                serde_json::to_value(list).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    // Native engine RPCs — alacritty_terminal cell-based renderer
+    {
+        let st = state.clone();
+        dispatcher.register("nativeEngine.create", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    #[serde(default = "default_rows")]
+                    rows: u16,
+                    #[serde(default = "default_cols")]
+                    cols: u16,
+                    #[serde(default)]
+                    shell_command: Option<Vec<String>>,
+                }
+                fn default_rows() -> u16 {
+                    24
+                }
+                fn default_cols() -> u16 {
+                    80
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let result = st
+                    .native_engine
+                    .create_local(p.rows, p.cols, p.shell_command.as_deref())
+                    .map_err(internal)?;
+                serde_json::to_value(result).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeEngine.write", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    engine_id: String,
+                    data: String, // base64-encoded bytes
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let data = BASE64
+                    .decode(&p.data)
+                    .map_err(|e| invalid_params(format!("base64 decode: {e}")))?;
+                st.native_engine
+                    .write(&p.engine_id, &data)
+                    .map_err(internal)?;
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeEngine.snapshot", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    engine_id: String,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let frame = st.native_engine.snapshot(&p.engine_id).map_err(internal)?;
+                serde_json::to_value(frame).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeEngine.resize", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    engine_id: String,
+                    rows: u16,
+                    cols: u16,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                st.native_engine
+                    .resize(&p.engine_id, p.rows, p.cols)
+                    .map_err(internal)?;
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeEngine.close", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    engine_id: String,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let removed = st.native_engine.close(&p.engine_id);
+                Ok(json!({ "removed": removed }))
             }
         });
     }

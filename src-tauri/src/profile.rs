@@ -96,6 +96,9 @@ pub struct Profile {
     /// Searchable labels used by profile picker/sidebar/settings summaries.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Optional user note shown in profile details and context menus.
+    #[serde(default)]
+    pub note: Option<String>,
     /// Optional icon metadata. The frontend decides how to render built-in,
     /// emoji, file, or data icons.
     #[serde(default)]
@@ -286,6 +289,7 @@ mod tests {
             tags: vec![],
             icon: None,
             favorite: false,
+            note: None,
             spec: ProfileKind::Ssh {
                 ssh: SshProfile {
                     host: "example.com".into(),

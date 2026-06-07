@@ -12,6 +12,7 @@ pub mod stats;
 pub mod tunnel;
 pub mod vault_resolve;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,10 +21,10 @@ use async_trait::async_trait;
 use rand::Rng;
 use russh::client;
 use russh::keys::{key, load_secret_key, PublicKeyBase64};
-use russh::{Channel, ChannelMsg, Disconnect};
+use russh::{Channel, ChannelId, ChannelMsg, CryptoVec, Disconnect};
 use russh_keys::agent::client::AgentClient;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use known_hosts::{KnownHosts, KnownHostsError};
@@ -108,6 +109,36 @@ pub struct TrustingClient {
     pinned_host_key_b64: Option<String>,
     /// When true, accept inbound X11 channels and bridge to the local display.
     x11_forward: bool,
+    /// When true, accept OpenSSH agent forwarding channels and bridge them to the local agent.
+    agent_forward: bool,
+    agent_channels: HashMap<ChannelId, AgentForwardChannel>,
+}
+
+trait LocalAgentStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> LocalAgentStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+struct AgentForwardChannel {
+    agent: Box<dyn LocalAgentStream>,
+    pending: Vec<u8>,
+}
+
+impl TrustingClient {
+    fn new(
+        host_port: String,
+        known_hosts: Option<KnownHosts>,
+        x11_forward: bool,
+        agent_forward: bool,
+    ) -> Self {
+        Self {
+            host_port,
+            known_hosts,
+            pinned_host_key_b64: None,
+            x11_forward,
+            agent_forward,
+            agent_channels: HashMap::new(),
+        }
+    }
 }
 
 #[async_trait]
@@ -167,6 +198,97 @@ impl client::Handler for TrustingClient {
         }
         Ok(())
     }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: ChannelId,
+        session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if !self.agent_forward {
+            session.close(channel);
+            return Ok(());
+        }
+        match connect_local_agent_stream().await {
+            Ok(agent) => {
+                self.agent_channels.insert(
+                    channel,
+                    AgentForwardChannel {
+                        agent,
+                        pending: Vec::new(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!("ssh agent forwarding local agent: {e}");
+                session.close(channel);
+            }
+        }
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(forward) = self.agent_channels.get_mut(&channel) else {
+            return Ok(());
+        };
+        forward.pending.extend_from_slice(data);
+        while let Some(packet_len) = pending_agent_packet_len(&forward.pending) {
+            if packet_len > MAX_AGENT_PACKET_SIZE {
+                tracing::warn!("ssh agent forwarding packet too large: {packet_len}");
+                self.agent_channels.remove(&channel);
+                session.close(channel);
+                return Ok(());
+            }
+            if forward.pending.len() < packet_len {
+                break;
+            }
+            let packet = pop_agent_packet(&mut forward.pending).expect("length already checked");
+            if let Err(e) = forward.agent.write_all(&packet).await {
+                tracing::warn!("ssh agent forwarding write: {e}");
+                self.agent_channels.remove(&channel);
+                session.close(channel);
+                return Ok(());
+            }
+            if let Err(e) = forward.agent.flush().await {
+                tracing::warn!("ssh agent forwarding flush: {e}");
+                self.agent_channels.remove(&channel);
+                session.close(channel);
+                return Ok(());
+            }
+            match read_agent_packet(forward.agent.as_mut()).await {
+                Ok(response) => session.data(channel, CryptoVec::from_slice(&response)),
+                Err(e) => {
+                    tracing::warn!("ssh agent forwarding read: {e}");
+                    self.agent_channels.remove(&channel);
+                    session.close(channel);
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        self.agent_channels.remove(&channel);
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        self.agent_channels.remove(&channel);
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -176,6 +298,71 @@ fn local_x11_socket_path() -> Option<String> {
     let num_part = trimmed.strip_prefix(':')?;
     let num: u32 = num_part.split('.').next()?.parse().ok()?;
     Some(format!("/tmp/.X11-unix/X{num}"))
+}
+
+const MAX_AGENT_PACKET_SIZE: usize = 256 * 1024;
+
+fn pending_agent_packet_len(pending: &[u8]) -> Option<usize> {
+    if pending.len() < 4 {
+        return None;
+    }
+    let body_len = u32::from_be_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
+    body_len.checked_add(4)
+}
+
+fn pop_agent_packet(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let packet_len = pending_agent_packet_len(pending)?;
+    if pending.len() < packet_len {
+        return None;
+    }
+    Some(pending.drain(..packet_len).collect())
+}
+
+async fn read_agent_packet(agent: &mut dyn LocalAgentStream) -> std::io::Result<Vec<u8>> {
+    let mut header = [0_u8; 4];
+    agent.read_exact(&mut header).await?;
+    let body_len = u32::from_be_bytes(header) as usize;
+    let packet_len = body_len.checked_add(4).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "agent packet overflow")
+    })?;
+    if packet_len > MAX_AGENT_PACKET_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "agent packet too large",
+        ));
+    }
+    let mut packet = Vec::with_capacity(packet_len);
+    packet.extend_from_slice(&header);
+    packet.resize(packet_len, 0);
+    agent.read_exact(&mut packet[4..]).await?;
+    Ok(packet)
+}
+
+async fn connect_local_agent_stream() -> std::io::Result<Box<dyn LocalAgentStream>> {
+    #[cfg(unix)]
+    {
+        let path = std::env::var("SSH_AUTH_SOCK").map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
+        })?;
+        let stream = tokio::net::UnixStream::connect(path).await?;
+        Ok(Box::new(stream))
+    }
+
+    #[cfg(windows)]
+    {
+        let pipe = std::env::var("SSH_AUTH_SOCK")
+            .unwrap_or_else(|_| r"\.\pipe\openssh-ssh-agent".to_string());
+        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe)?;
+        Ok(Box::new(stream))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "system ssh-agent is unavailable on this platform",
+        ))
+    }
 }
 
 fn random_x11_cookie() -> String {
@@ -455,12 +642,29 @@ pub async fn connect_authenticated(
 ) -> Result<client::Handle<TrustingClient>, SshError> {
     let kh = known_hosts.clone();
     connect_authenticated_custom(profile, known_hosts, transport, move |hop, _| {
-        TrustingClient {
-            host_port: format!("{}:{}", hop.host, hop.port),
-            known_hosts: kh.clone(),
-            pinned_host_key_b64: None,
-            x11_forward: false,
-        }
+        TrustingClient::new(
+            format!("{}:{}", hop.host, hop.port),
+            kh.clone(),
+            false,
+            false,
+        )
+    })
+    .await
+}
+
+pub async fn connect_authenticated_with_agent_forwarding(
+    profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+    transport: SshTransportSettings,
+) -> Result<client::Handle<TrustingClient>, SshError> {
+    let kh = known_hosts.clone();
+    connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
+        TrustingClient::new(
+            format!("{}:{}", hop.host, hop.port),
+            kh.clone(),
+            false,
+            is_final,
+        )
     })
     .await
 }
@@ -478,12 +682,12 @@ pub async fn connect_shell_with_known_hosts(
     let kh = known_hosts.clone();
     let handle =
         connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
-            TrustingClient {
-                host_port: format!("{}:{}", hop.host, hop.port),
-                known_hosts: kh.clone(),
-                pinned_host_key_b64: None,
-                x11_forward: is_final && x11_enabled,
-            }
+            TrustingClient::new(
+                format!("{}:{}", hop.host, hop.port),
+                kh.clone(),
+                is_final && x11_enabled,
+                false,
+            )
         })
         .await?;
 
@@ -551,6 +755,18 @@ pub async fn init() -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_packet_parser_extracts_complete_packets_and_keeps_remainder() {
+        let mut pending = Vec::new();
+        pending.extend_from_slice(&[0, 0, 0, 2, 11, 22, 0, 0, 0, 3, 33]);
+
+        let packet = pop_agent_packet(&mut pending).expect("first packet should be complete");
+
+        assert_eq!(packet, vec![0, 0, 0, 2, 11, 22]);
+        assert_eq!(pending, vec![0, 0, 0, 3, 33]);
+        assert!(pop_agent_packet(&mut pending).is_none());
+    }
 
     #[tokio::test]
     async fn agent_auth_connects_before_auth() {

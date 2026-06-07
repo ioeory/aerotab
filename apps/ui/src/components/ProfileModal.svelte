@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ChevronDown, ChevronUp, FolderOpen, X } from '@lucide/svelte';
-  import { pickPrivateKeyPath } from '../lib/localFiles';
+  import { pickIconFilePath, pickPrivateKeyPath } from '../lib/localFiles';
   import type { RpcClient } from '../lib/rpc';
   import { uuidv4 } from '../lib/rpc';
   import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
@@ -15,6 +15,7 @@
   import {
     BUILTIN_PROFILE_ICONS,
     formatTags,
+    parseProfileIconInput,
     parseTagsInput,
     profileEndpointLabel,
     suggestDuplicateProfileName,
@@ -40,8 +41,9 @@
   let name = $state('');
   let group = $state('');
   let tagsText = $state('');
+  let note = $state('');
   let favorite = $state(false);
-  let iconKind = $state<'builtin' | 'emoji' | 'file' | 'data'>('builtin');
+  let iconKind = $state<'builtin' | 'emoji' | 'file' | 'data' | 'remote' | 'selfhst'>('builtin');
   let iconValue = $state('server');
   let host = $state('');
   let port = $state(22);
@@ -111,6 +113,7 @@
     name = existing.name;
     group = existing.group ?? '';
     tagsText = formatTags(existing.tags);
+    note = existing.note ?? '';
     favorite = !!existing.favorite;
     iconKind = (existing.icon?.kind as typeof iconKind) ?? 'builtin';
     iconValue = existing.icon?.value ?? 'server';
@@ -175,6 +178,7 @@
     name = '';
     group = groupDefault;
     tagsText = '';
+    note = '';
     favorite = false;
     iconKind = 'builtin';
     iconValue = 'server';
@@ -256,6 +260,17 @@
     jumpPickerOrder = [];
   }
 
+  async function chooseIconFile() {
+    try {
+      const path = await pickIconFilePath();
+      if (!path) return;
+      iconKind = 'file';
+      iconValue = path;
+    } catch (e) {
+      onError(`icon picker: ${(e as Error).message}`);
+    }
+  }
+
   async function browsePrivateKeyPath() {
     try {
       const path = await pickPrivateKeyPath();
@@ -273,8 +288,9 @@
       name: name || 'profile',
       group: group.trim() || null,
       tags: parseTagsInput(tagsText),
+      note: note.trim() || null,
       favorite,
-      icon: iconValue.trim() ? { kind: iconKind, value: iconValue.trim() } : null,
+      icon: iconKind === 'builtin' ? parseProfileIconInput(iconValue) : iconKind === 'selfhst' ? parseProfileIconInput(`selfhst:${iconValue}`) : (iconValue.trim() ? { kind: iconKind, value: iconValue.trim() } : null),
     } as const;
     let profile: StoredProfile;
     if (profileKind === 'ssh') {
@@ -374,6 +390,9 @@
     <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
     <input id="pm-tags" bind:value={tagsText} placeholder="prod, db, singapore" class="input" />
 
+    <label for="pm-note" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.note')}</label>
+    <textarea id="pm-note" bind:value={note} rows="3" placeholder={i18n.t('profileModal.notePlaceholder')} class="input resize-y min-h-[68px]"></textarea>
+
     <div class="flex gap-3 mt-2 items-end">
       <div>
         <label for="pm-icon-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.icon')}</label>
@@ -397,7 +416,10 @@
           </select>
         {:else}
           <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.iconValue')}</label>
-          <input id="pm-icon-value" bind:value={iconValue} placeholder={iconKind === 'emoji' ? 'emoji or short text' : 'path or data URI'} class="input" />
+          <div class="flex gap-2">
+            <input id="pm-icon-value" bind:value={iconValue} placeholder={iconKind === 'emoji' ? 'emoji or short text' : iconKind === 'remote' ? 'https://host/a.svg|https://host/b.png' : 'path, URL, name, or data URI'} class="input flex-1 min-w-0" />
+            <button type="button" class="btn-secondary shrink-0 px-2" onclick={() => { void chooseIconFile(); }}>{i18n.t('profileModal.chooseIconFile')}</button>
+          </div>
         {/if}
       </div>
     </div>

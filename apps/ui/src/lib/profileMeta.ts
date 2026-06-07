@@ -40,7 +40,46 @@ export const BUILTIN_PROFILE_ICONS = [
   'terminal',
   'cpu',
   'cluster',
+  'desktop',
+  'globe',
+  'lock',
 ] as const;
+
+
+export function selfhstIconReference(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+export function selfhstIconUrl(input: string, format: 'png' | 'svg' | 'webp' = 'png'): string {
+  const ref = selfhstIconReference(input);
+  return ref ? `https://cdn.jsdelivr.net/gh/selfhst/icons/${format}/${ref}.${format}` : '';
+}
+
+export function parseProfileIconInput(input: string): { kind: string; value: string } | null {
+  const value = input.trim();
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value) || value.startsWith('data:')) return { kind: 'file', value };
+  const explicit = value.match(/^([a-z0-9_-]+):(.*)$/i);
+  if (explicit) {
+    const kind = explicit[1]!.toLowerCase();
+    const rest = explicit[2]!.trim();
+    if (!rest) return null;
+    if (kind === 'sh' || kind === 'selfhst' || kind === 'selfh') return { kind: 'selfhst', value: selfhstIconReference(rest) };
+    if (kind === 'emoji') return { kind: 'emoji', value: rest };
+    if (kind === 'url' || kind === 'file') return { kind: 'file', value: rest };
+    if (kind === 'remote' || kind === 'urls' || kind === 'library') return { kind: 'remote', value: rest };
+    if (kind === 'data') return { kind: 'data', value: rest };
+    return { kind, value: rest };
+  }
+  if (BUILTIN_PROFILE_ICONS.includes(value.toLowerCase() as (typeof BUILTIN_PROFILE_ICONS)[number])) {
+    return { kind: 'builtin', value: value.toLowerCase() };
+  }
+  return { kind: 'selfhst', value: selfhstIconReference(value) };
+}
 
 export function normalizeTags(tags: string[] | null | undefined): string[] {
   const seen = new Set<string>();
@@ -98,6 +137,7 @@ function profileText(profile: StoredProfile): string {
     profile.group ?? '',
     ...endpoint,
     ...(profile.tags ?? []),
+    profile.note ?? '',
     profile.icon?.value ?? '',
     profile.favorite ? 'favorite starred pinned' : '',
   ].join(' ').toLowerCase();
