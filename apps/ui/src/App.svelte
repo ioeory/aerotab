@@ -175,13 +175,27 @@
     if (activePane?.sshProfile) {
       return { name: activePane.title || 'SSH session', ssh: activePane.sshProfile };
     }
-    if (activePane?.profileId) return paneSftpTarget;
+    if (activePane?.profileId) return paneSftpTarget ?? sftpDockPinned[key] ?? null;
     return sftpDockPinned[key] ?? null;
   });
   const currentSftpCollapsed = $derived(sftpDockCollapsed[activeSftpKey] ?? false);
   const sftpDockSessionId = $derived(
     activePane?.kind === 'ssh' || activePane?.sshProfile ? activePane?.id ?? null : null,
   );
+
+  function sftpDockTargetForTab(tab: Tab): SftpDockTarget | null {
+    if (!sftpDockOpen[tab.id]) return null;
+    const pane = tabs.activePane(tab);
+    if (pane?.sshProfile) return { name: pane.title || 'SSH session', ssh: pane.sshProfile };
+    return sftpDockPinned[tab.id] ?? null;
+  }
+
+  function sftpDockSessionIdForTab(tab: Tab): string | null {
+    const pane = tabs.activePane(tab);
+    return pane?.kind === 'ssh' || pane?.sshProfile ? pane?.id ?? null : null;
+  }
+
+  const hasOpenSftpDock = $derived.by(() => tabs.tabs.some((tab) => sftpDockTargetForTab(tab) !== null));
 
   // ── M9 — session restore ────────────────────────────────────────────────
   // A `Restorable` describes how to re-open a session after a restart. We
@@ -1100,15 +1114,7 @@
   function openSftpDock(target: SftpDockTarget, tabId = tabs.activeId ?? GLOBAL_SFTP_KEY) {
     sftpDockOpen = { ...sftpDockOpen, [tabId]: true };
     sftpDockCollapsed = { ...sftpDockCollapsed, [tabId]: false };
-    const tab = tabs.tabs.find((t) => t.id === tabId);
-    const pane = tab ? tabs.activePane(tab) : undefined;
-    const sshPane = pane && (pane.sshProfile || pane.profileId);
-    if (!sshPane) {
-      sftpDockPinned = { ...sftpDockPinned, [tabId]: target };
-    } else {
-      const { [tabId]: _drop, ...rest } = sftpDockPinned;
-      sftpDockPinned = rest;
-    }
+    sftpDockPinned = { ...sftpDockPinned, [tabId]: target };
   }
 
   function openSftpWindow(target: SftpDockTarget) {
@@ -1685,9 +1691,9 @@
             </div>
           {/if}
         </div>
-        {#if currentSftpDock}
+        {#if hasOpenSftpDock}
           {#if currentSftpCollapsed}
-            <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2 shadow-[inset_1px_0_0_var(--color-border-soft)]">
+            <div hidden={!currentSftpDock} class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2 shadow-[inset_1px_0_0_var(--color-border-soft)]">
               <button
                 type="button"
                 class="btn-ghost p-1.5 text-[var(--color-accent)]"
@@ -1713,25 +1719,32 @@
               type="button"
               aria-label={i18n.t('sftp.resizeDock')}
               class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
+              hidden={!currentSftpDock}
               onpointerdown={onSftpDockResizePointerDown}
             ></button>
             <div
               class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
+              hidden={!currentSftpDock}
               style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
             >
-              {#if currentSftpDock}
-                <SftpBrowser
-                  {rpc}
-                  registryId={`dock-${activeSftpKey}`}
-                  terminalSessionId={sftpDockSessionId}
-                  source={currentSftpDock}
-                  mode="dock"
-                  onClose={() => closeSftpDock()}
-                  onCollapse={() => setCurrentSftpCollapsed(true)}
-                  onPopOut={(sudo) => openSftpWindow({ ...currentSftpDock, sudo })}
-                  {onError}
-                />
-              {/if}
+              {#each tabs.tabs as dockTab (dockTab.id)}
+                {@const dockTarget = sftpDockTargetForTab(dockTab)}
+                {#if dockTarget && !sftpDockCollapsed[dockTab.id]}
+                  <div class="h-full w-full" hidden={activeSftpKey !== dockTab.id}>
+                    <SftpBrowser
+                      {rpc}
+                      registryId={`dock-${dockTab.id}`}
+                      terminalSessionId={sftpDockSessionIdForTab(dockTab)}
+                      source={dockTarget}
+                      mode="dock"
+                      onClose={() => closeSftpDock(dockTab.id)}
+                      onCollapse={() => { sftpDockCollapsed = { ...sftpDockCollapsed, [dockTab.id]: true }; }}
+                      onPopOut={(sudo) => openSftpWindow({ ...dockTarget, sudo })}
+                      {onError}
+                    />
+                  </div>
+                {/if}
+              {/each}
             </div>
           {/if}
         {/if}
