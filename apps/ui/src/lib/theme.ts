@@ -8,6 +8,8 @@ export interface Theme {
   bg: string;
   panel: string;
   panel2: string;
+  bgSoft?: string;
+  surfaceRaised?: string;
   fg: string;
   fgMuted: string;
   border: string;
@@ -98,11 +100,57 @@ export const ONE_LIGHT: Theme = {
   ],
 };
 
+export const TERMORA_DARK: Theme = {
+  name: 'termora-dark',
+  label: 'Termora Dark',
+  bg: '#0f1117',
+  panel: '#171a22',
+  panel2: '#20242e',
+  bgSoft: '#121620',
+  surfaceRaised: '#1c212b',
+  fg: '#d8dee9',
+  fgMuted: '#8f9bad',
+  border: '#303642',
+  borderSoft: '#252b35',
+  accent: '#5b8def',
+  danger: '#e06c75',
+  ansi: [
+    '#1b1f27', '#e06c75', '#98c379', '#d19a66',
+    '#61afef', '#c678dd', '#56b6c2', '#abb2bf',
+    '#5c6370', '#e06c75', '#98c379', '#e5c07b',
+    '#61afef', '#c678dd', '#56b6c2', '#d8dee9',
+  ],
+};
+
+export const TERMORA_LIGHT: Theme = {
+  name: 'termora-light',
+  label: 'Termora Light',
+  bg: '#f6f7fb',
+  panel: '#ffffff',
+  panel2: '#eef1f6',
+  bgSoft: '#f0f2f7',
+  surfaceRaised: '#ffffff',
+  fg: '#252a33',
+  fgMuted: '#677183',
+  border: '#d4d9e3',
+  borderSoft: '#e2e6ee',
+  accent: '#356dd9',
+  danger: '#c4454d',
+  ansi: [
+    '#252a33', '#c4454d', '#4d7c2f', '#a36500',
+    '#356dd9', '#8f4bb8', '#1f7a8c', '#677183',
+    '#8a94a6', '#c4454d', '#4d7c2f', '#a36500',
+    '#356dd9', '#8f4bb8', '#1f7a8c', '#111827',
+  ],
+};
+
 export const BUILTIN_THEMES: Theme[] = [
+  TERMORA_DARK,
   TOKYO_NIGHT,
   SOLARIZED_DARK,
   GRUVBOX_DARK,
   ONE_LIGHT,
+  TERMORA_LIGHT,
 ];
 
 export function applyTheme(theme: Theme) {
@@ -110,6 +158,8 @@ export function applyTheme(theme: Theme) {
   r.style.setProperty('--color-bg', theme.bg);
   r.style.setProperty('--color-panel', theme.panel);
   r.style.setProperty('--color-panel-2', theme.panel2);
+  r.style.setProperty('--color-bg-soft', theme.bgSoft ?? theme.bg);
+  r.style.setProperty('--color-surface-raised', theme.surfaceRaised ?? theme.panel2);
   r.style.setProperty('--color-fg', theme.fg);
   r.style.setProperty('--color-fg-muted', theme.fgMuted);
   r.style.setProperty('--color-border', theme.border);

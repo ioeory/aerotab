@@ -97,6 +97,10 @@
   const knownRemoteDirs = new Set<string>();
   const CHUNK_SIZE = 256 * 1024;
   const TEXT_EDIT_MAX_BYTES = 512 * 1024;
+  const TRANSFER_STALL_MS = 45_000;
+  const MAX_AUTO_ATTEMPTS = 3;
+  const RETRY_BACKOFF_MS = [1000, 3000];
+  const TRANSFER_RPC_TIMEOUT_MS = 45_000;
 
   let localCwd = $state('');
   let localEntries = $state<LocalEntry[]>([]);
@@ -116,6 +120,7 @@
   let remoteMenuEntry = $state<SftpEntry | null>(null);
   let remoteMenuEl = $state<HTMLDivElement | null>(null);
   let remotePaneEl = $state<HTMLDivElement | null>(null);
+  let lastRemoteActionPosition = $state<{ x: number; y: number } | null>(null);
   let selectedRemoteNames = $state<Set<string>>(new Set());
   let focusedRemoteName = $state<string | null>(null);
   let lastSelectedRemoteName = $state<string | null>(null);
@@ -124,6 +129,7 @@
 
   let selectedTransferIds = $state<Set<string>>(new Set());
   let transferUiFlushScheduled = false;
+  let transferProgressTick: number | null = null;
   let registrySnapshot = '';
   let connectSeq = 0;
   /** Last connect key we attempted; blocks auto-reconnect loops on failure. */
@@ -174,6 +180,10 @@
     localBaseDir?: string;
     relativePath?: string[];
     message?: string;
+    attempts?: number;
+    startedAt?: number;
+    lastProgressAt?: number;
+    finishedAt?: number;
   }
 
   async function initLocalPane() {
@@ -322,7 +332,7 @@
   }
 
   async function collectLocalDirectoryUploads(dirPath: string, relative: string[]) {
-    const list = await tauriInvoke<LocalEntry[]>('local_list_dir', { path: dirPath });
+    const list = await withTransferTimeout('local_list_dir', tauriInvoke<LocalEntry[]>('local_list_dir', { path: dirPath }) ?? Promise.reject(new Error('local file browser is not available')));
     if (!list) throw new Error('local file browser is not available');
     for (const entry of list) {
       const childPath = joinLocalPath(dirPath, entry.name);
@@ -348,7 +358,7 @@
   async function downloadDirectoryToLocal(remotePath: string, relative: string[], baseDir: string) {
     if (!sessionId) return;
     await mkdirLocalRelative(baseDir, relative);
-    const list = sortEntries(await rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: remotePath }));
+    const list = sortEntries(await withTransferTimeout('sftp.list', rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: remotePath })));
     for (const entry of list) {
       const childPath = joinPath(remotePath, entry.name);
       const childRelative = [...relative, entry.name];
@@ -591,7 +601,7 @@
         create,
       });
       if (!write) throw new Error('desktop file writer is not available');
-      await write;
+      await withTransferTimeout('local_write_chunk', write);
       return;
     }
     if (task.localBaseDir && task.relativePath) {
@@ -603,14 +613,14 @@
         create,
       });
       if (!write) throw new Error('desktop file writer is not available');
-      await write;
+      await withTransferTimeout('local_write_relative_chunk', write);
     }
   }
 
   async function mkdirLocalRelative(baseDir: string, relative: string[]) {
     const mkdir = tauriInvoke<string>('local_mkdir_relative', { baseDir, relative });
     if (!mkdir) throw new Error('desktop directory writer is not available');
-    await mkdir;
+    await withTransferTimeout('local_mkdir_relative', mkdir);
   }
 
   async function enter(e: SftpEntry) {
@@ -676,7 +686,11 @@
   function updateTransfer(id: string, patch: Partial<TransferTask>) {
     const transfer = transfers.find((candidate) => candidate.id === id);
     if (!transfer) return;
+    const prevTransferred = transfer.transferred;
     Object.assign(transfer, patch);
+    if (patch.transferred !== undefined && patch.transferred !== prevTransferred) {
+      transfer.lastProgressAt = Date.now();
+    }
     flushTransfersUi();
   }
 
@@ -692,6 +706,57 @@
     while (isPaused(id) && !isCanceled(id)) {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function withTransferTimeout<T>(label: string, promise: Promise<T>, timeoutMs = TRANSFER_RPC_TIMEOUT_MS): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label}: ${i18n.t('transfer.timeout', { seconds: Math.round(timeoutMs / 1000) })}`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function runTransferWithStallWatch(task: TransferTask): Promise<void> {
+    if (task.kind === 'upload') {
+      await runUpload(task);
+    } else {
+      await runDownload(task);
+    }
+  }
+
+  async function retryOrFailTransfer(task: TransferTask, err: unknown) {
+    const attempts = task.attempts ?? 1;
+    const message = (err as Error).message;
+    if (attempts < MAX_AUTO_ATTEMPTS && !isCanceled(task.id)) {
+      const nextAttempt = attempts + 1;
+      updateTransfer(task.id, {
+        status: 'queued',
+        transferred: 0,
+        message: i18n.t('transfer.retrying', { attempt: nextAttempt, max: MAX_AUTO_ATTEMPTS }),
+        attempts: nextAttempt,
+        startedAt: undefined,
+        lastProgressAt: undefined,
+        finishedAt: undefined,
+      });
+      await sleep(RETRY_BACKOFF_MS[Math.min(nextAttempt - 2, RETRY_BACKOFF_MS.length - 1)] ?? 1000);
+      return;
+    }
+    updateTransfer(task.id, {
+      status: 'error',
+      message: i18n.t('transfer.finalFailed', { attempts, message }),
+      finishedAt: Date.now(),
+    });
+    onError(`transfer ${task.name}: ${message}`);
   }
 
   function pauseTransfer(id: string) {
@@ -727,23 +792,18 @@
           }
           return;
         }
-        updateTransfer(task.id, { status: 'running', message: undefined });
+        updateTransfer(task.id, { status: 'running', message: undefined, startedAt: Date.now(), lastProgressAt: Date.now(), attempts: task.attempts ?? 1 });
         try {
-          if (task.kind === 'upload') {
-            await runUpload(task);
-          } else {
-            await runDownload(task);
-          }
+          await runTransferWithStallWatch(task);
           if (isCanceled(task.id)) continue;
-          updateTransfer(task.id, { status: 'done', transferred: task.size });
+          updateTransfer(task.id, { status: 'done', transferred: task.size, finishedAt: Date.now() });
           if (task.kind === 'download') {
             if (task.localPath) lastDownloadPath = task.localPath;
             else if (task.localBaseDir) lastDownloadPath = task.localBaseDir;
           }
         } catch (e) {
           if (isCanceled(task.id)) continue;
-          updateTransfer(task.id, { status: 'error', message: (e as Error).message });
-          onError(`transfer ${task.name}: ${(e as Error).message}`);
+          await retryOrFailTransfer(transfers.find((candidate) => candidate.id === task.id) ?? task, e);
         }
       }
     } finally {
@@ -764,13 +824,13 @@
     }
     updateTransfer(task.id, { message: undefined });
     if (totalSize === 0) {
-      await rpc.call('sftp.writeChunk', {
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', {
         id: sessionId,
         path: task.path,
         offset: 0,
         data: '',
         create: true,
-      });
+      }));
       updateTransfer(task.id, { transferred: 0 });
       return;
     }
@@ -784,23 +844,23 @@
         bytes = new Uint8Array(await chunk.arrayBuffer());
       } else if (localPath) {
         const len = Math.min(CHUNK_SIZE, totalSize - offset);
-        const r = await tauriInvoke<{ data: string }>('local_read_chunk', {
+        const r = await withTransferTimeout('local_read_chunk', tauriInvoke<{ data: string }>('local_read_chunk', {
           path: localPath,
           offset,
           len,
-        });
+        }) ?? Promise.reject(new Error('desktop file reader is not available')));
         if (!r) throw new Error('desktop file reader is not available');
         bytes = b64decode(r.data);
       } else {
         throw new Error('local file is not available');
       }
-      await rpc.call('sftp.writeChunk', {
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', {
         id: sessionId,
         path: task.path,
         offset,
         data: b64encode(bytes),
         create: offset === 0,
-      });
+      }));
       offset += bytes.byteLength;
       updateTransfer(task.id, { transferred: offset });
     }
@@ -886,9 +946,14 @@
     return entries.filter((entry) => selectedRemoteNames.has(entry.name));
   }
 
+  function rememberRemoteActionPosition(ev?: MouseEvent) {
+    if (ev) lastRemoteActionPosition = { x: Math.round(ev.clientX), y: Math.round(ev.clientY) };
+  }
+
   function selectRemoteEntry(entry: SftpEntry, ev?: MouseEvent) {
     if (loading) return;
     remotePaneEl?.focus();
+    rememberRemoteActionPosition(ev);
     focusedRemoteName = entry.name;
     const next = new Set(selectedRemoteNames);
     if (ev?.shiftKey && lastSelectedRemoteName) {
@@ -919,6 +984,13 @@
   }
 
   function focusedDialogPosition(): { x: number; y: number } | undefined {
+    if (remoteMenuOpen) return { x: remoteMenuX, y: remoteMenuY };
+    if (lastRemoteActionPosition) return lastRemoteActionPosition;
+    const focused = remotePaneEl?.querySelector<HTMLElement>('tr[data-remote-row].focused');
+    if (focused) {
+      const rect = focused.getBoundingClientRect();
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    }
     const active = document.activeElement as HTMLElement | null;
     const rect = active?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return undefined;
@@ -968,7 +1040,10 @@
   async function openRemoteMenu(entry: SftpEntry, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
+    remotePaneEl?.focus({ preventScroll: true });
+    rememberRemoteActionPosition(ev);
     if (!selectedRemoteNames.has(entry.name)) selectRemoteEntry(entry);
+    focusedRemoteName = entry.name;
     remoteMenuEntry = entry;
     remoteMenuX = ev.clientX;
     remoteMenuY = ev.clientY;
@@ -977,6 +1052,7 @@
     const clamped = clampMenuToViewport(remoteMenuX, remoteMenuY, remoteMenuEl);
     remoteMenuX = clamped.x;
     remoteMenuY = clamped.y;
+    lastRemoteActionPosition = { x: remoteMenuX, y: remoteMenuY };
   }
 
   function closeRemoteMenu() {
@@ -996,13 +1072,13 @@
       cursor = joinPath(cursor, segment);
       if (dirCache.has(cursor)) continue;
       try {
-        const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor });
+        const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor }));
         if (entry.kind !== 'Dir') throw new Error(`${cursor} exists and is not a directory`);
       } catch (e) {
         try {
-          await rpc.call('sftp.mkdir', { id: sid, path: cursor });
+          await withTransferTimeout('sftp.mkdir', rpc.call('sftp.mkdir', { id: sid, path: cursor }));
         } catch (mkdirError) {
-          const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor }).catch(() => null);
+          const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor })).catch(() => null);
           if (entry?.kind !== 'Dir') throw mkdirError;
         }
       }
@@ -1018,27 +1094,27 @@
     size: number,
   ) {
     if (size === 0) {
-      await rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true });
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true }));
       return;
     }
     let offset = 0;
     while (offset < size) {
       const len = Math.min(CHUNK_SIZE, size - offset);
-      const r = await rpc.call<{ data: string }>('sftp.readChunk', {
+      const r = await withTransferTimeout('sftp.readChunk', rpc.call<{ data: string }>('sftp.readChunk', {
         id: srcSid,
         path: srcPath,
         offset,
         len,
-      });
+      }));
       const bytes = b64decode(r.data);
       if (bytes.byteLength === 0) break;
-      await rpc.call('sftp.writeChunk', {
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', {
         id: destSid,
         path: destPath,
         offset,
         data: b64encode(bytes),
         create: offset === 0,
-      });
+      }));
       offset += bytes.byteLength;
     }
   }
@@ -1051,7 +1127,7 @@
     dirCache: Set<string>,
   ) {
     await ensureRemoteDirOn(destSid, destPath, dirCache);
-    const list = sortEntries(await rpc.call<SftpEntry[]>('sftp.list', { id: srcSid, path: srcPath }));
+    const list = sortEntries(await withTransferTimeout('sftp.list', rpc.call<SftpEntry[]>('sftp.list', { id: srcSid, path: srcPath })));
     for (const entry of list) {
       const childSrc = joinPath(srcPath, entry.name);
       const childDest = joinPath(destPath, entry.name);
@@ -1190,13 +1266,13 @@
       cursor = joinPath(cursor, segment);
       if (knownRemoteDirs.has(cursor)) continue;
       try {
-        const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sessionId, path: cursor });
+        const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: sessionId, path: cursor }));
         if (entry.kind !== 'Dir') throw new Error(`${cursor} exists and is not a directory`);
       } catch (e) {
         try {
-          await rpc.call('sftp.mkdir', { id: sessionId, path: cursor });
+          await withTransferTimeout('sftp.mkdir', rpc.call('sftp.mkdir', { id: sessionId, path: cursor }));
         } catch (mkdirError) {
-          const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sessionId, path: cursor })
+          const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: sessionId, path: cursor }))
             .catch(() => null);
           if (entry?.kind !== 'Dir') {
             throw mkdirError;
@@ -1223,12 +1299,12 @@
       await waitWhilePaused(task.id);
       if (isCanceled(task.id)) return;
       const len = Math.min(CHUNK_SIZE, entry.size - offset);
-      const r = await rpc.call<{ data: string }>('sftp.readChunk', {
+      const r = await withTransferTimeout('sftp.readChunk', rpc.call<{ data: string }>('sftp.readChunk', {
         id: sessionId,
         path: task.path,
         offset,
         len,
-      });
+      }));
       const bytes = b64decode(r.data);
       if (bytes.byteLength === 0) break;
       if (writesToDisk) {
@@ -1323,7 +1399,7 @@
 
   async function mkdirHere() {
     if (!sessionId) return;
-    const name = await appPrompt(i18n.t('sftp.mkdirPrompt'));
+    const name = await appPrompt(i18n.t('sftp.mkdirPrompt'), { position: focusedDialogPosition() });
     if (!name) return;
     try {
       await rpc.call('sftp.mkdir', { id: sessionId, path: joinPath(cwd, name) });
@@ -1399,7 +1475,7 @@
   async function collectDirectoryDownloads(remotePath: string, relative: string[], baseDir: string) {
     if (!sessionId) return;
     await mkdirLocalRelative(baseDir, relative);
-    const list = sortEntries(await rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: remotePath }));
+    const list = sortEntries(await withTransferTimeout('sftp.list', rpc.call<SftpEntry[]>('sftp.list', { id: sessionId, path: remotePath })));
     for (const entry of list) {
       const childPath = joinPath(remotePath, entry.name);
       const childRelative = [...relative, entry.name];
@@ -1483,7 +1559,15 @@
   function transferSummary(task: TransferTask): string {
     if (task.status === 'queued') return i18n.t('sftp.transferQueued');
     if (task.status === 'paused') return task.message ?? i18n.t('sftp.paused');
-    if (task.status === 'running') return task.message ?? `${formatSize(task.transferred)} / ${formatSize(task.size)}`;
+    if (task.status === 'running') {
+      const last = task.lastProgressAt ?? task.startedAt ?? Date.now();
+      const idleMs = Date.now() - last;
+      if (idleMs > TRANSFER_STALL_MS) {
+        return i18n.t('transfer.waitingServer', { seconds: Math.round(idleMs / 1000) })
+          + ` · ${formatSize(task.transferred)} / ${formatSize(task.size)}`;
+      }
+      return task.message ?? `${formatSize(task.transferred)} / ${formatSize(task.size)}`;
+    }
     if (task.status === 'done') return i18n.t('sftp.transferDone');
     if (task.status === 'canceled') return i18n.t('sftp.transferCanceled');
     return task.message ?? i18n.t('sftp.transferFailed');
@@ -1527,6 +1611,9 @@
   }
 
   onMount(() => {
+    transferProgressTick = window.setInterval(() => {
+      if (transfers.some((task) => task.status === 'running')) flushTransfersUi();
+    }, 5000);
     void (async () => {
       await loadSftpSettings();
       await initLocalPane();
@@ -1534,6 +1621,7 @@
   });
 
   onDestroy(() => {
+    if (transferProgressTick !== null) window.clearInterval(transferProgressTick);
     sftpSessionRegistry.unregister(registryId);
     if (sessionId) {
       void rpc.call('sftp.close', { id: sessionId }).catch(() => {});
@@ -1658,6 +1746,7 @@
             onDragOverPane={preventDragDefaults}
             onDropRemote={(e) => { void handleLocalPaneDrop(e); }}
             onDropFiles={() => {}}
+            {onError}
           />
         </div>
       {/if}
@@ -1699,7 +1788,9 @@
               >
                 {#each entries as e (e.name)}
                   <tr
+                    data-remote-row=""
                     class="hover:bg-[var(--color-panel-2)] group {selectedRemoteNames.has(e.name) ? 'bg-[var(--color-accent-soft)]' : ''} {focusedRemoteName === e.name ? 'outline outline-1 outline-[var(--color-accent)] outline-offset-[-1px]' : ''}"
+                    class:focused={focusedRemoteName === e.name}
                     draggable={!loading && (e.kind === 'File' || e.kind === 'Dir')}
                     role="option"
                     aria-selected={selectedRemoteNames.has(e.name)}
@@ -2016,4 +2107,3 @@
     </div>
   </div>
 {/if}
-

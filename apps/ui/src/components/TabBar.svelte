@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree } from '@lucide/svelte';
+  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree, ArrowLeftRight } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
   import {
@@ -19,6 +19,7 @@
   interface Props {
     rpc: RpcClient;
     onAddTab?: () => void;
+    onAddTransferTab?: () => void;
     onSplit?: (direction: SplitDir) => void;
     onOpenSftp?: () => void;
     onDuplicateTab?: (tab: Tab) => void;
@@ -30,6 +31,7 @@
   let {
     rpc,
     onAddTab,
+    onAddTransferTab,
     onSplit,
     onOpenSftp,
     onDuplicateTab,
@@ -73,6 +75,7 @@
   async function showTabMenu(tab: Tab, index: number, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
+    activateTab(tab.id);
     menuTab = tab;
     menuTabIndex = index;
     const anchor = ev.currentTarget instanceof HTMLElement ? ev.currentTarget.getBoundingClientRect() : null;
@@ -173,7 +176,7 @@
   {#each tabs.tabs as tab, i (tab.id)}
     {@const tabChromeRev = tabs.revision}
     {@const first = tabs.firstPane(tab)}
-    {@const Icon = iconFor(first ? first.kind : 'Local')}
+    {@const Icon = tab.kind === 'transfer' ? ArrowLeftRight : iconFor(first ? first.kind : 'Local')}
     {@const isActive = tabs.activeId === tab.id}
     <div
       role="tab"
@@ -203,12 +206,12 @@
     >
       <Icon size={13} class={isActive ? 'text-[var(--color-accent)]' : ''} />
       <span class="truncate max-w-[180px]" title={tabs.displayTitle(tab)}>{tabs.displayTitle(tab)}</span>
-      {#if tab.panes.length > 1}
+      {#if tab.kind !== 'transfer' && tab.panes.length > 1}
         <span class="text-[10px] px-1 rounded bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]">
           {tab.panes.length}
         </span>
       {/if}
-      {#if !isActive}
+      {#if !isActive && tab.kind !== 'transfer'}
         {@const act = tabs.tabActivity(tab)}
         {#if act === 'bell'}
           <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-danger)] animate-pulse" title={i18n.t('tabbar.bell')}></span>
@@ -218,8 +221,8 @@
       {/if}
       <button
         type="button"
-        title={i18n.t('tabbar.closeTab')}
-        aria-label={i18n.t('tabbar.closeTab')}
+        title={tab.kind === 'transfer' ? i18n.t('tabbar.closeTransferTab') : i18n.t('tabbar.closeTab')}
+        aria-label={tab.kind === 'transfer' ? i18n.t('tabbar.closeTransferTab') : i18n.t('tabbar.closeTab')}
         class="opacity-50 group-hover:opacity-100 hover:text-[var(--color-danger)] -mr-1 p-0.5"
         onclick={(e) => closeTab(tab, e)}
       >
@@ -236,6 +239,10 @@
   <button type="button" title={i18n.t('tabbar.newTab')} aria-label={i18n.t('tabbar.newTab')}
           class="tab-new-button btn-ghost p-1 shrink-0" onclick={() => onAddTab?.()}>
     <Plus size={14} />
+  </button>
+  <button type="button" title={i18n.t('tabbar.newTransfer')} aria-label={i18n.t('tabbar.newTransfer')}
+          class="tab-new-button btn-ghost p-1 shrink-0" onclick={() => onAddTransferTab?.()}>
+    <ArrowLeftRight size={14} />
   </button>
   {#if tabs.tabs.length > 0}
     <div class="tab-actions ml-auto flex items-center gap-1 pr-1 shrink-0">
@@ -270,7 +277,7 @@
     </div>
     {#each tabs.tabs as tab, i (tab.id)}
       {@const first = tabs.firstPane(tab)}
-      {@const Icon = iconFor(first ? first.kind : 'Local')}
+      {@const Icon = tab.kind === 'transfer' ? ArrowLeftRight : iconFor(first ? first.kind : 'Local')}
       {@const isActive = tabs.activeId === tab.id}
       {@const act = tabs.tabActivity(tab)}
       <button
@@ -315,7 +322,7 @@
     <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const t = menuTab!; closeMenu(); void closeTab(t); }}>
-      {i18n.t('tabbar.closeTab')}
+      {menuTab.kind === 'transfer' ? i18n.t('tabbar.closeTransferTab') : i18n.t('tabbar.closeTab')}
     </button>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const id = menuTab!.id; closeMenu(); onCloseOthers?.(id); }}>
@@ -330,16 +337,18 @@
             onclick={() => { closeMenu(); onCloseAll?.(); }}>
       {i18n.t('tabbar.closeAll')}
     </button>
-    <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-    <button type="button" class="ctx-item" role="menuitem"
-            onclick={() => { const t = menuTab!; closeMenu(); onDuplicateTab?.(t); }}>
-      {i18n.t('tabbar.duplicateTab')}
-    </button>
-    <button type="button" class="ctx-item" role="menuitem"
-            onclick={() => { const t = menuTab!; closeMenu(); activateTab(t.id); onOpenSftp?.(); }}
-            disabled={!menuTab.panes.some((p) => p.kind === 'Ssh' || p.profileId || p.sshProfile)}>
-      {i18n.t('tabbar.openSftpTab')}
-    </button>
+    {#if menuTab.kind === 'terminal'}
+      <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      <button type="button" class="ctx-item" role="menuitem"
+              onclick={() => { const t = menuTab!; closeMenu(); onDuplicateTab?.(t); }}>
+        {i18n.t('tabbar.duplicateTab')}
+      </button>
+      <button type="button" class="ctx-item" role="menuitem"
+              onclick={() => { const t = menuTab!; closeMenu(); activateTab(t.id); onOpenSftp?.(); }}
+              disabled={!menuTab.panes.some((p) => p.kind === 'Ssh' || p.profileId || p.sshProfile)}>
+        {i18n.t('tabbar.openSftpTab')}
+      </button>
+    {/if}
   </div>
 {/if}
 

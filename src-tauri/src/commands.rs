@@ -47,6 +47,7 @@
 //! it with a server-pushed `session.output` notification.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -57,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::core::session_manager::{SessionId, SessionKind, SessionManager, SessionMeta};
@@ -189,6 +191,8 @@ pub struct AppState {
     /// Resolved SSH profile for each SFTP session, stored so transfer RPCs
     /// can look up auth info from just the session id.
     pub sftp_profiles: Mutex<HashMap<Uuid, SshProfile>>,
+    /// Cancel flags for in-flight backend relay transfers (`transfer_id` → flag).
+    pub relay_cancel: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// SSH port-forwarding tunnels (`-L` / `-R` / `-D`).
     pub tunnels: TunnelManager,
     /// Persistent settings store. Configured via `settings.configure`.
@@ -1181,6 +1185,11 @@ struct SftpRelayTransferParams {
     dest_path: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SftpCancelRelayParams {
+    transfer_id: String,
+}
+
 async fn require_sftp(state: &AppState, id: Uuid) -> Result<Arc<Sftp>, RpcError> {
     state
         .sftp_sessions
@@ -1207,6 +1216,52 @@ async fn require_sftp_profile(state: &AppState, id: Uuid) -> Result<SshProfile, 
 }
 
 const RELAY_TRANSFER_CHUNK_SIZE: u32 = 1024 * 1024;
+const SFTP_CHUNK_IO_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn relay_transfer_canceled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+async fn sftp_read_chunk_timed(
+    sftp: &Sftp,
+    path: &str,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>, RpcError> {
+    timeout(
+        SFTP_CHUNK_IO_TIMEOUT,
+        sftp.read_file_chunk(path, offset, len),
+    )
+    .await
+    .map_err(|_| {
+        internal(format!(
+            "SFTP read timed out after {}s at offset {offset}",
+            SFTP_CHUNK_IO_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| internal(e.to_string()))
+}
+
+async fn sftp_write_chunk_timed(
+    sftp: &Sftp,
+    path: &str,
+    offset: u64,
+    data: &[u8],
+    create: bool,
+) -> Result<(), RpcError> {
+    timeout(
+        SFTP_CHUNK_IO_TIMEOUT,
+        sftp.write_file_chunk(path, offset, data, create),
+    )
+    .await
+    .map_err(|_| {
+        internal(format!(
+            "SFTP write timed out after {}s at offset {offset}",
+            SFTP_CHUNK_IO_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| internal(e.to_string()))
+}
 
 fn normalize_remote_path(path: &str) -> String {
     let trimmed = path.trim();
@@ -1348,28 +1403,28 @@ async fn relay_copy_file(
     dest: &Sftp,
     dest_path: &str,
     size: u64,
+    cancel: Option<&AtomicBool>,
 ) -> Result<u64, RpcError> {
     ensure_remote_dir(dest, &parent_remote_path(dest_path)).await?;
+    if relay_transfer_canceled(cancel) {
+        return Err(internal("transfer canceled"));
+    }
     if size == 0 {
-        dest.write_file_chunk(dest_path, 0, &[], true)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
+        sftp_write_chunk_timed(dest, dest_path, 0, &[], true).await?;
         emit_relay_progress(transfer_id, dest_path, 0, 0);
         return Ok(0);
     }
     let mut offset = 0_u64;
     while offset < size {
+        if relay_transfer_canceled(cancel) {
+            return Err(internal("transfer canceled"));
+        }
         let len = RELAY_TRANSFER_CHUNK_SIZE.min((size - offset) as u32);
-        let bytes = src
-            .read_file_chunk(src_path, offset, len)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
+        let bytes = sftp_read_chunk_timed(src, src_path, offset, len).await?;
         if bytes.is_empty() {
             break;
         }
-        dest.write_file_chunk(dest_path, offset, &bytes, offset == 0)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
+        sftp_write_chunk_timed(dest, dest_path, offset, &bytes, offset == 0).await?;
         offset += bytes.len() as u64;
         emit_relay_progress(transfer_id, dest_path, offset, size);
     }
@@ -1382,7 +1437,11 @@ async fn relay_copy_dir(
     src_path: &str,
     dest: &Sftp,
     dest_path: &str,
+    cancel: Option<&AtomicBool>,
 ) -> Result<u64, RpcError> {
+    if relay_transfer_canceled(cancel) {
+        return Err(internal("transfer canceled"));
+    }
     ensure_remote_dir(dest, dest_path).await?;
     let entries = src
         .read_dir(src_path)
@@ -1390,6 +1449,9 @@ async fn relay_copy_dir(
         .map_err(|e| internal(e.to_string()))?;
     let mut copied = 0_u64;
     for entry in entries {
+        if relay_transfer_canceled(cancel) {
+            return Err(internal("transfer canceled"));
+        }
         let child_src = join_remote_path(src_path, &entry.name);
         let child_dest = join_remote_path(dest_path, &entry.name);
         match entry.kind {
@@ -1400,14 +1462,22 @@ async fn relay_copy_dir(
                     &child_src,
                     dest,
                     &child_dest,
+                    cancel,
                 ))
                 .await?
             }
             SftpKind::File => {
                 emit_relay_file(transfer_id, &child_dest, entry.size);
-                copied +=
-                    relay_copy_file(transfer_id, src, &child_src, dest, &child_dest, entry.size)
-                        .await?
+                copied += relay_copy_file(
+                    transfer_id,
+                    src,
+                    &child_src,
+                    dest,
+                    &child_dest,
+                    entry.size,
+                    cancel,
+                )
+                .await?
             }
             _ => {}
         }
@@ -1563,10 +1633,7 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: SftpReadChunkParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let sftp = require_sftp(&st, p.id).await?;
-                let bytes = sftp
-                    .read_file_chunk(&p.path, p.offset, p.len)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?;
+                let bytes = sftp_read_chunk_timed(&sftp, &p.path, p.offset, p.len).await?;
                 Ok(json!({ "data": BASE64.encode(&bytes) }))
             }
         });
@@ -1582,9 +1649,7 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let bytes = BASE64
                     .decode(p.data.as_bytes())
                     .map_err(|e| invalid_params(format!("bad base64: {e}")))?;
-                sftp.write_file_chunk(&p.path, p.offset, &bytes, p.create)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?;
+                sftp_write_chunk_timed(&sftp, &p.path, p.offset, &bytes, p.create).await?;
                 Ok(Value::Null)
             }
         });
@@ -1714,36 +1779,75 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: SftpRelayTransferParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let src = require_sftp(&st, p.source_session_id).await?;
-                let dest = require_sftp(&st, p.dest_session_id).await?;
-                let copied = match p.source_kind {
-                    SftpKind::Dir => {
-                        relay_copy_dir(&p.transfer_id, &src, &p.source_path, &dest, &p.dest_path)
+                let cancel = Arc::new(AtomicBool::new(false));
+                st.relay_cancel
+                    .lock()
+                    .await
+                    .insert(p.transfer_id.clone(), cancel.clone());
+                let result: Result<Value, RpcError> = async {
+                    let src = require_sftp(&st, p.source_session_id).await?;
+                    let dest = require_sftp(&st, p.dest_session_id).await?;
+                    let cancel_ref = cancel.as_ref();
+                    let copied = match p.source_kind {
+                        SftpKind::Dir => {
+                            relay_copy_dir(
+                                &p.transfer_id,
+                                &src,
+                                &p.source_path,
+                                &dest,
+                                &p.dest_path,
+                                Some(cancel_ref),
+                            )
                             .await?
-                    }
-                    SftpKind::File => {
-                        let stat = src
-                            .stat(&p.source_path)
-                            .await
-                            .map_err(|e| internal(e.to_string()))?;
-                        emit_relay_file(&p.transfer_id, &p.dest_path, stat.size);
-                        relay_copy_file(
-                            &p.transfer_id,
-                            &src,
-                            &p.source_path,
-                            &dest,
-                            &p.dest_path,
-                            stat.size,
-                        )
-                        .await?
-                    }
-                    _ => {
-                        return Err(invalid_params(
-                            "relay transfer only supports files and directories",
-                        ))
-                    }
-                };
-                Ok(json!({ "method": "relay", "bytes": copied }))
+                        }
+                        SftpKind::File => {
+                            let stat = src
+                                .stat(&p.source_path)
+                                .await
+                                .map_err(|e| internal(e.to_string()))?;
+                            emit_relay_file(&p.transfer_id, &p.dest_path, stat.size);
+                            relay_copy_file(
+                                &p.transfer_id,
+                                &src,
+                                &p.source_path,
+                                &dest,
+                                &p.dest_path,
+                                stat.size,
+                                Some(cancel_ref),
+                            )
+                            .await?
+                        }
+                        _ => {
+                            return Err(invalid_params(
+                                "relay transfer only supports files and directories",
+                            ))
+                        }
+                    };
+                    Ok(json!({ "method": "relay", "bytes": copied }))
+                }
+                .await;
+                st.relay_cancel.lock().await.remove(&p.transfer_id);
+                result
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sftp.cancelRelayTransfer", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpCancelRelayParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let canceled = st
+                    .relay_cancel
+                    .lock()
+                    .await
+                    .get(&p.transfer_id)
+                    .is_some_and(|flag| {
+                        flag.store(true, Ordering::Relaxed);
+                        true
+                    });
+                Ok(json!({ "canceled": canceled }))
             }
         });
     }
@@ -2634,7 +2738,9 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let eng = require_engine(&st).await?;
                 let (results, bridge_notes) = match run_sync_now_cycle(&st, &eng, &groups).await {
                     Ok(v) => {
-                        record_sync_history_ok(&st, "manual", &groups, &v.0).await;
+                        let at_ms = now_ms();
+                        *st.sync_last_ms.lock().await = Some(at_ms);
+                        record_sync_history_ok(&st, "manual", &groups, &v.0, at_ms).await;
                         v
                     }
                     Err(e) => {
@@ -2642,7 +2748,6 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         return Err(e);
                     }
                 };
-                *st.sync_last_ms.lock().await = Some(now_ms());
                 let mut obj: serde_json::Map<String, Value> = results
                     .into_iter()
                     .map(|(g, s)| {
@@ -2679,8 +2784,10 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 // Run one cycle immediately so users see activity without waiting a full interval.
                 match run_sync_now_cycle(&st_immediate, &eng_immediate, &groups_now).await {
                     Ok((results, _)) => {
-                        *st_immediate.sync_last_ms.lock().await = Some(now_ms());
-                        record_sync_history_ok(&st_immediate, "auto", &groups_now, &results).await;
+                        let at_ms = now_ms();
+                        *st_immediate.sync_last_ms.lock().await = Some(at_ms);
+                        record_sync_history_ok(&st_immediate, "auto", &groups_now, &results, at_ms)
+                            .await;
                     }
                     Err(e) => {
                         tracing::warn!(error = ?e, "auto-sync initial cycle failed");
@@ -2698,8 +2805,10 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         ticker.tick().await;
                         match run_sync_now_cycle(&st_tick, &eng, &groups).await {
                             Ok((results, _)) => {
-                                *st_tick.sync_last_ms.lock().await = Some(now_ms());
-                                record_sync_history_ok(&st_tick, "auto", &groups, &results).await;
+                                let at_ms = now_ms();
+                                *st_tick.sync_last_ms.lock().await = Some(at_ms);
+                                record_sync_history_ok(&st_tick, "auto", &groups, &results, at_ms)
+                                    .await;
                             }
                             Err(e) => {
                                 tracing::warn!(error = ?e, "auto-sync tick failed");
@@ -2737,7 +2846,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     .await
                     .as_ref()
                     .map(|e| e.device_id().to_string());
-                let last_sync_ms = *st.sync_last_ms.lock().await;
+                let last_sync_ms = latest_successful_sync_ms(&st).await;
                 let auto_interval_ms = *st.sync_auto_interval_ms.lock().await;
                 let auto_running = st.sync_auto.lock().await.is_some();
                 Ok(json!({
@@ -2781,12 +2890,25 @@ async fn record_sync_history_ok(
     trigger: &str,
     groups: &[Group],
     results: &[(Group, SyncStats)],
+    at_ms: i64,
 ) {
     if let Ok(store) = require_settings(st).await {
-        if let Err(e) = crate::sync::history::append_success(&store, trigger, groups, results) {
+        if let Err(e) =
+            crate::sync::history::append_success_at(&store, trigger, groups, results, at_ms)
+        {
             tracing::warn!(error = %e, "sync history append failed");
         }
     }
+}
+
+async fn latest_successful_sync_ms(st: &AppState) -> Option<i64> {
+    if let Some(ms) = *st.sync_last_ms.lock().await {
+        return Some(ms);
+    }
+    let store = require_settings(st).await.ok()?;
+    crate::sync::history::latest_success_ms(&store)
+        .ok()
+        .flatten()
 }
 
 async fn record_sync_history_err(st: &AppState, trigger: &str, groups: &[Group], err: &RpcError) {
@@ -3498,6 +3620,60 @@ mod tests {
             assert_eq!(got["data"], json!(BASE64.encode(b"persisted")));
         }
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[tokio::test]
+    async fn sync_status_uses_persisted_success_history_after_restart() {
+        let mut settings_dir = std::env::temp_dir();
+        settings_dir.push(format!("aerotab-cmd-settings-{}", Uuid::new_v4()));
+        let history_ms = 1_789_123_456_000_i64;
+
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        let r = d
+            .dispatch(req(
+                "settings.configure",
+                json!({ "path": settings_dir.to_str().unwrap() }),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let r = d
+            .dispatch(req(
+                "settings.set",
+                json!({
+                    "key": "syncHistory",
+                    "value": [{
+                        "id": Uuid::new_v4(),
+                        "at_ms": history_ms,
+                        "trigger": "manual",
+                        "ok": true,
+                        "groups": ["Connections"],
+                        "pushed": 1,
+                        "pulled": 0,
+                        "merged": 0,
+                        "unchanged": 0,
+                    }],
+                }),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let r = d
+            .dispatch(req(
+                "sync.configureWebdav",
+                json!({
+                    "base_url": "http://127.0.0.1:1/dav",
+                    "master_password": "pw",
+                    "test_cheap_kdf": true,
+                }),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let r = d.dispatch(req("sync.status", json!(null))).await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["lastSyncMs"], json!(history_ms));
+
+        let _ = std::fs::remove_dir_all(&settings_dir);
     }
 
     #[tokio::test]

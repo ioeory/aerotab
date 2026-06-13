@@ -36,6 +36,7 @@ interface PaneRect {
 
 export interface Tab {
   id: string;
+  kind: 'terminal' | 'transfer';
   layout: PaneNode;
   /** Flattened compatibility view used by tab chrome, restore, and actions. */
   panes: SessionMeta[];
@@ -229,6 +230,7 @@ class TabStore {
   /** Refresh auto title from the active pane when not user-renamed. */
   syncAutoTitle(tab: Tab): boolean {
     if (tab.customTitle?.trim()) return false;
+    if (tab.kind === 'transfer') return false;
     const next = this.autoTitle(tab);
     if (tab.title === next) return false;
     tab.title = next;
@@ -269,6 +271,7 @@ class TabStore {
 
   private refreshTab(tab: Tab) {
     tab.panes = flatten(tab.layout);
+    if (tab.kind === 'transfer') return;
     if (!tab.panes.some((pane) => pane.id === tab.activePaneId)) {
       tab.activePaneId = tab.panes[0]?.id ?? '';
     }
@@ -282,10 +285,11 @@ class TabStore {
     this.revision++;
   }
 
-  /** Open a new tab containing a single pane. */
+  /** Open a new terminal tab containing a single pane. */
   add(session: SessionMeta): Tab {
     const tab: Tab = {
       id: uuidv4(),
+      kind: 'terminal',
       layout: leaf(session),
       panes: [session],
       activePaneId: session.id,
@@ -295,6 +299,25 @@ class TabStore {
       activity: {},
     };
     this.syncAutoTitle(tab);
+    this.tabs.push(tab);
+    this.activeId = tab.id;
+    this.bump();
+    return tab;
+  }
+
+  /** Open a new file-transfer tab. */
+  addTransferTab(title: string): Tab {
+    const tab: Tab = {
+      id: uuidv4(),
+      kind: 'transfer',
+      layout: leaf({ id: '', kind: 'Local', title: '' }),
+      panes: [],
+      activePaneId: '',
+      maximizedPaneId: null,
+      title,
+      customTitle: null,
+      activity: {},
+    };
     this.tabs.push(tab);
     this.activeId = tab.id;
     this.bump();
@@ -313,6 +336,7 @@ class TabStore {
     if (!first) throw new Error('cannot add empty tab layout');
     const tab: Tab = {
       id: uuidv4(),
+      kind: 'terminal',
       layout,
       panes,
       activePaneId: activePaneId && panes.some((pane) => pane.id === activePaneId) ? activePaneId : first.id,
@@ -331,7 +355,7 @@ class TabStore {
   /** Split the active pane in an existing tab and focus the new pane. */
   addPane(tabId: string, session: SessionMeta, direction: SplitDir = 'row', side: SplitSide = 'after'): boolean {
     const tab = this.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab) return false;
+    if (!tab || tab.kind !== 'terminal') return false;
     const target = tab.activePaneId || tab.panes[0]?.id;
     if (!target) return false;
     const result = insertRelative(tab.layout, target, session, direction, side);

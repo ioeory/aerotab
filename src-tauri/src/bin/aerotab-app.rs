@@ -18,7 +18,9 @@ use std::{
     time::Duration,
 };
 
-use aerotab_core::commands::{register_all, set_app_handle, set_parent_hwnd, AppState};
+#[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+use aerotab_core::commands::set_parent_hwnd;
+use aerotab_core::commands::{register_all, set_app_handle, AppState};
 use aerotab_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
 use aerotab_core::settings::SettingsStore;
 use aerotab_core::CORE_VERSION;
@@ -160,6 +162,7 @@ fn get_main_window_hwnd(app: tauri::AppHandle) -> Result<usize, String> {
     }
     #[cfg(target_os = "macos")]
     {
+        let _ = app;
         Ok(0)
     }
 }
@@ -205,7 +208,6 @@ fn open_file_transfer_window(
         .inner_size(1280.0, 820.0)
         .min_inner_size(900.0, 560.0)
         .resizable(true)
-        .transparent(true)
         .disable_drag_drop_handler()
         .build()
         .map_err(|e| e.to_string())?;
@@ -456,6 +458,9 @@ fn local_home_dir() -> Result<String, String> {
 
 #[tauri::command]
 async fn local_list_dir(path: String) -> Result<Vec<LocalDirEntry>, String> {
+    if path == "__drives__" {
+        return list_windows_drives().await;
+    }
     let mut entries = tokio::fs::read_dir(&path)
         .await
         .map_err(|e| e.to_string())?;
@@ -484,6 +489,21 @@ async fn local_list_dir(path: String) -> Result<Vec<LocalDirEntry>, String> {
             .reverse()
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
+    Ok(out)
+}
+
+async fn list_windows_drives() -> Result<Vec<LocalDirEntry>, String> {
+    let mut out = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let drive = format!("{}:\\", letter as char);
+        if std::path::Path::new(&drive).exists() {
+            out.push(LocalDirEntry {
+                name: drive,
+                kind: "dir",
+                size: 0,
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -532,6 +552,11 @@ async fn local_remove(path: String, recursive: Option<bool>) -> Result<bool, Str
             .map_err(|e| e.to_string())?;
     }
     Ok(true)
+}
+
+#[tauri::command]
+async fn local_rename(from: String, to: String) -> Result<(), String> {
+    tokio::fs::rename(from, to).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -855,6 +880,7 @@ fn main() {
             local_read_chunk,
             local_mkdir,
             local_remove,
+            local_rename,
             local_mkdir_relative,
             local_write_chunk,
             local_write_relative_chunk,

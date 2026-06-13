@@ -519,6 +519,8 @@ const en: Messages = {
   'tabbar.closeTab': 'Close tab',
   'tabbar.noOpenSessions': 'No open sessions — start one from the sidebar.',
   'tabbar.newTab': 'New tab...',
+  'tabbar.newTransfer': 'New transfer',
+  'tabbar.closeTransferTab': 'Close transfer',
   'tabbar.tabList': 'Open tab list',
   'tabbar.tabListCount': '{count} open tabs',
   'tabbar.splitRight': 'Split right',
@@ -532,7 +534,7 @@ const en: Messages = {
   'tabbar.duplicateFailed': 'Cannot duplicate tab (missing restore metadata).',
   'profileModal.proxyJumpProfileRef': 'Use @profile-id or @Profile Name to reference a saved profile.',
   'sftp.resizeDock': 'Resize SFTP dock',
-  'sftp.cancelAll': 'Cancel active',
+  'sftp.cancelAll': 'Cancel all',
 
   'pane.restorePane': 'Restore pane',
   'pane.maximizePane': 'Maximize pane',
@@ -623,6 +625,7 @@ const en: Messages = {
   'sftp.renamePrompt': 'Rename to',
   'sftp.mkdirPrompt': 'New folder name',
   'transfer.windowTitle': 'File transfer',
+  'transfer.tabTitle': 'Transfer',
   'transfer.windowHint': 'Pick local or SSH endpoints, then drag files between panes or use the right-click send menu.',
   'transfer.localComputer': 'Local',
   'transfer.mode': 'Transfer mode',
@@ -645,6 +648,7 @@ const en: Messages = {
   'transfer.leftServer': 'Left endpoint',
   'transfer.rightServer': 'Right endpoint',
   'transfer.pickServer': 'Pick server',
+  'transfer.searchProfiles': 'Search profiles...',
   'transfer.pickSecondServer': 'Pick a second server to transfer between hosts.',
   'transfer.swap': 'Swap servers',
   'transfer.queue': 'Queue',
@@ -656,6 +660,12 @@ const en: Messages = {
   'transfer.planning': 'Planning transfer...',
   'transfer.aggregate': '{count} active · {percent}%',
   'transfer.attempts': '{count} attempt(s)',
+  'transfer.waitingServer': 'Waiting for server response ({seconds}s without progress)',
+  'transfer.timeout': 'Transfer timed out after {seconds}s without progress',
+  'transfer.retrying': 'Retrying transfer ({attempt}/{max}) after timeout',
+  'transfer.finalFailed': 'Transfer failed after {attempts} attempts: {message}',
+  'transfer.cancelingStalled': 'Canceling stalled transfer before retry',
+  'app.status.dismiss': 'Dismiss status',
 };
 
 const zhCN: Messages = {
@@ -1171,6 +1181,8 @@ const zhCN: Messages = {
   'tabbar.closeTab': '关闭标签',
   'tabbar.noOpenSessions': '没有打开的会话，请从侧边栏开始。',
   'tabbar.newTab': '新建标签...',
+  'tabbar.newTransfer': '新建传输',
+  'tabbar.closeTransferTab': '关闭传输',
   'tabbar.tabList': '打开标签列表',
   'tabbar.tabListCount': '{count} 个打开的标签',
   'tabbar.splitRight': '向右分屏',
@@ -1184,7 +1196,7 @@ const zhCN: Messages = {
   'tabbar.duplicateFailed': '无法复制标签（缺少恢复元数据）。',
   'profileModal.proxyJumpProfileRef': '可用 @profile-id 或 @Profile 名称引用已保存的 Profile。',
   'sftp.resizeDock': '调整 SFTP Dock 宽度',
-  'sftp.cancelAll': '取消进行中',
+  'sftp.cancelAll': '全部取消',
 
   'pane.restorePane': '还原窗格',
   'pane.maximizePane': '最大化窗格',
@@ -1275,6 +1287,7 @@ const zhCN: Messages = {
   'sftp.renamePrompt': '重命名为',
   'sftp.mkdirPrompt': '新建文件夹名称',
   'transfer.windowTitle': '文件传输',
+  'transfer.tabTitle': '传输',
   'transfer.windowHint': '选择本地或 SSH 端点，然后在面板间拖拽文件，或用右键发送菜单。',
   'transfer.localComputer': '本地',
   'transfer.mode': '传输模式',
@@ -1297,6 +1310,7 @@ const zhCN: Messages = {
   'transfer.leftServer': '左侧端点',
   'transfer.rightServer': '右侧端点',
   'transfer.pickServer': '选择服务器',
+  'transfer.searchProfiles': '搜索 Profile...',
   'transfer.pickSecondServer': '选择第二台服务器以便主机间传输。',
   'transfer.swap': '交换服务器',
   'transfer.queue': '队列',
@@ -1308,6 +1322,12 @@ const zhCN: Messages = {
   'transfer.planning': '正在规划传输...',
   'transfer.aggregate': '{count} 个活动任务 · {percent}%',
   'transfer.attempts': '第 {count} 次尝试',
+  'transfer.waitingServer': '等待服务器响应（已 {seconds}s 无进度）',
+  'transfer.timeout': '传输已超时：{seconds}s 无进度',
+  'transfer.retrying': '传输超时，正在重试（{attempt}/{max}）',
+  'transfer.finalFailed': '传输失败，已尝试 {attempts} 次：{message}',
+  'transfer.cancelingStalled': '正在取消无进度传输，准备重试',
+  'app.status.dismiss': '关闭状态提示',
 };
 
 const messages: Record<ResolvedLocale, Messages> = {

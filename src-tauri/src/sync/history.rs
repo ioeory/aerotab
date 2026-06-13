@@ -41,6 +41,16 @@ pub fn append_success(
     groups: &[Group],
     results: &[(Group, SyncStats)],
 ) -> Result<(), SettingsError> {
+    append_success_at(store, trigger, groups, results, now_ms())
+}
+
+pub fn append_success_at(
+    store: &SettingsStore,
+    trigger: &str,
+    groups: &[Group],
+    results: &[(Group, SyncStats)],
+    at_ms: i64,
+) -> Result<(), SettingsError> {
     let mut pushed = 0usize;
     let mut pulled = 0usize;
     let mut merged = 0usize;
@@ -55,7 +65,7 @@ pub fn append_success(
         store,
         SyncHistoryEntry {
             id: Uuid::new_v4(),
-            at_ms: now_ms(),
+            at_ms,
             trigger: trigger.into(),
             ok: true,
             error: None,
@@ -66,6 +76,13 @@ pub fn append_success(
             unchanged,
         },
     )
+}
+
+pub fn latest_success_ms(store: &SettingsStore) -> Result<Option<i64>, SettingsError> {
+    Ok(load(store)?
+        .into_iter()
+        .find(|entry| entry.ok)
+        .map(|entry| entry.at_ms))
 }
 
 pub fn append_failure(

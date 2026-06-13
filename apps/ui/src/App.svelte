@@ -65,7 +65,17 @@
     | 'vault'
     | 'window'
     | 'configfile';
+  type StatusLevel = 'info' | 'error';
+  interface StatusState {
+    id: number;
+    text: string;
+    level: StatusLevel;
+    expiresAt?: number;
+  }
   let status = $state(i18n.t('app.status.idle'));
+  let statusState = $state<StatusState>({ id: 0, text: i18n.t('app.status.idle'), level: 'info' });
+  let statusSeq = 0;
+  let statusTimer: ReturnType<typeof setTimeout> | null = null;
   let coreVersion = $state<string | null>(null);
   let hostStats = $state<HostStats | null>(null);
   let hostStatsStatus = $state<'idle' | 'loading' | 'ok' | 'unavailable'>('idle');
@@ -120,11 +130,6 @@
   let sftpDockCollapsed = $state<Record<string, boolean>>({});
   let sftpWindows = $state<SftpWindow[]>([]);
   let sftpWindowSeq = 0;
-  type WorkspaceView = 'terminal' | 'transfer';
-  let workspaceView = $state<WorkspaceView>('terminal');
-  let transferWorkspaceMounted = $state(false);
-  let transferInitialTarget = $state<SftpDockTarget | null>(null);
-  let transferInitialProfileId = $state<string | null>(null);
   let paneSftpTarget = $state<SftpDockTarget | null>(null);
   let paneSftpTargetSeq = 0;
   /** Per-tab broadcast mode: one keystroke → all SSH panes in the tab. */
@@ -421,13 +426,13 @@
       return;
     }
     await saveSessionWorkspaces([snapshot, ...sessionWorkspaces.filter((item) => item.name !== name)]);
-    status = i18n.t('workspace.saved', { name });
+    setStatus(i18n.t('workspace.saved', { name }));
   }
 
   async function openSessionWorkspace(workspace: SessionWorkspace) {
     if (workspaceOpening) return;
     workspaceOpening = true;
-    status = i18n.t('workspace.opening', { name: workspace.name });
+    setStatus(i18n.t('workspace.opening', { name: workspace.name }));
     let openedTabs = 0;
     const nextSftpOpen = { ...sftpDockOpen };
     const nextSftpPinned = { ...sftpDockPinned };
@@ -475,7 +480,7 @@
         sftpDockPinned = nextSftpPinned;
         sftpDockCollapsed = nextSftpCollapsed;
         schedulePersistOpenTabs();
-        status = i18n.t('workspace.opened', { name: workspace.name });
+        setStatus(i18n.t('workspace.opened', { name: workspace.name }));
       } else {
         onError(i18n.t('workspace.openFailed', { name: workspace.name }));
       }
@@ -487,13 +492,13 @@
   async function deleteSessionWorkspace(workspace: SessionWorkspace) {
     if (!(await appConfirm(i18n.t('workspace.deleteConfirm', { name: workspace.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     await saveSessionWorkspaces(sessionWorkspaces.filter((item) => item.id !== workspace.id));
-    status = i18n.t('workspace.deleted', { name: workspace.name });
+    setStatus(i18n.t('workspace.deleted', { name: workspace.name }));
   }
 
   async function exportDiagnosticsFromPalette() {
     try {
       const result = await exportDiagnosticPack(buildId, coreVersion);
-      if (result !== 'cancelled') status = i18n.t('application.diagnostics.exported');
+      if (result !== 'cancelled') setStatus(i18n.t('application.diagnostics.exported'));
     } catch (e) {
       onError(`diagnostics: ${(e as Error).message}`);
     }
@@ -508,13 +513,13 @@
         autoIntervalMs: number | null;
       }>('sync.status', {});
       if (!s.configured) {
-        status = i18n.t('sync.notConfigured');
+        setStatus(i18n.t('sync.notConfigured'));
         return;
       }
-      status = i18n.t('sync.statusLine', {
+      setStatus(i18n.t('sync.statusLine', {
         backend: s.kind ?? '?',
         last: s.lastSyncMs ? new Date(s.lastSyncMs).toLocaleString() : i18n.t('sync.never'),
-      });
+      }));
     } catch (e) {
       onError(`sync status: ${(e as Error).message}`);
     }
@@ -533,13 +538,13 @@
       const settings = await loadPersistedSyncSettings(rpc);
       const groups = selectedSyncGroups(settings);
       if (groups.length === 0) {
-        status = i18n.t('sync.noGroups');
+        setStatus(i18n.t('sync.noGroups'));
         return;
       }
-      status = i18n.t('sync.syncing');
+      setStatus(i18n.t('sync.syncing'));
       const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
       await refreshAppFromSettingsStore();
-      status = i18n.t('sync.complete', { count: Object.keys(stats).filter((k) => k !== '_bridge').length });
+      setStatus(i18n.t('sync.complete', { count: Object.keys(stats).filter((k) => k !== '_bridge').length }));
     } catch (e) {
       onError(`sync now: ${(e as Error).message}`);
     }
@@ -550,13 +555,13 @@
     await i18n.load(rpc);
     await loadSftpDockWidth();
     await loadSessionWorkspaces();
-    status = i18n.t('app.status.idle');
+    setStatus(i18n.t('app.status.idle'));
     try {
       const v = await rpc.call<{ version: string }>('core.version');
       coreVersion = v.version;
-      status = i18n.t('app.status.connectedCore', { version: v.version });
+      setStatus(i18n.t('app.status.connectedCore', { version: v.version }));
     } catch (e) {
-      status = i18n.t('app.status.coreUnreachable');
+      setStatus(i18n.t('app.status.coreUnreachable'), 'error', 6000);
       console.error(e);
     }
     // Pull the persisted theme (if any) and apply before first paint of panes.
@@ -645,9 +650,28 @@
     restoreReady = true;
   });
 
+  function setStatus(text: string, level: StatusLevel = 'info', autoHideMs = 0) {
+    status = text;
+    const id = ++statusSeq;
+    const expiresAt = autoHideMs > 0 ? Date.now() + autoHideMs : undefined;
+    statusState = { id, text, level, expiresAt };
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = null;
+    if (autoHideMs > 0) {
+      statusTimer = setTimeout(() => {
+        if (statusState.id !== id) return;
+        setStatus(i18n.t('app.status.idle'));
+      }, autoHideMs);
+    }
+  }
+
+  function dismissStatus() {
+    setStatus(i18n.t('app.status.idle'));
+  }
+
   function onError(msg: string) {
-    status = msg;
     diagnostics.record(categoryForStatus(msg), 'status', msg, 'error');
+    setStatus(msg, 'error', 6000);
   }
 
   function focusActivePane() {
@@ -1099,16 +1123,18 @@
     sftpWindows = sftpWindows.filter((window) => window.id !== id);
   }
 
-  function showTerminalWorkspace() {
-    workspaceView = 'terminal';
-    requestAnimationFrame(() => focusActivePane());
+  function openFileTransferWindow(initialTarget: SftpDockTarget | null = null, _initialProfileId: string | null = null) {
+    void initialTarget;
+    void _initialProfileId;
+    const title = initialTarget?.name ?? i18n.t('transfer.tabTitle');
+    tabs.addTransferTab(title);
   }
 
-  function openFileTransferWindow(initialTarget: SftpDockTarget | null = null, initialProfileId: string | null = null) {
-    transferInitialTarget = initialTarget;
-    transferInitialProfileId = initialProfileId;
-    transferWorkspaceMounted = true;
-    workspaceView = 'transfer';
+  function closeCurrentTransferTab() {
+    const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
+    if (tab && tab.kind === 'transfer') {
+      tabs.remove(tab.id);
+    }
   }
 
   function closeSftpDock(tabId = activeSftpKey) {
@@ -1191,9 +1217,9 @@
   async function onAppSettingsChanged() {
     syncSidebarFromWindowSettings();
     await i18n.load(rpc);
-    status = coreVersion
+    setStatus(coreVersion
       ? i18n.t('app.status.connectedCore', { version: coreVersion })
-      : i18n.t('app.status.idle');
+      : i18n.t('app.status.idle'));
     void loadHostStatsSettings();
   }
 
@@ -1596,8 +1622,6 @@
         openSerialModal={() => serialModal?.open()}
         openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
         openSettings={() => openSettings()}
-        workspaceView={workspaceView}
-        onShowTerminal={showTerminalWorkspace}
         onShowTransfer={() => openFileTransferWindow()}
         {onError}
       />
@@ -1611,10 +1635,11 @@
   {/if}
 
   <main class="flex flex-col flex-1 min-w-0 bg-[var(--color-panel)]">
-    <div class="{workspaceView === 'terminal' ? 'flex' : 'hidden'} flex-col flex-1 min-h-0 min-w-0">
+    <div class="flex flex-col flex-1 min-h-0 min-w-0">
       <TabBar
         {rpc}
         onAddTab={() => (pickerOpen = true)}
+        onAddTransferTab={() => openFileTransferWindow()}
         onSplit={(direction) => { void splitActive(direction); }}
         onOpenSftp={() => { void openSftpForActivePane(); }}
         onDuplicateTab={(tab) => { void duplicateTab(tab); }}
@@ -1628,18 +1653,26 @@
         <div class="relative flex-1 min-w-0 min-h-0">
           {#each tabs.tabs as tab (tab.id)}
             <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
-              <PaneGrid
-                {rpc}
-                {tab}
-                settingsRev={settingsRev}
-                tabVisible={workspaceView === 'terminal' && tabs.activeId === tab.id}
-                broadcastEnabled={broadcastOn}
-                broadcastTargetIds={broadcastTargets}
-                onOpenSftp={() => { void openSftpForActivePane(); }}
-                onSplitRight={() => { void splitActive('row'); }}
-                onSplitDown={() => { void splitActive('col'); }}
-                {onError}
-              />
+              {#if tab.kind === 'transfer'}
+                <FileTransferWindow
+                  {rpc}
+                  tabId={tab.id}
+                  {onError}
+                />
+              {:else}
+                <PaneGrid
+                  {rpc}
+                  {tab}
+                  settingsRev={settingsRev}
+                  tabVisible={tabs.activeId === tab.id}
+                  broadcastEnabled={broadcastOn}
+                  broadcastTargetIds={broadcastTargets}
+                  onOpenSftp={() => { void openSftpForActivePane(); }}
+                  onSplitRight={() => { void splitActive('row'); }}
+                  onSplitDown={() => { void splitActive('col'); }}
+                  {onError}
+                />
+              {/if}
             </div>
           {/each}
           {#if tabs.tabs.length === 0}
@@ -1705,18 +1738,7 @@
       </div>
     </div>
 
-    {#if transferWorkspaceMounted}
-      <div class="{workspaceView === 'transfer' ? 'block' : 'hidden'} flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)]">
-        <FileTransferWindow
-          {rpc}
-          embedded={true}
-          initialTarget={transferInitialTarget}
-          initialProfileId={transferInitialProfileId}
-          onClose={showTerminalWorkspace}
-          {onError}
-        />
-      </div>
-    {/if}
+
 
     <footer class="px-3 py-1.5 border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] flex items-center gap-3
                    text-[11px] text-[var(--color-fg-muted)] font-mono">
@@ -1727,7 +1749,18 @@
               onclick={() => { void setSidebarVisible(!sidebarVisible); }}>
         {#if sidebarVisible}<PanelLeftClose size={13} />{:else}<PanelLeftOpen size={13} />{/if}
       </button>
-      <span>{status}</span>
+      <span class="truncate {statusState.level === 'error' ? 'text-[var(--color-danger)]' : ''}" title={statusState.text}>{statusState.text}</span>
+      {#if statusState.level === 'error'}
+        <button
+          type="button"
+          class="btn-ghost p-0.5 hover:!text-[var(--color-danger)]"
+          title={i18n.t('app.status.dismiss')}
+          aria-label={i18n.t('app.status.dismiss')}
+          onclick={dismissStatus}
+        >
+          <X size={12} />
+        </button>
+      {/if}
       {#if hostStatsEnabled && hostStatsStatus === 'ok' && hostStats}
         <span class="hidden lg:inline-flex items-center gap-2 truncate max-w-[520px]" title={hostStatsTitle(hostStats)}>
           <span class="truncate">{formatHostStats(hostStats)}</span>
@@ -1767,7 +1800,7 @@
   {rpc}
   bind:this={vaultUnlockModal}
   {onError}
-  onUnlocked={() => { status = i18n.t('sync.vaultUnlocked'); }}
+  onUnlocked={() => { setStatus(i18n.t('sync.vaultUnlocked')); }}
 />
 <SerialModal {rpc} bind:this={serialModal} {onError} />
 <AppConfirmDialog />

@@ -60,8 +60,6 @@
     openSerialModal: () => void;
     openSftp: (p: StoredProfile) => void;
     openSettings: () => void;
-    workspaceView?: 'terminal' | 'transfer';
-    onShowTerminal?: () => void;
     onShowTransfer?: () => void;
   }
   let {
@@ -71,8 +69,6 @@
     openSerialModal,
     openSftp,
     openSettings,
-    workspaceView = 'terminal',
-    onShowTerminal,
     onShowTransfer,
   }: Props = $props();
 
@@ -159,6 +155,7 @@
       defaultValue,
       placeholder: i18n.t('profileModal.groupPlaceholder'),
       confirmLabel: i18n.t('sidebar.createGroup'),
+      position: lastMenuPosition ?? undefined,
     });
     if (value === null) return;
     const normalized = normalizeGroupPath(value);
@@ -268,6 +265,8 @@
   let menuTarget = $state<SidebarMenu | null>(null);
   let menuEl = $state<HTMLDivElement | null>(null);
   let focusedProfileId = $state<string | null>(null);
+  let focusedGroupPath = $state<string | null>(null);
+  let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectionAnchorId = $state<string | null>(null);
   let bulkBusy = $state(false);
@@ -311,6 +310,7 @@
   async function openMenu(target: SidebarMenu, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
+    lastMenuPosition = { x: ev.clientX, y: ev.clientY };
     menuTarget = target;
     menuX = ev.clientX;
     menuY = ev.clientY;
@@ -319,6 +319,7 @@
     const clamped = clampMenuToViewport(menuX, menuY, menuEl);
     menuX = clamped.x;
     menuY = clamped.y;
+    lastMenuPosition = { x: menuX, y: menuY };
   }
 
   function focusProfile(p: StoredProfile) {
@@ -487,6 +488,7 @@
         defaultValue: defaultGroupForMove(profiles),
         placeholder: i18n.t('profileModal.groupPlaceholder'),
         confirmLabel: i18n.t('profiles.moveToGroup'),
+        position: lastMenuPosition ?? undefined,
       },
     );
     if (value === null) return;
@@ -536,6 +538,7 @@
   }
 
   function showFolderMenu(folder: ProfileTreeFolder, ev: MouseEvent) {
+    focusedGroupPath = folder.path;
     openMenu({ kind: 'group', folder, groupLabel: folder.name || i18n.t('sidebar.ungrouped') }, ev);
   }
 
@@ -585,6 +588,7 @@
       defaultValue: formatTags(p.tags),
       placeholder: 'prod, db, singapore',
       confirmLabel: i18n.t('common.save'),
+      position: lastMenuPosition ?? undefined,
     });
     if (value === null) return;
     try {
@@ -602,6 +606,7 @@
       defaultValue: p.note ?? '',
       placeholder: i18n.t('profileModal.notePlaceholder'),
       confirmLabel: i18n.t('common.save'),
+      position: lastMenuPosition ?? undefined,
     });
     if (value === null) return;
     try {
@@ -618,6 +623,7 @@
     await appConfirm(p.note?.trim() || i18n.t('sidebar.noNote'), {
       title: p.name,
       confirmLabel: i18n.t('common.ok'),
+      position: lastMenuPosition ?? undefined,
     });
   }
   async function menuEditIcon(p: StoredProfile) {
@@ -627,6 +633,7 @@
       defaultValue,
       placeholder: 'selfhst:home-assistant, server, emoji:rocket, remote:https://host/a.svg|https://host/b.png',
       confirmLabel: i18n.t('common.save'),
+      position: lastMenuPosition ?? undefined,
     });
     if (value === null) return;
     try {
@@ -737,7 +744,7 @@
   }
 
   async function deleteProfile(p: StoredProfile) {
-    if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
+    if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete'), position: lastMenuPosition ?? undefined }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
       if (focusedProfileId === p.id) focusedProfileId = null;
@@ -899,23 +906,11 @@
     </button>
   </div>
 
-  <div class="px-2 pt-2 pb-1 border-b border-[var(--color-border-soft)] grid grid-cols-2 gap-1">
-    <button
-      type="button"
-      onclick={() => onShowTerminal?.()}
-      class="workspace-switch {workspaceView === 'terminal' ? 'workspace-switch--active' : ''}"
-      aria-pressed={workspaceView === 'terminal'}
-      title={i18n.t('workspace.terminal')}
-      aria-label={i18n.t('workspace.terminal')}
-    >
-      <TerminalIcon size={14} />
-      <span>{i18n.t('workspace.terminal')}</span>
-    </button>
+  <div class="px-2 pt-2 pb-1 border-b border-[var(--color-border-soft)] grid grid-cols-1 gap-1">
     <button
       type="button"
       onclick={() => onShowTransfer?.()}
-      class="workspace-switch {workspaceView === 'transfer' ? 'workspace-switch--active' : ''}"
-      aria-pressed={workspaceView === 'transfer'}
+      class="workspace-switch"
       title={i18n.t('workspace.fileTransfer')}
       aria-label={i18n.t('workspace.fileTransfer')}
     >
@@ -1212,12 +1207,6 @@
   .workspace-switch:hover {
     color: var(--color-fg);
     background: var(--color-panel-2);
-  }
-  .workspace-switch--active {
-    color: var(--color-fg);
-    border-color: var(--color-border-soft);
-    background: var(--color-bg);
-    box-shadow: inset 0 -2px 0 var(--color-accent);
   }
   .context-menu-scroll {
     max-height: calc(100vh - 16px);

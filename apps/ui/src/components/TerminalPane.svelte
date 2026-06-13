@@ -941,6 +941,7 @@
       return;
     }
     ev.preventDefault();
+    focusTerminalIfAllowed(term);
     menuX = ev.clientX;
     menuY = ev.clientY;
     menuOpen = true;

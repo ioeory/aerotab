@@ -195,6 +195,23 @@ impl SyncEngine {
         self.write_local(group, id, payload, false).await
     }
 
+    /// Local write that only bumps the version vector when the plaintext changed.
+    pub async fn put_local_if_changed(
+        &self,
+        group: Group,
+        id: RecordId,
+        payload: Vec<u8>,
+    ) -> Result<(), SyncError> {
+        if self
+            .get_local(group, id)
+            .await
+            .is_some_and(|existing| existing == payload)
+        {
+            return Ok(());
+        }
+        self.put_local(group, id, payload).await
+    }
+
     /// Mark a record as deleted (tombstone).
     pub async fn delete_local(&self, group: Group, id: RecordId) -> Result<(), SyncError> {
         self.write_local(group, id, Vec::new(), true).await
@@ -499,6 +516,33 @@ mod tests {
             b.get_local(Group::Connections, rid(1)).await.as_deref(),
             Some(&b"hello"[..]),
         );
+    }
+
+    #[tokio::test]
+    async fn put_local_if_changed_does_not_bump_unchanged_payload() {
+        let backend = Arc::new(MemBackend::default());
+        let clock = Arc::new(FakeClock::new(1_000));
+        let a = engine(dev(1), backend.clone(), clock.clone());
+
+        a.put_local_if_changed(Group::Connections, rid(4), b"rarecloud-a".to_vec())
+            .await
+            .unwrap();
+        let stats = a.sync_group(Group::Connections).await.unwrap();
+        assert_eq!(stats.pushed, 1);
+
+        clock.advance(1_000);
+        a.put_local_if_changed(Group::Connections, rid(4), b"rarecloud-a".to_vec())
+            .await
+            .unwrap();
+        let stats = a.sync_group(Group::Connections).await.unwrap();
+        assert_eq!(stats.unchanged, 1);
+        assert_eq!(stats.pushed, 0);
+
+        a.put_local_if_changed(Group::Connections, rid(4), b"rarecloud-b".to_vec())
+            .await
+            .unwrap();
+        let stats = a.sync_group(Group::Connections).await.unwrap();
+        assert_eq!(stats.pushed, 1);
     }
 
     #[tokio::test]

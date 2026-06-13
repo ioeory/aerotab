@@ -2,6 +2,7 @@ import type { LocalEntry, SshProfileSpec } from './types';
 
 export const SFTP_DRAG_LOCAL = 'application/x-aerotab-sftp-local';
 export const SFTP_DRAG_REMOTE = 'application/x-aerotab-sftp-remote';
+export const DRIVES_ROOT = '__drives__';
 
 const LOCAL_PLAIN_PREFIX = 'aerotab-sftp-local:';
 const REMOTE_PLAIN_PREFIX = 'aerotab-sftp-remote:';
@@ -45,6 +46,7 @@ export interface RemoteDragPayload {
 }
 
 export function joinLocalPath(base: string, name: string): string {
+  if (base === DRIVES_ROOT) return name;
   const sep = base.includes('\\') ? '\\' : '/';
   const trimmed = base.replace(/[/\\]+$/, '');
   if (!trimmed) return name;
@@ -52,18 +54,22 @@ export function joinLocalPath(base: string, name: string): string {
 }
 
 export function parentLocalPath(p: string): string {
+  if (p === DRIVES_ROOT) return DRIVES_ROOT;
   const sep = p.includes('\\') ? '\\' : '/';
   const parts = p.split(/[/\\]/).filter(Boolean);
   if (parts.length === 0) return p;
   if (parts.length === 1) {
     const head = parts[0]!;
-    return head.includes(':') ? `${head}\\` : sep;
+    if (head.includes(':')) return DRIVES_ROOT;
+    return sep;
   }
   parts.pop();
-  return parts.join(sep);
+  const result = parts.join(sep);
+  return parts.length === 1 && parts[0]!.includes(':') ? `${result}${sep}` : result;
 }
 
 export function localBreadcrumbs(cwd: string): { label: string; path: string }[] {
+  if (cwd === DRIVES_ROOT) return [{ label: 'This PC', path: DRIVES_ROOT }];
   const win = cwd.includes('\\') || /^[A-Za-z]:/.test(cwd);
   if (win) {
     const normalized = cwd.replace(/\//g, '\\');

@@ -5,6 +5,8 @@
   --color-bg: #0b0d12;
   --color-panel: #13161d;
   --color-panel-2: #1a1e27;
+  --color-bg-soft: #10131b;
+  --color-surface-raised: #171b25;
   --color-border: #2a2f3b;
   --color-border-soft: #1f2330;
   --color-fg: #e6e9ef;
@@ -36,6 +38,7 @@
   --ui-bg-opacity-percent: 100%;
   --ui-spaciness: 1;
   --shadow-panel: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 60px rgba(0, 0, 0, 0.5);
   --ring-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
 }
 
@@ -358,6 +361,12 @@ dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
   box-shadow: var(--shadow-panel);
 }
 
+.surface-raised {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-soft);
+  box-shadow: var(--shadow-panel);
+}
+
 .list-item {
   display: flex;
   align-items: center;
@@ -446,7 +455,7 @@ dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
 }
 .menu-item:hover,
 .ctx-item:hover:not(:disabled) {
-  background: var(--color-panel-2);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
   color: var(--color-accent);
 }
 .menu-item--shortcut {

@@ -80,7 +80,7 @@
   <div class="profile-folder" style="--depth: {depth}">
     <div
       role="presentation"
-      class="folder-header w-full flex items-center gap-1 py-1 pr-1 rounded-md
+      class="folder-header w-full flex items-center gap-1 py-0.5 pr-1 rounded
              hover:bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]"
       draggable="true"
       ondragstart={(e) => onFolderDragStart(child, e)}
@@ -152,7 +152,7 @@
   {@const h = profileHealth[p.id]}
   {@const rowTitle = `${profileEndpointLabel(p)} — ${i18n.t('sidebar.profileRowHint')}${p.note ? `\n${p.note}` : ''}`}
   <div
-    class="profile-row group flex items-center gap-1.5 rounded-md hover:bg-[var(--color-panel-2)] cursor-pointer
+    class="profile-row group flex items-center gap-1.5 rounded hover:bg-[var(--color-panel-2)] cursor-pointer
            {focusedProfileId === p.id ? 'profile-row--focused' : ''}
            {selectedProfileIds.has(p.id) ? 'profile-row--selected' : ''}"
     style="--depth: {depth}"
@@ -263,12 +263,12 @@
     font: inherit;
   }
   .profile-row--focused {
-    background: var(--color-panel-2);
+    background: color-mix(in srgb, var(--color-accent) 10%, var(--color-panel-2));
     outline: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
     outline-offset: -1px;
   }
   .profile-row--selected {
-    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
+    background: color-mix(in srgb, var(--color-accent) 18%, var(--color-panel-2));
   }
   .note-chip {
     display: inline-grid;

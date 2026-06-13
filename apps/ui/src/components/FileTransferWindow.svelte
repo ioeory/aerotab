@@ -18,6 +18,8 @@
     SFTP_DRAG_REMOTE,
   } from '../lib/sftpLocal';
   import { onMount } from 'svelte';
+  import { tabs } from '../lib/tabs.svelte';
+  import EndpointSelector from './EndpointSelector.svelte';
 
   interface TransferTarget {
     name: string;
@@ -26,11 +28,7 @@
 
   interface Props {
     rpc: RpcClient;
-    initialTarget?: TransferTarget | null;
-    initialProfileId?: string | null;
-    standalone?: boolean;
-    embedded?: boolean;
-    onClose: () => void;
+    tabId?: string;
     onError: (msg: string) => void;
   }
 
@@ -74,6 +72,7 @@
     startedAt?: number;
     finishedAt?: number;
     message?: string;
+    lastProgressAt?: number;
     files?: PlannedFile[];
     dirs?: string[];
   }
@@ -85,19 +84,19 @@
 
   let {
     rpc,
-    initialTarget = null,
-    initialProfileId = null,
-    standalone = false,
-    embedded = false,
-    onClose,
+    tabId = '',
     onError,
   }: Props = $props();
 
   const LOCAL_ENDPOINT_ID = '__local__';
-  const INITIAL_ENDPOINT_ID = '__initial__';
-  const STORAGE_KEY = 'aerotab.fileTransfer.tasks.v1';
+  const STORAGE_KEY = $derived(`aerotab.fileTransfer.tasks.v1.${tabId}`);
   const MAX_PERSISTED_HISTORY = 200;
   const CHUNK_SIZE = 256 * 1024;
+  const TRANSFER_STALL_MS = 45_000;
+  const MAX_AUTO_ATTEMPTS = 3;
+  const RETRY_BACKOFF_MS = [1000, 3000];
+  const TRANSFER_RPC_TIMEOUT_MS = 45_000;
+  const RELAY_CANCEL_GRACE_MS = 3000;
 
   let profiles = $state<StoredProfile[]>([]);
   let loadingProfiles = $state(false);
@@ -109,8 +108,10 @@
   let transferSeq = 0;
   let refreshToken = $state(0);
   let selectedTaskIds = $state<Set<string>>(new Set());
-  let lastInitialKey = $state('');
   let tasksHydrated = $state(false);
+  let progressTick = $state(0);
+
+  const STALE_PROGRESS_MS = TRANSFER_STALL_MS;
 
   let leftLocalCwd = $state('');
   let leftLocalEntries = $state<LocalEntry[]>([]);
@@ -140,7 +141,6 @@
   });
 
   function targetForId(id: string): TransferTarget | null {
-    if (id === INITIAL_ENDPOINT_ID) return initialTarget;
     const profile = sshProfiles.find((p) => p.id === id);
     if (!profile || profile.kind !== 'ssh') return null;
     return { name: profile.name, ssh: profile.ssh };
@@ -151,18 +151,13 @@
   }
 
   function normalizeEndpointSelection(id: string): string {
-    if (id === LOCAL_ENDPOINT_ID || id === INITIAL_ENDPOINT_ID) return id;
+    if (id === LOCAL_ENDPOINT_ID) return id;
     return sshProfiles.some((p) => p.id === id) ? id : '';
   }
 
   function pickInitialIds(list: StoredProfile[]) {
     const ssh = list.filter((p) => p.kind === 'ssh');
-    if (initialProfileId && ssh.some((p) => p.id === initialProfileId)) {
-      leftId = initialProfileId;
-    } else if (initialTarget) {
-      const match = ssh.find((p) => p.name === initialTarget?.name);
-      leftId = match?.id ?? INITIAL_ENDPOINT_ID;
-    } else if (!leftId || (!isLocalEndpoint(leftId) && !ssh.some((p) => p.id === leftId))) {
+    if (!leftId || (!isLocalEndpoint(leftId) && !ssh.some((p) => p.id === leftId))) {
       leftId = LOCAL_ENDPOINT_ID;
     }
 
@@ -271,12 +266,10 @@
     rightId = left;
   }
 
-  async function closeWindow() {
-    if (standalone) {
-      const closed = await tauriInvoke<void>('close_current_window')?.then(() => true).catch(() => false);
-      if (closed) return;
+  function closeWindow() {
+    if (tabId) {
+      tabs.remove(tabId);
     }
-    onClose();
   }
 
   function nextTaskId(): string {
@@ -378,7 +371,14 @@
   }
 
   function updateTask(id: string, patch: Partial<TransferTask>) {
-    tasks = tasks.map((task) => task.id === id ? { ...task, ...patch } : task);
+    tasks = tasks.map((task) => {
+      if (task.id !== id) return task;
+      const next = { ...task, ...patch };
+      if (patch.transferred !== undefined && patch.transferred !== task.transferred) {
+        next.lastProgressAt = Date.now();
+      }
+      return next;
+    });
   }
 
   function currentTask(id: string): TransferTask | undefined {
@@ -399,6 +399,88 @@
     }
   }
 
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function withTransferTimeout<T>(label: string, promise: Promise<T>, timeoutMs = TRANSFER_RPC_TIMEOUT_MS): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label}: ${i18n.t('transfer.timeout', { seconds: Math.round(timeoutMs / 1000) })}`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function withRelayStallCancel<T>(id: string, promise: Promise<T>): Promise<T> {
+    let stalled = false;
+    let stopMonitor = false;
+    const monitor = (async () => {
+      while (!stopMonitor && !stalled) {
+        const task = currentTask(id);
+        if (!task || task.status !== 'running' || isCanceled(id)) return;
+        if (isPaused(id)) {
+          await sleep(500);
+          continue;
+        }
+        const last = task.lastProgressAt ?? task.startedAt ?? task.createdAt;
+        const remaining = TRANSFER_STALL_MS - (Date.now() - last);
+        if (remaining <= 0) {
+          stalled = true;
+          updateTask(id, { message: i18n.t('transfer.cancelingStalled') });
+          await rpc.call('sftp.cancelRelayTransfer', { transfer_id: id }).catch(() => {});
+          await sleep(RELAY_CANCEL_GRACE_MS);
+          throw new Error(i18n.t('transfer.timeout', { seconds: Math.round(TRANSFER_STALL_MS / 1000) }));
+        }
+        await sleep(Math.min(remaining, 500));
+      }
+    })();
+    try {
+      const value = await Promise.race([promise, monitor.then(() => new Promise<T>(() => {}))]);
+      if (stalled) throw new Error(i18n.t('transfer.timeout', { seconds: Math.round(TRANSFER_STALL_MS / 1000) }));
+      return value;
+    } catch (error) {
+      if (stalled) throw new Error(i18n.t('transfer.timeout', { seconds: Math.round(TRANSFER_STALL_MS / 1000) }));
+      throw error;
+    } finally {
+      stopMonitor = true;
+      await monitor.catch(() => {});
+    }
+  }
+
+  async function retryOrFailTask(task: TransferTask, err: unknown) {
+    const message = (err as Error).message;
+    if (task.attempts < MAX_AUTO_ATTEMPTS && !isCanceled(task.id)) {
+      const nextAttempt = task.attempts + 1;
+      updateTask(task.id, {
+        status: 'queued',
+        transferred: 0,
+        size: task.sourceKind === 'File' ? task.sourceSize : 0,
+        message: i18n.t('transfer.retrying', { attempt: nextAttempt, max: MAX_AUTO_ATTEMPTS }),
+        files: undefined,
+        dirs: undefined,
+        method: undefined,
+        attempts: nextAttempt,
+        startedAt: undefined,
+        lastProgressAt: undefined,
+        finishedAt: undefined,
+      });
+      await sleep(RETRY_BACKOFF_MS[Math.min(nextAttempt - 2, RETRY_BACKOFF_MS.length - 1)] ?? 1000);
+      return;
+    }
+    updateTask(task.id, {
+      status: 'error',
+      message: i18n.t('transfer.finalFailed', { attempts: task.attempts, message }),
+      finishedAt: Date.now(),
+    });
+    onError(i18n.t('sftp.crossTransferFailed', { message }));
+  }
+
   function pauseTask(id: string) {
     const status = currentTask(id)?.status;
     if (status === 'queued' || status === 'running') {
@@ -407,14 +489,20 @@
   }
 
   function resumeTask(id: string) {
-    if (currentTask(id)?.status !== 'paused') return;
-    updateTask(id, { status: 'queued', message: undefined });
-    void processQueue();
+    const task = currentTask(id);
+    if (task?.status !== 'paused') return;
+    if (task.startedAt) {
+      updateTask(id, { status: 'running', message: undefined, lastProgressAt: Date.now() });
+    } else {
+      updateTask(id, { status: 'queued', message: undefined, lastProgressAt: undefined });
+      void processQueue();
+    }
   }
 
   function cancelTask(id: string) {
     const status = currentTask(id)?.status;
     if (!status || status === 'done' || status === 'error' || status === 'canceled') return;
+    void rpc.call('sftp.cancelRelayTransfer', { transfer_id: id }).catch(() => {});
     updateTask(id, { status: 'canceled', message: i18n.t('sftp.transferCanceled'), finishedAt: Date.now() });
   }
 
@@ -534,15 +622,14 @@
       while (true) {
         const task = tasks.find((candidate) => candidate.status === 'queued');
         if (!task) return;
-        updateTask(task.id, { status: 'running', startedAt: Date.now(), message: undefined });
+        updateTask(task.id, { status: 'running', startedAt: Date.now(), lastProgressAt: Date.now(), message: undefined });
         try {
           const result = await Promise.race([
-            runTask(task.id).then(() => 'done' as const, () => 'error' as const),
+            runTask(task.id).then(() => 'done' as const),
             whenCanceled(task.id),
           ]);
           if (result === 'canceled') continue;
           if (isCanceled(task.id)) continue;
-          if (result === 'error') continue;
           const latest = currentTask(task.id);
           updateTask(task.id, {
             status: 'done',
@@ -555,8 +642,7 @@
           if (rightId === LOCAL_ENDPOINT_ID) void refreshLocalSide('right');
         } catch (e) {
           if (isCanceled(task.id)) continue;
-          updateTask(task.id, { status: 'error', message: (e as Error).message, finishedAt: Date.now() });
-          onError(i18n.t('sftp.crossTransferFailed', { message: (e as Error).message }));
+          await retryOrFailTask(currentTask(task.id) ?? task, e);
         }
       }
     } finally {
@@ -583,13 +669,14 @@
     if (!task.sourceSessionId || !task.destSessionId) return false;
     updateTask(id, { method: 'direct', message: i18n.t('transfer.directRunning') });
     try {
-      await rpc.call('sftp.directTransfer', {
+      await withTransferTimeout('sftp.directTransfer', rpc.call('sftp.directTransfer', {
         source_session_id: task.sourceSessionId,
         dest_session_id: task.destSessionId,
         source_path: task.sourcePath,
         kind: task.sourceKind,
         dest_path: task.destPath,
-      });
+        timeout_ms: TRANSFER_RPC_TIMEOUT_MS,
+      }), TRANSFER_RPC_TIMEOUT_MS + 5000);
       await verifyDirectTransferTarget(task);
       updateTask(id, {
         method: 'direct',
@@ -605,7 +692,7 @@
 
   async function verifyDirectTransferTarget(task: TransferTask) {
     if (!task.destSessionId) return;
-    const entry = await rpc.call<SftpEntry>('sftp.stat', { id: task.destSessionId, path: task.destPath });
+    const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: task.destSessionId, path: task.destPath }));
     if (task.sourceKind === 'Dir') {
       if (entry.kind !== 'Dir') throw new Error(i18n.t('transfer.directVerifyFailed'));
       return;
@@ -643,14 +730,14 @@
     }
 
     try {
-      await rpc.call('sftp.relayTransfer', {
+      await withRelayStallCancel(id, rpc.call('sftp.relayTransfer', {
         transfer_id: id,
         source_session_id: task.sourceSessionId,
         dest_session_id: task.destSessionId,
         source_path: task.sourcePath,
         source_kind: task.sourceKind,
         dest_path: task.destPath,
-      });
+      }));
     } catch (e) {
       updateTask(id, { message: `Relay error: ${(e as Error).message}` });
       return false;
@@ -759,7 +846,7 @@
 
   async function planRemoteDir(srcSid: string, srcPath: string, destPath: string, dirs: string[] = []): Promise<PlannedFile[]> {
     const out: PlannedFile[] = [];
-    const list = sortEntries(await rpc.call<SftpEntry[]>('sftp.list', { id: srcSid, path: srcPath }));
+    const list = sortEntries(await withTransferTimeout('sftp.list', rpc.call<SftpEntry[]>('sftp.list', { id: srcSid, path: srcPath })));
     for (const entry of list) {
       const childSrc = joinRemotePath(srcPath, entry.name);
       const childDest = taskDestJoin(destPath, entry.name);
@@ -775,7 +862,7 @@
 
   async function planLocalDir(srcPath: string, destPath: string, dirs: string[] = []): Promise<PlannedFile[]> {
     const out: PlannedFile[] = [];
-    const list = await tauriInvoke<LocalEntry[]>('local_list_dir', { path: srcPath });
+    const list = await withTransferTimeout('local_list_dir', tauriInvoke<LocalEntry[]>('local_list_dir', { path: srcPath }) ?? Promise.reject(new Error('local file browser is not available')));
     if (!list) throw new Error('local file browser is not available');
     for (const entry of list) {
       const childSrc = joinLocalPath(srcPath, entry.name);
@@ -800,7 +887,7 @@
     baseTransferred: number,
   ) {
     if (size === 0) {
-      await rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true });
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true }));
       updateTask(taskId, { transferred: baseTransferred });
       return;
     }
@@ -809,16 +896,16 @@
       await waitWhilePaused(taskId);
       if (isCanceled(taskId)) return;
       const len = Math.min(CHUNK_SIZE, size - offset);
-      const r = await rpc.call<{ data: string }>('sftp.readChunk', { id: srcSid, path: srcPath, offset, len });
+      const r = await withTransferTimeout('sftp.readChunk', rpc.call<{ data: string }>('sftp.readChunk', { id: srcSid, path: srcPath, offset, len }));
       const bytes = b64decode(r.data);
       if (bytes.byteLength === 0) break;
-      await rpc.call('sftp.writeChunk', {
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', {
         id: destSid,
         path: destPath,
         offset,
         data: b64encode(bytes),
         create: offset === 0,
-      });
+      }));
       offset += bytes.byteLength;
       updateTask(taskId, { transferred: baseTransferred + offset });
     }
@@ -833,7 +920,7 @@
     baseTransferred: number,
   ) {
     if (size === 0) {
-      await rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true });
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', { id: destSid, path: destPath, offset: 0, data: '', create: true }));
       updateTask(taskId, { transferred: baseTransferred });
       return;
     }
@@ -842,17 +929,16 @@
       await waitWhilePaused(taskId);
       if (isCanceled(taskId)) return;
       const len = Math.min(CHUNK_SIZE, size - offset);
-      const r = await tauriInvoke<{ data: string }>('local_read_chunk', { path: srcPath, offset, len });
-      if (!r) throw new Error('desktop file reader is not available');
+      const r = await withTransferTimeout('local_read_chunk', tauriInvoke<{ data: string }>('local_read_chunk', { path: srcPath, offset, len }) ?? Promise.reject(new Error('desktop file reader is not available')));
       const bytes = b64decode(r.data);
       if (bytes.byteLength === 0) break;
-      await rpc.call('sftp.writeChunk', {
+      await withTransferTimeout('sftp.writeChunk', rpc.call('sftp.writeChunk', {
         id: destSid,
         path: destPath,
         offset,
         data: b64encode(bytes),
         create: offset === 0,
-      });
+      }));
       offset += bytes.byteLength;
       updateTask(taskId, { transferred: baseTransferred + offset });
     }
@@ -877,7 +963,7 @@
       await waitWhilePaused(taskId);
       if (isCanceled(taskId)) return;
       const len = Math.min(CHUNK_SIZE, size - offset);
-      const r = await rpc.call<{ data: string }>('sftp.readChunk', { id: srcSid, path: srcPath, offset, len });
+      const r = await withTransferTimeout('sftp.readChunk', rpc.call<{ data: string }>('sftp.readChunk', { id: srcSid, path: srcPath, offset, len }));
       const bytes = b64decode(r.data);
       if (bytes.byteLength === 0) break;
       await writeLocalChunk(destPath, offset, bytes, offset === 0);
@@ -894,13 +980,13 @@
       create,
     });
     if (!write) throw new Error('desktop file writer is not available');
-    await write;
+    await withTransferTimeout('local_write_chunk', write);
   }
 
   async function ensureLocalDir(path: string) {
     const mkdir = tauriInvoke<void>('local_mkdir', { path });
     if (!mkdir) throw new Error('desktop directory writer is not available');
-    await mkdir;
+    await withTransferTimeout('local_mkdir', mkdir);
   }
 
   async function ensureRemoteDirOn(sid: string, path: string, dirCache: Set<string>) {
@@ -913,13 +999,13 @@
       cursor = joinRemotePath(cursor, segment);
       if (dirCache.has(cursor)) continue;
       try {
-        const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor });
+        const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor }));
         if (entry.kind !== 'Dir') throw new Error(`${cursor} exists and is not a directory`);
       } catch (e) {
         try {
-          await rpc.call('sftp.mkdir', { id: sid, path: cursor });
+          await withTransferTimeout('sftp.mkdir', rpc.call('sftp.mkdir', { id: sid, path: cursor }));
         } catch (mkdirError) {
-          const entry = await rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor }).catch(() => null);
+          const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: sid, path: cursor })).catch(() => null);
           if (entry?.kind !== 'Dir') throw mkdirError;
         }
       }
@@ -996,9 +1082,18 @@
   }
 
   function summary(task: TransferTask): string {
+    void progressTick;
     if (task.status === 'queued') return i18n.t('sftp.transferQueued');
     if (task.status === 'paused') return task.message ?? i18n.t('sftp.paused');
-    if (task.status === 'running') return task.message ?? `${formatSize(task.transferred)} / ${formatSize(task.size)}`;
+    if (task.status === 'running') {
+      const last = task.lastProgressAt ?? task.startedAt ?? task.createdAt;
+      const idleMs = Date.now() - last;
+      if (idleMs > STALE_PROGRESS_MS) {
+        return i18n.t('transfer.waitingServer', { seconds: Math.round(idleMs / 1000) })
+          + ` · ${formatSize(task.transferred)} / ${formatSize(task.size)}`;
+      }
+      return task.message ?? `${formatSize(task.transferred)} / ${formatSize(task.size)}`;
+    }
     if (task.status === 'done') return i18n.t('sftp.transferDone');
     if (task.status === 'canceled') return i18n.t('sftp.transferCanceled');
     return task.message ?? i18n.t('sftp.transferFailed');
@@ -1024,6 +1119,10 @@
     restorePersistedTasks();
     tasksHydrated = true;
     void refreshProfiles();
+    const tick = window.setInterval(() => {
+      if (activeTasks.some((t) => t.status === 'running')) progressTick += 1;
+    }, 5000);
+    return () => window.clearInterval(tick);
   });
 
   $effect(() => {
@@ -1032,9 +1131,7 @@
   });
 
   $effect(() => {
-    const key = `${initialProfileId ?? ''}|${initialTarget?.name ?? ''}`;
-    if (key === lastInitialKey || profiles.length === 0) return;
-    lastInitialKey = key;
+    if (profiles.length === 0) return;
     pickInitialIds(profiles);
   });
 
@@ -1046,18 +1143,12 @@
 </script>
 
 <div
-  class={embedded
-    ? 'h-full w-full bg-[var(--color-bg)] text-[var(--color-fg)] flex flex-col overflow-hidden'
-    : standalone
-      ? 'h-screen w-screen bg-[var(--color-bg)] text-[var(--color-fg)] flex flex-col overflow-hidden'
-      : 'fixed inset-0 z-50 bg-black/60 grid place-items-center p-5'}
-  role={embedded ? 'region' : 'dialog'}
-  aria-modal={!embedded && !standalone}
+  class="transfer-window-shell h-full w-full text-[var(--color-fg)] flex flex-col overflow-hidden"
+  role="region"
   aria-label={i18n.t('transfer.windowTitle')}
-  data-aerotab-modal={!embedded && !standalone ? '' : undefined}
 >
-  <div class={embedded || standalone ? 'w-full h-full flex flex-col overflow-hidden bg-[var(--color-bg)]' : 'panel w-full max-w-[min(1500px,98vw)] h-full max-h-[900px] flex flex-col overflow-hidden'}>
-    <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)] bg-[var(--color-panel)]">
+  <div class="transfer-window-surface w-full h-full flex flex-col overflow-hidden">
+    <header class="transfer-window-bar flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
       <div class="font-semibold text-[13px] text-[var(--color-accent)]">{i18n.t('transfer.windowTitle')}</div>
       <div class="text-[11px] text-[var(--color-fg-muted)] truncate">{i18n.t('transfer.windowHint')}</div>
       <div class="ml-auto flex items-center gap-2 text-[11px] text-[var(--color-fg-muted)]">
@@ -1073,31 +1164,29 @@
       </div>
     </header>
 
-    <div class="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_minmax(132px,180px)] gap-2 items-end px-4 py-2 border-b border-[var(--color-border-soft)] bg-[var(--color-panel)]">
+    <div class="transfer-window-bar grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_minmax(132px,180px)] gap-2 items-end px-4 py-2 border-b border-[var(--color-border-soft)]">
       <label class="min-w-0">
         <span class="block text-[10.5px] text-[var(--color-fg-muted)] mb-1">{i18n.t('transfer.leftServer')}</span>
-        <select class="input py-1 text-[12px]" bind:value={leftId}>
-          <option value={LOCAL_ENDPOINT_ID}>{i18n.t('transfer.localComputer')}</option>
-          {#if initialTarget}
-            <option value={INITIAL_ENDPOINT_ID}>{initialTarget.name}</option>
-          {/if}
-          {#each sshProfiles as profile (profile.id)}
-            <option value={profile.id}>{profile.name}</option>
-          {/each}
-        </select>
+        <EndpointSelector
+          profiles={sshProfiles}
+          value={leftId}
+          localLabel={i18n.t('transfer.localComputer')}
+          placeholder={i18n.t('transfer.pickServer')}
+          onChange={(v) => { leftId = v; }}
+        />
       </label>
       <button type="button" class="btn-secondary px-2 py-1 mb-[1px]" onclick={swapTargets} title={i18n.t('transfer.swap')} aria-label={i18n.t('transfer.swap')}>
         <ArrowLeftRight size={14} />
       </button>
       <label class="min-w-0">
         <span class="block text-[10.5px] text-[var(--color-fg-muted)] mb-1">{i18n.t('transfer.rightServer')}</span>
-        <select class="input py-1 text-[12px]" bind:value={rightId}>
-          <option value="">{i18n.t('transfer.pickServer')}</option>
-          <option value={LOCAL_ENDPOINT_ID}>{i18n.t('transfer.localComputer')}</option>
-          {#each sshProfiles as profile (profile.id)}
-            <option value={profile.id}>{profile.name}</option>
-          {/each}
-        </select>
+        <EndpointSelector
+          profiles={sshProfiles}
+          value={rightId}
+          localLabel={i18n.t('transfer.localComputer')}
+          placeholder={i18n.t('transfer.pickServer')}
+          onChange={(v) => { rightId = v; }}
+        />
       </label>
       <label class="min-w-0">
         <span class="block text-[10.5px] text-[var(--color-fg-muted)] mb-1">{i18n.t('transfer.mode')}</span>
@@ -1109,8 +1198,8 @@
       </label>
     </div>
 
-    <div class="flex-1 min-h-0 grid grid-cols-2 divide-x divide-[var(--color-border-soft)]">
-      <div class="min-w-0 min-h-0">
+    <div class="transfer-workspace flex-1 min-h-0 grid grid-cols-2 divide-x divide-[var(--color-border-soft)]">
+      <div class="transfer-pane min-w-0 min-h-0">
         {#if leftId === LOCAL_ENDPOINT_ID}
           <SftpLocalPane
             cwd={leftLocalCwd}
@@ -1124,6 +1213,7 @@
             onDropRemote={(e) => { void handleLocalPaneDrop('left', e); }}
             onDropFiles={ignoreFileDrop}
             onDragOverPane={preventDragDefaults}
+            {onError}
           />
         {:else if effectiveLeftTarget}
           <SftpBrowser
@@ -1142,7 +1232,7 @@
           <div class="h-full grid place-items-center text-[12px] text-[var(--color-fg-muted)]">{i18n.t('transfer.pickServer')}</div>
         {/if}
       </div>
-      <div class="min-w-0 min-h-0">
+      <div class="transfer-pane min-w-0 min-h-0">
         {#if rightId === LOCAL_ENDPOINT_ID}
           <SftpLocalPane
             cwd={rightLocalCwd}
@@ -1156,6 +1246,7 @@
             onDropRemote={(e) => { void handleLocalPaneDrop('right', e); }}
             onDropFiles={ignoreFileDrop}
             onDragOverPane={preventDragDefaults}
+            {onError}
           />
         {:else if rightTarget}
           <SftpBrowser
@@ -1176,7 +1267,7 @@
       </div>
     </div>
 
-    <section class="border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] min-h-[220px] max-h-[260px] flex flex-col">
+    <section class="transfer-queue border-t border-[var(--color-border-soft)] min-h-[220px] max-h-[260px] flex flex-col">
       <div class="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border-soft)] text-[11px]">
         <ListChecks size={13} class="text-[var(--color-accent)]" />
         <span class="uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">{i18n.t('transfer.queue')}</span>
@@ -1260,3 +1351,38 @@
     </section>
   </div>
 </div>
+
+
+<style>
+  .transfer-window-shell {
+    background: var(--color-bg);
+    isolation: isolate;
+  }
+
+  .transfer-window-surface {
+    background: var(--color-bg);
+  }
+
+  .transfer-window-bar {
+    background: var(--color-surface-raised);
+  }
+
+  .transfer-workspace {
+    background: var(--color-bg-soft);
+  }
+
+  .transfer-pane {
+    background: var(--color-bg-soft);
+  }
+
+  .transfer-queue {
+    background: var(--color-surface-raised);
+  }
+
+  :global(.transfer-window-shell .panel),
+  :global(.transfer-window-shell .input),
+  :global(.transfer-window-shell select),
+  :global(.transfer-window-shell option) {
+    background-color: var(--color-panel);
+  }
+</style>

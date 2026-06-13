@@ -132,13 +132,20 @@ pub async fn import_locals(
     Ok(())
 }
 
+async fn put_local_if_changed(
+    engine: &SyncEngine,
+    group: Group,
+    id: RecordId,
+    bytes: Vec<u8>,
+) -> Result<(), SyncError> {
+    engine.put_local_if_changed(group, id, bytes).await
+}
+
 async fn export_connections(profiles: &ProfileStore, engine: &SyncEngine) -> Result<(), SyncError> {
     let list = profiles.list().await.map_err(store_err)?;
     for profile in list {
         let bytes = serde_json::to_vec(&profile).map_err(json_err)?;
-        engine
-            .put_local(Group::Connections, RecordId(profile.id), bytes)
-            .await?;
+        put_local_if_changed(engine, Group::Connections, RecordId(profile.id), bytes).await?;
     }
     Ok(())
 }
@@ -160,9 +167,7 @@ async fn export_appearance(settings: &SettingsStore, engine: &SyncEngine) -> Res
         entries,
     };
     let bytes = serde_json::to_vec(&bundle).map_err(json_err)?;
-    engine
-        .put_local(Group::Appearance, bundle_appearance(), bytes)
-        .await?;
+    put_local_if_changed(engine, Group::Appearance, bundle_appearance(), bytes).await?;
     Ok(())
 }
 
@@ -189,9 +194,7 @@ async fn export_shortcuts(settings: &SettingsStore, engine: &SyncEngine) -> Resu
         entries,
     };
     let bytes = serde_json::to_vec(&bundle).map_err(json_err)?;
-    engine
-        .put_local(Group::Shortcuts, bundle_shortcuts(), bytes)
-        .await?;
+    put_local_if_changed(engine, Group::Shortcuts, bundle_shortcuts(), bytes).await?;
     Ok(())
 }
 
@@ -231,9 +234,7 @@ async fn export_plugin_cfg(
         }))
         .map_err(json_err)?;
     }
-    engine
-        .put_local(Group::PluginCfg, bundle_plugincfg(), bytes)
-        .await?;
+    put_local_if_changed(engine, Group::PluginCfg, bundle_plugincfg(), bytes).await?;
     Ok(())
 }
 
@@ -265,7 +266,7 @@ async fn export_credentials(
         let entry = store.get(&meta.id).await.map_err(vault_store_err)?;
         let bytes = serde_json::to_vec(&entry).map_err(json_err)?;
         let rid = credential_record_id(&entry.id);
-        engine.put_local(Group::Credentials, rid, bytes).await?;
+        put_local_if_changed(engine, Group::Credentials, rid, bytes).await?;
     }
     Ok(())
 }
