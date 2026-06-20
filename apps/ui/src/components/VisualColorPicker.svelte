@@ -5,13 +5,20 @@
   interface Props {
     value?: string | null;
     compact?: boolean;
+    /** Inline single-row swatches for context menus. */
+    menu?: boolean;
     onPick: (color: string | null) => void;
   }
 
-  let { value = null, compact = false, onPick }: Props = $props();
+  let { value = null, compact = false, menu = false, onPick }: Props = $props();
 </script>
 
-<div class="visual-color-picker {compact ? 'visual-color-picker--compact' : ''}" role="listbox" aria-label={i18n.t('profiles.visualColorPicker')}>
+<div
+  class="visual-color-picker {compact ? 'visual-color-picker--compact' : ''} {menu ? 'visual-color-picker--menu' : ''}"
+  role="listbox"
+  aria-label={i18n.t('profiles.visualColorPicker')}
+  onclick={(e) => e.stopPropagation()}
+>
   <div class="visual-color-picker-grid">
     {#each PRESET_VISUAL_COLORS as color (color)}
       {@const selected = value?.toLowerCase() === color.toLowerCase()}
@@ -30,7 +37,7 @@
   </div>
   {#if value}
     <button type="button" class="visual-color-reset" onclick={() => onPick(null)}>
-      {i18n.t('profiles.visualColorReset')}
+      {menu ? '×' : i18n.t('profiles.visualColorReset')}
     </button>
   {/if}
 </div>
@@ -53,6 +60,34 @@
   }
   .visual-color-picker--compact .visual-color-picker-grid {
     grid-template-columns: repeat(4, 1fr);
+  }
+  .visual-color-picker--menu {
+    padding: 0;
+    gap: 4px;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: nowrap;
+  }
+  .visual-color-picker--menu .visual-color-picker-grid {
+    grid-template-columns: repeat(8, 16px);
+    gap: 3px;
+    flex-shrink: 0;
+  }
+  .visual-color-picker--menu .visual-color-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    padding: 1px;
+  }
+  .visual-color-picker--menu .visual-color-reset {
+    width: 16px;
+    height: 16px;
+    display: grid;
+    place-items: center;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
   }
   .visual-color-swatch {
     width: 100%;

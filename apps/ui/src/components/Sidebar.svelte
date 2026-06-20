@@ -31,7 +31,7 @@
     saveCollapsedPaths,
     type ProfileTreeFolder,
   } from '../lib/profileTree';
-  import SidebarProfileTree from './SidebarProfileTree.svelte';
+  import SidebarProfileTree, { type ProfileQuickAction } from './SidebarProfileTree.svelte';
   import VisualColorPicker from './VisualColorPicker.svelte';
   import ProfileTag from './ProfileTag.svelte';
   import { normalizeGroupKey, normalizeTagKey } from '../lib/profileVisuals';
@@ -40,7 +40,8 @@
   import { notifyProfilesChanged, PROFILES_CHANGED, type ProfilesChangedDetail } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import { portal } from '../lib/portal';
-  import { appConfirm, appPrompt } from '../lib/confirm.svelte';
+  import { appConfirm, appPrompt, dialogAnchorFromEvent } from '../lib/confirm.svelte';
+  import { jumpHostCandidates, profileSpecViaJump } from '../lib/jumpProfiles';
   import {
     defaultGroupForMove,
     normalizeProfileGroupInput,
@@ -232,6 +233,130 @@
     }
   }
 
+  function setDialogAnchor(ev?: MouseEvent) {
+    if (ev) lastMenuPosition = dialogAnchorFromEvent(ev);
+  }
+
+  function onProfileQuickAction(p: StoredProfile, action: ProfileQuickAction, ev: MouseEvent) {
+    setDialogAnchor(ev);
+    switch (action) {
+      case 'note':
+        void promptEditNote(p);
+        break;
+      case 'tags':
+        void promptEditTags(p);
+        break;
+      case 'icon':
+        void promptEditIcon(p);
+        break;
+      case 'edit':
+        void editProfile(p);
+        break;
+      case 'sftp':
+        openSftp(p);
+        break;
+    }
+  }
+
+  async function openProfileViaJump(
+    target: StoredProfile,
+    jump: StoredProfile,
+    mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab',
+  ) {
+    if (target.kind !== 'ssh' || jump.kind !== 'ssh') return;
+    try {
+      const profile = profileSpecViaJump(target, jump, profiles);
+      const meta = await rpc.call<SessionMeta>('session.openSsh', {
+        title: target.name,
+        rows: 24,
+        cols: 80,
+        profile,
+      });
+      const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
+      if (mode !== 'new-tab' && activeTab) {
+        tabs.addPane(activeTab.id, { ...meta, profileId: target.id, sshProfile: profile }, mode === 'split-down' ? 'col' : 'row');
+      } else {
+        tabs.add({ ...meta, profileId: target.id, sshProfile: profile });
+      }
+    } catch (e) {
+      onError(`ssh ${target.name} via ${jump.name}: ${(e as Error).message}`);
+    }
+  }
+
+  function jumpHostOptions(target: StoredProfile): Array<StoredProfile & { kind: 'ssh' }> {
+    return jumpHostCandidates(target, profiles);
+  }
+
+  function menuConnectViaJump(target: StoredProfile, jump: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
+    closeMenu();
+    void openProfileViaJump(target, jump);
+  }
+
+  async function promptEditTags(p: StoredProfile) {
+    const fresh = await latestProfile(p);
+    const value = await appPrompt(i18n.t('sidebar.editTagsPrompt'), {
+      defaultValue: formatTags(fresh.tags),
+      placeholder: 'prod, db, singapore',
+      confirmLabel: i18n.t('common.save'),
+      position: lastMenuPosition ?? undefined,
+    });
+    if (value === null) return;
+    try {
+      await rpc.call('profile.upsert', { ...fresh, tags: parseTagsInput(value) });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+
+  async function promptEditNote(p: StoredProfile) {
+    const fresh = await latestProfile(p);
+    const value = await appPrompt(i18n.t('sidebar.editNotePrompt'), {
+      defaultValue: fresh.note ?? '',
+      placeholder: i18n.t('profileModal.notePlaceholder'),
+      confirmLabel: i18n.t('common.save'),
+      multiline: true,
+      rows: 4,
+      position: lastMenuPosition ?? undefined,
+    });
+    if (value === null) return;
+    try {
+      await rpc.call('profile.upsert', { ...fresh, note: value.trim() || null });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+
+  async function promptEditIcon(p: StoredProfile) {
+    const fresh = await latestProfile(p);
+    const defaultValue = fresh.icon?.kind === 'selfhst'
+      ? `selfhst:${fresh.icon.value}`
+      : fresh.icon?.kind === 'remote'
+        ? `remote:${fresh.icon.value}`
+        : fresh.icon?.value ?? '';
+    const value = await appPrompt(i18n.t('sidebar.editIconPrompt'), {
+      defaultValue,
+      placeholder: 'selfhst:home-assistant, server, emoji:rocket, remote:https://host/a.svg|https://host/b.png',
+      confirmLabel: i18n.t('common.save'),
+      position: lastMenuPosition ?? undefined,
+    });
+    if (value === null) return;
+    try {
+      await rpc.call('profile.upsert', {
+        ...fresh,
+        icon: parseProfileIconInput(value),
+      });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+
   async function openProfile(p: StoredProfile, mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab') {
     if (p.kind === 'rdp' || p.kind === 'vnc') {
       try {
@@ -268,6 +393,7 @@
   let menuY = $state(0);
   let menuTarget = $state<SidebarMenu | null>(null);
   let menuEl = $state<HTMLDivElement | null>(null);
+  let jumpSubmenuQuery = $state('');
   let focusedProfileId = $state<string | null>(null);
   let focusedGroupPath = $state<string | null>(null);
   let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
@@ -549,6 +675,19 @@
   function closeMenu() {
     menuOpen = false;
     menuTarget = null;
+    jumpSubmenuQuery = '';
+  }
+
+  function filteredJumpHosts(target: StoredProfile): Array<StoredProfile & { kind: 'ssh' }> {
+    const needle = jumpSubmenuQuery.trim().toLowerCase();
+    const list = jumpHostOptions(target);
+    if (!needle) return list;
+    return list.filter((p) =>
+      [p.name, p.ssh.host, p.ssh.user, String(p.ssh.port), ...(p.tags ?? [])]
+        .join(' ')
+        .toLowerCase()
+        .includes(needle),
+    );
   }
 
   function menuOpenInNewTab(p: StoredProfile) {
@@ -586,43 +725,18 @@
   function menuMoveToExistingGroup(p: StoredProfile, group: string | null) {
     void moveProfilesToExistingGroup(profilesToMove(p), group);
   }
-  async function menuEditTags(p: StoredProfile) {
+  async function menuEditTags(p: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
     closeMenu();
-    const value = await appPrompt(i18n.t('sidebar.editTagsPrompt'), {
-      defaultValue: formatTags(p.tags),
-      placeholder: 'prod, db, singapore',
-      confirmLabel: i18n.t('common.save'),
-      position: lastMenuPosition ?? undefined,
-    });
-    if (value === null) return;
-    try {
-      const fresh = await latestProfile(p);
-      await rpc.call('profile.upsert', { ...fresh, tags: parseTagsInput(value) });
-      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
-      await refresh();
-    } catch (e) {
-      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
-    }
+    await promptEditTags(p);
   }
-  async function menuEditNote(p: StoredProfile) {
+  async function menuEditNote(p: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
     closeMenu();
-    const value = await appPrompt(i18n.t('sidebar.editNotePrompt'), {
-      defaultValue: p.note ?? '',
-      placeholder: i18n.t('profileModal.notePlaceholder'),
-      confirmLabel: i18n.t('common.save'),
-      position: lastMenuPosition ?? undefined,
-    });
-    if (value === null) return;
-    try {
-      const fresh = await latestProfile(p);
-      await rpc.call('profile.upsert', { ...fresh, note: value.trim() || null });
-      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
-      await refresh();
-    } catch (e) {
-      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
-    }
+    await promptEditNote(p);
   }
-  async function menuViewNote(p: StoredProfile) {
+  async function menuViewNote(p: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
     closeMenu();
     await appConfirm(p.note?.trim() || i18n.t('sidebar.noNote'), {
       title: p.name,
@@ -630,27 +744,10 @@
       position: lastMenuPosition ?? undefined,
     });
   }
-  async function menuEditIcon(p: StoredProfile) {
+  async function menuEditIcon(p: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
     closeMenu();
-    const defaultValue = p.icon?.kind === 'selfhst' ? `selfhst:${p.icon.value}` : p.icon?.kind === 'remote' ? `remote:${p.icon.value}` : p.icon?.value ?? '';
-    const value = await appPrompt(i18n.t('sidebar.editIconPrompt'), {
-      defaultValue,
-      placeholder: 'selfhst:home-assistant, server, emoji:rocket, remote:https://host/a.svg|https://host/b.png',
-      confirmLabel: i18n.t('common.save'),
-      position: lastMenuPosition ?? undefined,
-    });
-    if (value === null) return;
-    try {
-      const fresh = await latestProfile(p);
-      await rpc.call('profile.upsert', {
-        ...fresh,
-        icon: parseProfileIconInput(value),
-      });
-      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
-      await refresh();
-    } catch (e) {
-      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
-    }
+    await promptEditIcon(p);
   }
   async function menuChooseIconFile(p: StoredProfile) {
     closeMenu();
@@ -681,7 +778,8 @@
       onError(i18n.t('sidebar.cloneProfileFailed', { message: (e as Error).message }));
     }
   }
-  function menuDelete(p: StoredProfile) {
+  function menuDelete(p: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
     closeMenu();
     void deleteProfilesForAction(p);
   }
@@ -1060,6 +1158,7 @@
         onProfileFocus={focusProfile}
         onProfileKeydown={onProfileKeydown}
         onProfileContextMenu={showProfileMenu}
+        onProfileQuickAction={onProfileQuickAction}
         onProfileDragStart={onProfileDragStart}
         onFolderContextMenu={showFolderMenu}
         onFolderDragStart={onFolderDragStart}
@@ -1118,7 +1217,7 @@
           {i18n.t('profiles.groupColor')}
         </div>
         <VisualColorPicker
-          compact
+          menu
           value={profileVisualsStore.groupColors[normalizeGroupKey(groupPath)] ?? null}
           onPick={(color) => {
             void profileVisualsStore.setGroupColor(rpc, groupPath, color);
@@ -1155,29 +1254,32 @@
           </div>
         </div>
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-        <button type="button" class="menu-item" onclick={() => { void menuEditTags(mp); }}>{i18n.t('sidebar.editTags')}</button>
+        <button type="button" class="menu-item" onclick={(ev) => { void menuEditTags(mp, ev); }}>{i18n.t('sidebar.editTags')}</button>
         {#if (mp.tags ?? []).length > 0}
-          <div class="menu-section-label px-3 py-1 text-[10px] uppercase tracking-[0.08em] text-[var(--color-fg-muted)]">
-            {i18n.t('profiles.tagColors')}
-          </div>
-          {#each (mp.tags ?? []) as tag (tag)}
-            <div class="px-2 py-1 flex items-center gap-2 min-w-0">
-              <ProfileTag {tag} compact />
-              <div class="min-w-0 flex-1">
-                <VisualColorPicker
-                  compact
-                  value={profileVisualsStore.tagColors[normalizeTagKey(tag)] ?? null}
-                  onPick={(color) => {
-                    void profileVisualsStore.setTagColor(rpc, tag, color);
-                  }}
-                />
-              </div>
+          <div class="menu-with-submenu">
+            <button type="button" class="menu-item menu-item--submenu">
+              <span>{i18n.t('profiles.tagColors')}</span>
+              <span class="submenu-arrow">›</span>
+            </button>
+            <div class="submenu-panel tag-color-submenu" role="menu">
+              {#each (mp.tags ?? []) as tag (tag)}
+                <div class="menu-tag-color-row">
+                  <ProfileTag {tag} compact />
+                  <VisualColorPicker
+                    menu
+                    value={profileVisualsStore.tagColors[normalizeTagKey(tag)] ?? null}
+                    onPick={(color) => {
+                      void profileVisualsStore.setTagColor(rpc, tag, color);
+                    }}
+                  />
+                </div>
+              {/each}
             </div>
-          {/each}
+          </div>
         {/if}
-        <button type="button" class="menu-item" onclick={() => { void menuEditNote(mp); }}>{i18n.t('sidebar.editNote')}</button>
-        <button type="button" class="menu-item" onclick={() => { void menuViewNote(mp); }}>{i18n.t('sidebar.viewNote')}</button>
-        <button type="button" class="menu-item" onclick={() => { void menuEditIcon(mp); }}>{i18n.t('sidebar.editIcon')}</button>
+        <button type="button" class="menu-item" onclick={(ev) => { void menuEditNote(mp, ev); }}>{i18n.t('sidebar.editNote')}</button>
+        <button type="button" class="menu-item" onclick={(ev) => { void menuViewNote(mp, ev); }}>{i18n.t('sidebar.viewNote')}</button>
+        <button type="button" class="menu-item" onclick={(ev) => { void menuEditIcon(mp, ev); }}>{i18n.t('sidebar.editIcon')}</button>
         <button type="button" class="menu-item" onclick={() => { void menuChooseIconFile(mp); }}>{i18n.t('sidebar.chooseIconFile')}</button>
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuEdit(mp)}>
@@ -1188,7 +1290,7 @@
           <span>{i18n.t('sidebar.cloneProfile')}</span>
           <kbd class="kbd">{shortcutKbd('clone')}</kbd>
         </button>
-        <button type="button" class="menu-item menu-item--shortcut text-[var(--color-danger)]" onclick={() => menuDelete(mp)}>
+        <button type="button" class="menu-item menu-item--shortcut text-[var(--color-danger)]" onclick={(ev) => menuDelete(mp, ev)}>
           <span>{i18n.t('sidebar.removeProfile')}</span>
           <kbd class="kbd">{shortcutKbd('remove')}</kbd>
         </button>
@@ -1206,6 +1308,37 @@
           <kbd class="kbd">{shortcutKbd('splitDown')}</kbd>
         </button>
         {#if mp.kind === 'ssh'}
+          <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+          <div class="menu-with-submenu">
+            <button type="button" class="menu-item menu-item--submenu">
+              <span>{i18n.t('sidebar.connectViaJump')}</span>
+              <span class="submenu-arrow">›</span>
+            </button>
+            <div class="submenu-panel jump-host-submenu" role="menu" onclick={(e) => e.stopPropagation()}>
+              <div class="jump-host-search px-2 py-1.5">
+                <input
+                  type="search"
+                  class="input text-[11px] py-1"
+                  placeholder={i18n.t('sidebar.jumpHostSearch')}
+                  bind:value={jumpSubmenuQuery}
+                  onclick={(e) => e.stopPropagation()}
+                />
+              </div>
+              {#each filteredJumpHosts(mp) as jump (jump.id)}
+                <button
+                  type="button"
+                  class="menu-item jump-menu-item"
+                  title={profileEndpointLabel(jump)}
+                  onclick={(ev) => menuConnectViaJump(mp, jump, ev)}
+                >
+                  <span class="truncate">{jump.name}</span>
+                  <span class="jump-menu-sub truncate">{profileEndpointLabel(jump)}</span>
+                </button>
+              {:else}
+                <div class="px-3 py-2 text-[11px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpEmpty')}</div>
+              {/each}
+            </div>
+          </div>
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
           <button type="button" class="menu-item menu-item--shortcut" onclick={() => menuOpenSftp(mp)}>
             <span>{i18n.t('sidebar.openSftpBrowser')}</span>
@@ -1280,5 +1413,39 @@
   }
   .group-menu-item {
     padding-left: calc(10px + max(0, var(--group-depth, 1) - 1) * 12px);
+  }
+  .jump-menu-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    min-width: 200px;
+    max-width: 280px;
+  }
+  .jump-menu-sub {
+    font-size: 10px;
+    color: var(--color-fg-muted);
+    max-width: 100%;
+  }
+  .tag-color-submenu {
+    min-width: 240px;
+    max-width: min(300px, calc(100vw - 24px));
+  }
+  .menu-tag-color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    min-width: 0;
+  }
+  .jump-host-submenu {
+    min-width: 260px;
+  }
+  .jump-host-search {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--color-panel);
+    border-bottom: 1px solid var(--color-border-soft);
   }
 </style>

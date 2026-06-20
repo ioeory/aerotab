@@ -149,6 +149,39 @@ export function jumpLineForProfile(profile: StoredProfile): string {
   return `@${profile.name}`;
 }
 
+function hopMatches(a: SshProfileSpec, b: SshProfileSpec): boolean {
+  return a.host === b.host && a.port === b.port && a.user === b.user;
+}
+
+/** One-time SSH spec: connect to `target` via `jump` as the first hop. */
+export function profileSpecViaJump(
+  target: StoredProfile & { kind: 'ssh' },
+  jump: StoredProfile & { kind: 'ssh' },
+  profiles: StoredProfile[],
+): SshProfileSpec {
+  const hop = parseJumpLine(jumpLineForProfile(jump), target.ssh.auth, profiles);
+  const existing = target.ssh.jump_via ?? [];
+  if (
+    hopMatches(hop, target.ssh)
+    || existing.some((h) => hopMatches(h, hop))
+  ) {
+    return { ...target.ssh };
+  }
+  return { ...target.ssh, jump_via: [hop, ...existing] };
+}
+
+/** SSH profiles that can be selected as a one-time jump host for `target`. */
+export function jumpHostCandidates(
+  target: StoredProfile,
+  profiles: StoredProfile[],
+): Array<StoredProfile & { kind: 'ssh' }> {
+  if (target.kind !== 'ssh') return [];
+  return profiles.filter(
+    (p): p is StoredProfile & { kind: 'ssh' } =>
+      p.kind === 'ssh' && p.id !== target.id,
+  );
+}
+
 export function reorderJumpLines(lines: string[], from: number, to: number): string[] {
   if (from === to || from < 0 || to < 0 || from >= lines.length || to >= lines.length) return lines;
   const next = lines.slice();

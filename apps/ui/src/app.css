@@ -161,7 +161,7 @@ dialog {
 dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
 
 /* Positioned confirm/prompt dialogs (anchored near click) */
-dialog.app-confirm-dialog {
+dialog.app-confirm-dialog--anchored {
   position: fixed;
   margin: 0;
   inset: auto;

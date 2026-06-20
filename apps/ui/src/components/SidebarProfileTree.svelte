@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { ChevronDown, ChevronRight, ShieldAlert, ShieldCheck, ShieldX, Star, StickyNote } from '@lucide/svelte';
+  import {
+    ChevronDown, ChevronRight, FolderOpen, Image, Pencil, ShieldAlert, ShieldCheck, ShieldX, Star, StickyNote, Tags,
+  } from '@lucide/svelte';
   import type { ProfileHealthResult, StoredProfile } from '../lib/types';
   import type { ProfileTreeFolder } from '../lib/profileTree';
   import { profileEndpointLabel } from '../lib/profileMeta';
@@ -10,6 +12,8 @@
   import ProfileKindBadge from './ProfileKindBadge.svelte';
   import ProfileTag from './ProfileTag.svelte';
   import Self from './SidebarProfileTree.svelte';
+
+  export type ProfileQuickAction = 'note' | 'tags' | 'icon' | 'edit' | 'sftp';
 
   interface Props {
     folder: ProfileTreeFolder;
@@ -27,7 +31,7 @@
     onProfileFocus: (p: StoredProfile) => void;
     onProfileKeydown: (p: StoredProfile, ev: KeyboardEvent) => void;
     onProfileContextMenu: (p: StoredProfile, ev: MouseEvent) => void;
-    onProfileNoteClick?: (p: StoredProfile, ev: MouseEvent) => void;
+    onProfileQuickAction?: (p: StoredProfile, action: ProfileQuickAction, ev: MouseEvent) => void;
     onProfileDragStart: (p: StoredProfile, ev: DragEvent) => void;
     onFolderContextMenu: (folder: ProfileTreeFolder, ev: MouseEvent) => void;
     onFolderDragStart: (folder: ProfileTreeFolder, ev: DragEvent) => void;
@@ -53,7 +57,7 @@
     onProfileFocus,
     onProfileKeydown,
     onProfileContextMenu,
-    onProfileNoteClick,
+    onProfileQuickAction,
     onProfileDragStart,
     onFolderContextMenu,
     onFolderDragStart,
@@ -76,6 +80,11 @@
     const issues = result.checks.filter((c) => c.status !== 'ok');
     const visible = issues.length > 0 ? issues : result.checks.slice(0, 1);
     return visible.map((c) => `${c.name}: ${c.message}`).join('\n') || i18n.t('profiles.healthNoIssues');
+  }
+
+  function quickAction(ev: MouseEvent, p: StoredProfile, action: ProfileQuickAction) {
+    ev.stopPropagation();
+    onProfileQuickAction?.(p, action, ev);
   }
 </script>
 
@@ -136,7 +145,7 @@
           {onProfileFocus}
           {onProfileKeydown}
           {onProfileContextMenu}
-          {onProfileNoteClick}
+          {onProfileQuickAction}
           {onProfileDragStart}
           {onFolderContextMenu}
           {onFolderDragStart}
@@ -209,18 +218,6 @@
         {#if p.favorite}
           <Star size={10} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
         {/if}
-        <button
-          type="button"
-          class="note-chip shrink-0 {p.note ? 'has-note' : ''}"
-          title={p.note?.trim() || i18n.t('sidebar.editNote')}
-          aria-label={i18n.t('sidebar.editNote')}
-          onclick={(ev) => {
-            ev.stopPropagation();
-            onProfileNoteClick?.(p, ev);
-          }}
-        >
-          <StickyNote size={10} />
-        </button>
       </div>
       <div class="truncate text-[10px] text-[var(--color-fg-muted)]">
         {profileEndpointLabel(p)}
@@ -235,6 +232,55 @@
           {/each}
         </div>
       {/if}
+    </div>
+    <div class="profile-action-chips shrink-0">
+      <button
+        type="button"
+        class="action-chip {p.note ? 'action-chip--active' : ''}"
+        title={p.note?.trim() || i18n.t('sidebar.editNote')}
+        aria-label={i18n.t('sidebar.editNote')}
+        onclick={(ev) => quickAction(ev, p, 'note')}
+      >
+        <StickyNote size={11} />
+      </button>
+      <button
+        type="button"
+        class="action-chip {(p.tags ?? []).length > 0 ? 'action-chip--active' : ''}"
+        title={i18n.t('sidebar.editTags')}
+        aria-label={i18n.t('sidebar.editTags')}
+        onclick={(ev) => quickAction(ev, p, 'tags')}
+      >
+        <Tags size={11} />
+      </button>
+      <button
+        type="button"
+        class="action-chip"
+        title={i18n.t('sidebar.editProfile')}
+        aria-label={i18n.t('sidebar.editProfile')}
+        onclick={(ev) => quickAction(ev, p, 'edit')}
+      >
+        <Pencil size={11} />
+      </button>
+      {#if p.kind === 'ssh'}
+        <button
+          type="button"
+          class="action-chip"
+          title={i18n.t('sidebar.openSftpBrowser')}
+          aria-label={i18n.t('sidebar.openSftpBrowser')}
+          onclick={(ev) => quickAction(ev, p, 'sftp')}
+        >
+          <FolderOpen size={11} />
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="action-chip"
+        title={i18n.t('sidebar.editIcon')}
+        aria-label={i18n.t('sidebar.editIcon')}
+        onclick={(ev) => quickAction(ev, p, 'icon')}
+      >
+        <Image size={11} />
+      </button>
     </div>
   </div>
 {/each}
@@ -274,20 +320,36 @@
   .profile-row--selected {
     background: color-mix(in srgb, var(--color-accent) 18%, var(--color-panel-2));
   }
-  .note-chip {
+  .profile-action-chips {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    opacity: 0;
+    pointer-events: none;
+    padding-right: 2px;
+  }
+  .profile-row:hover .profile-action-chips,
+  .profile-row--focused .profile-action-chips,
+  .profile-row--selected .profile-action-chips {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .action-chip {
     display: inline-grid;
     place-items: center;
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     border-radius: 4px;
     color: var(--color-fg-muted);
-    opacity: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
   }
-  .profile-row:hover .note-chip,
-  .note-chip.has-note {
-    opacity: 0.9;
+  .action-chip--active {
+    color: var(--color-accent);
   }
-  .note-chip:hover {
+  .action-chip:hover {
     color: var(--color-accent);
     background: var(--color-panel-2);
   }

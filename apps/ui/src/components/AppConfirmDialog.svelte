@@ -6,9 +6,25 @@
 
   let dialog: HTMLDialogElement | null = null;
   let promptInput: HTMLInputElement | null = null;
+  let promptTextarea: HTMLTextAreaElement | null = null;
 
   const pending = $derived(confirmUi.pending);
   const isPrompt = $derived(pending?.kind === 'prompt');
+
+  function positionDialog() {
+    if (!dialog || !pending?.position) return;
+    const pad = 8;
+    const w = dialog.offsetWidth;
+    const h = dialog.offsetHeight;
+    let x = pending.position.x;
+    let y = pending.position.y;
+    if (x + w + pad > window.innerWidth) x = Math.max(pad, window.innerWidth - w - pad);
+    if (y + h + pad > window.innerHeight) y = Math.max(pad, window.innerHeight - h - pad);
+    x = Math.max(pad, x);
+    y = Math.max(pad, y);
+    dialog.style.left = `${x}px`;
+    dialog.style.top = `${y}px`;
+  }
 
   $effect(() => {
     if (!pending) {
@@ -20,9 +36,15 @@
     }
     void tick().then(() => {
       dialog?.showModal();
+      if (pending?.position) positionDialog();
       if (pending.kind === 'prompt') {
-        promptInput?.focus();
-        promptInput?.select();
+        if (pending.multiline) {
+          promptTextarea?.focus();
+          promptTextarea?.select();
+        } else {
+          promptInput?.focus();
+          promptInput?.select();
+        }
       }
     });
   });
@@ -42,9 +64,7 @@
   function dialogStyle(): string {
     const pos = pending?.position;
     if (!pos) return '';
-    const x = Math.max(8, Math.min(window.innerWidth - 380, pos.x));
-    const y = Math.max(8, Math.min(window.innerHeight - 160, pos.y));
-    return `margin: 0; left: ${x}px; top: ${y}px;`;
+    return 'margin: 0;';
   }
 
   function onConfirm(ev?: MouseEvent) {
@@ -80,7 +100,7 @@
   <div use:portal class="contents">
     <dialog
       bind:this={dialog}
-      class="app-confirm-dialog min-w-[360px] max-w-[min(440px,calc(100vw-32px))]"
+      class="app-confirm-dialog {pending?.position ? 'app-confirm-dialog--anchored' : ''} min-w-[360px] max-w-[min(440px,calc(100vw-32px))]"
       style={dialogStyle()}
       onclose={onDialogClose}
       onkeydown={onKeydown}
@@ -96,19 +116,35 @@
           {pending.message}
         </p>
         {#if isPrompt && pending.kind === 'prompt'}
-          <input
-            bind:this={promptInput}
-            bind:value={confirmUi.promptValue}
-            type="text"
-            class="input w-full mt-4"
-            placeholder={pending.placeholder ?? ''}
-            onkeydown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                onConfirm();
-              }
-            }}
-          />
+          {#if pending.multiline}
+            <textarea
+              bind:this={promptTextarea}
+              bind:value={confirmUi.promptValue}
+              class="input w-full mt-4 resize-y min-h-[72px]"
+              rows={pending.rows}
+              placeholder={pending.placeholder ?? ''}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  onConfirm();
+                }
+              }}
+            ></textarea>
+          {:else}
+            <input
+              bind:this={promptInput}
+              bind:value={confirmUi.promptValue}
+              type="text"
+              class="input w-full mt-4"
+              placeholder={pending.placeholder ?? ''}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  onConfirm();
+                }
+              }}
+            />
+          {/if}
         {/if}
         <div class="flex justify-end gap-2 mt-5">
           <button type="button" class="btn-secondary" onclick={onCancel}>
