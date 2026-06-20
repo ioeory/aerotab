@@ -1809,6 +1809,7 @@
   bind:this={profileModal}
   onSaved={() => { void refreshProfileList(); void sidebar?.refresh(); }}
   onClosed={() => focusActivePane()}
+  onOpenVault={() => openSettings('vault')}
   {onError}
 />
 <VaultUnlockModal

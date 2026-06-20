@@ -102,8 +102,20 @@ export function formatTags(tags: string[] | null | undefined): string {
   return normalizeTags(tags).join(', ');
 }
 
+/** Internal bucket key for profiles without an explicit group. */
+export const UNGROUPED_GROUP_KEY = '(Ungrouped)';
+
 export function profileGroupName(profile: StoredProfile): string {
-  return profile.group?.trim() || '(Ungrouped)';
+  return profile.group?.trim() || UNGROUPED_GROUP_KEY;
+}
+
+export function isUngroupedGroupKey(groupName: string): boolean {
+  return groupName === UNGROUPED_GROUP_KEY || groupName === '';
+}
+
+/** User-facing group label (i18n for ungrouped bucket). */
+export function displayGroupName(groupName: string, translate: (key: string) => string): string {
+  return isUngroupedGroupKey(groupName) ? translate('sidebar.ungrouped') : groupName;
 }
 
 export function sortProfiles(profiles: StoredProfile[]): StoredProfile[] {

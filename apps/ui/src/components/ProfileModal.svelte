@@ -33,8 +33,9 @@
     onSaved: () => void;
     onClosed?: () => void;
     onError: (msg: string) => void;
+    onOpenVault?: () => void;
   }
-  let { rpc, onSaved, onClosed, onError }: Props = $props();
+  let { rpc, onSaved, onClosed, onError, onOpenVault }: Props = $props();
 
   let dialog: HTMLDialogElement | null = null;
   let editing = $state<StoredProfile | null>(null);
@@ -64,6 +65,7 @@
   let vaultUnlocked = $state(false);
   /** Ordered ProxyJump lines (`@ProfileName` or `user@host[:port]`). */
   let jumpChainLines = $state<string[]>([]);
+  let iconGridExpanded = $state(false);
 
   function loadRemoteFields(spec: RemoteDesktopSpec) {
     host = spec.host;
@@ -187,6 +189,7 @@
     jumpChainLines = [];
     remoteSshProfileId = '';
     localBindPort = '';
+    iconGridExpanded = false;
   }
 
   export function open(existing?: StoredProfile, options?: ProfileModalOpenOptions) {
@@ -215,6 +218,7 @@
     } else {
       resetNewProfileFields(options?.group?.trim() ?? '');
     }
+    iconGridExpanded = false;
     dialog?.showModal();
   }
 
@@ -308,10 +312,15 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="min-w-[min(480px,96vw)] max-w-[min(560px,96vw)]" onclose={() => onClosed?.()}>
+<dialog
+  bind:this={dialog}
+  class="min-w-[min(480px,96vw)] max-w-[min(560px,96vw)]"
+  aria-labelledby="profile-modal-title"
+  onclose={() => onClosed?.()}
+>
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">
+      <h2 id="profile-modal-title" class="text-[14px] font-semibold text-[var(--color-accent)]">
         {editing
           ? i18n.t('profileModal.editTitle')
           : cloning
@@ -328,76 +337,185 @@
       </button>
     </div>
 
-    <label for="pm-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.kind')}</label>
-    <select id="pm-kind" bind:value={profileKind} onchange={onProfileKindChange} class="input">
-      <option value="ssh">{i18n.t('profileModal.kindSsh')}</option>
-      <option value="rdp">{i18n.t('profileModal.kindRdp')}</option>
-      <option value="vnc">{i18n.t('profileModal.kindVnc')}</option>
-    </select>
+    <fieldset class="profile-modal-section">
+      <legend>{i18n.t('profileModal.sectionConnection')}</legend>
 
-    <label for="pm-name" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.name')}</label>
-    <input id="pm-name" bind:value={name} required placeholder="prod web 01" class="input" />
+      <label for="pm-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.kind')}</label>
+      <select id="pm-kind" bind:value={profileKind} onchange={onProfileKindChange} class="input">
+        <option value="ssh">{i18n.t('profileModal.kindSsh')}</option>
+        <option value="rdp">{i18n.t('profileModal.kindRdp')}</option>
+        <option value="vnc">{i18n.t('profileModal.kindVnc')}</option>
+      </select>
 
-    <div class="flex gap-3 mt-2">
-      <div class="flex-1">
-        <label for="pm-group" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.group')}</label>
-        <div class="group-input-row">
-          <input id="pm-group" bind:value={group} placeholder={i18n.t('profileModal.groupPlaceholder')} class="input flex-1 min-w-0" />
+      <div class="flex gap-3 mt-2">
+        <div class="flex-1">
+          <label for="pm-host" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.host')}</label>
+          <input id="pm-host" bind:value={host} required placeholder="example.com" class="input" />
+        </div>
+        <div style="max-width:110px">
+          <label for="pm-port" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.port')}</label>
+          <input id="pm-port" bind:value={port} type="number" min="1" max="65535" class="input" />
+        </div>
+      </div>
+
+      {#if profileKind === 'ssh'}
+        <label for="pm-user" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.user')}</label>
+        <input id="pm-user" bind:value={user} required placeholder="root" class="input" />
+
+        <label for="pm-auth" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.authMethod')}</label>
+        <select id="pm-auth" bind:value={authKind} class="input">
+          <option value="password">{i18n.t('profileModal.password')}</option>
+          <option value="key">{i18n.t('profileModal.publicKey')}</option>
+          <option value="vault">{i18n.t('profileModal.vault')}</option>
+        </select>
+
+        {#if authKind === 'vault'}
+          {#if !vaultUnlocked}
+            <div class="vault-locked-row mt-2">
+              <p class="text-[10.5px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.vaultLockedHint')}</p>
+              {#if onOpenVault}
+                <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={() => onOpenVault?.()}>
+                  {i18n.t('profileModal.vaultUnlock')}
+                </button>
+              {/if}
+            </div>
+          {:else}
+            <label for="pm-vault-entry" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+              {i18n.t('profileModal.vaultEntry')}
+            </label>
+            <select id="pm-vault-entry" bind:value={vaultEntryId} class="input">
+              <option value="">—</option>
+              {#each vaultEntries as ve (ve.id)}
+                <option value={ve.id}>{ve.label} ({ve.kind})</option>
+              {/each}
+            </select>
+            <label for="pm-vault-pass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+              {i18n.t('profileModal.vaultPassphraseEntry')}
+            </label>
+            <select id="pm-vault-pass" bind:value={vaultPassphraseEntryId} class="input">
+              <option value="">—</option>
+              {#each vaultEntries.filter((e) => e.kind === 'password') as ve (ve.id)}
+                <option value={ve.id}>{ve.label}</option>
+              {/each}
+            </select>
+          {/if}
+        {:else if authKind === 'password'}
+          <label for="pm-pw" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+            {i18n.t('profileModal.passwordStoredLocally')}
+          </label>
+          <input id="pm-pw" type="password" bind:value={password} class="input" />
+        {:else}
+          <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.privateKeyPath')}</label>
+          <div class="path-field">
+            <input
+              id="pm-keypath"
+              bind:value={keyPath}
+              placeholder="~/.ssh/id_ed25519"
+              class="input path-field-input"
+            />
+            <button
+              type="button"
+              class="btn-secondary path-field-btn"
+              title={i18n.t('profileModal.browsePrivateKey')}
+              aria-label={i18n.t('profileModal.browsePrivateKey')}
+              onclick={() => { void browsePrivateKeyPath(); }}
+            >
+              <FolderOpen size={14} />
+              <span>{i18n.t('profileModal.browsePrivateKey')}</span>
+            </button>
+          </div>
+          <label for="pm-keypass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+            {i18n.t('profileModal.keyPassphrase')}
+          </label>
+          <input id="pm-keypass" type="password" bind:value={keyPassphrase} class="input" />
+        {/if}
+
+        <div class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+          {i18n.t('profileModal.proxyJump')}
+        </div>
+        {#key editing?.id ?? 'new'}
+          <JumpChainEditor
+            profiles={tunnelProfiles}
+            excludeProfileId={editing?.id}
+            bind:jumpChainLines
+            onError={onError}
+          />
+        {/key}
+      {:else}
+        <label for="pm-tunnel" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.sshTunnel')}</label>
+        <select id="pm-tunnel" bind:value={remoteSshProfileId} class="input">
+          <option value="">(direct)</option>
+          {#each tunnelProfiles as tp (tp.id)}
+            <option value={tp.id}>{tp.name}</option>
+          {/each}
+        </select>
+        <label for="pm-lport" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.localBindPort')}</label>
+        <input id="pm-lport" bind:value={localBindPort} type="number" min="1" max="65535" class="input" placeholder="auto" />
+      {/if}
+    </fieldset>
+
+    <fieldset class="profile-modal-section">
+      <legend>{i18n.t('profileModal.sectionIdentity')}</legend>
+
+      <label for="pm-name" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.name')}</label>
+      <input id="pm-name" bind:value={name} required placeholder="prod web 01" class="input" />
+
+      <div class="flex gap-3 mt-2">
+        <div class="flex-1">
+          <label for="pm-group" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.group')}</label>
+          <div class="group-input-row">
+            <input id="pm-group" bind:value={group} placeholder={i18n.t('profileModal.groupPlaceholder')} class="input flex-1 min-w-0" />
+            {#if group.trim()}
+              <span
+                class="group-color-preview"
+                style={groupStyle(group.trim(), profileVisualsStore.overrides)}
+                title={group.trim()}
+                aria-hidden="true"
+              ></span>
+            {/if}
+          </div>
           {#if group.trim()}
-            <span
-              class="group-color-preview"
-              style={groupStyle(group.trim(), profileVisualsStore.overrides)}
-              title={group.trim()}
-              aria-hidden="true"
-            ></span>
+            <div class="profile-modal-color-row mt-1">
+              <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.groupColor')}</span>
+              <VisualColorPicker
+                compact
+                value={profileVisualsStore.groupColors[normalizeGroupKey(group)] ?? null}
+                onPick={(color) => {
+                  void profileVisualsStore.setGroupColor(rpc, group.trim(), color);
+                }}
+              />
+            </div>
           {/if}
         </div>
-        {#if group.trim()}
-          <div class="profile-modal-color-row mt-1">
-            <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.groupColor')}</span>
-            <VisualColorPicker
-              compact
-              value={profileVisualsStore.groupColors[normalizeGroupKey(group)] ?? null}
-              onPick={(color) => {
-                void profileVisualsStore.setGroupColor(rpc, group.trim(), color);
-              }}
-            />
-          </div>
-        {/if}
+        <label class="favorite-row">
+          <input type="checkbox" bind:checked={favorite} />
+          <span>{i18n.t('profileModal.favorite')}</span>
+        </label>
       </div>
-      <label class="favorite-row">
-        <input type="checkbox" bind:checked={favorite} />
-        <span>{i18n.t('profileModal.favorite')}</span>
-      </label>
-    </div>
 
-    <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
-    <input id="pm-tags" bind:value={tagsText} placeholder="prod, db, singapore" class="input" />
-    {#if parsedTags.length > 0}
-      <div class="profile-modal-tag-colors mt-1">
-        <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.tagColors')}</span>
-        {#each parsedTags as tag (tag)}
-          <div class="profile-modal-color-row">
-            <ProfileTag {tag} compact />
-            <VisualColorPicker
-              compact
-              value={profileVisualsStore.tagColors[normalizeTagKey(tag)] ?? null}
-              onPick={(color) => {
-                void profileVisualsStore.setTagColor(rpc, tag, color);
-              }}
-            />
-          </div>
-        {/each}
-      </div>
-    {/if}
+      <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
+      <input id="pm-tags" bind:value={tagsText} placeholder="prod, db, singapore" class="input" />
+      {#if parsedTags.length > 0}
+        <div class="profile-modal-tag-colors mt-1">
+          <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.tagColors')}</span>
+          {#each parsedTags as tag (tag)}
+            <div class="profile-modal-color-row">
+              <ProfileTag {tag} compact />
+              <VisualColorPicker
+                compact
+                value={profileVisualsStore.tagColors[normalizeTagKey(tag)] ?? null}
+                onPick={(color) => {
+                  void profileVisualsStore.setTagColor(rpc, tag, color);
+                }}
+              />
+            </div>
+          {/each}
+        </div>
+      {/if}
 
-    <label for="pm-note" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.note')}</label>
-    <textarea id="pm-note" bind:value={note} rows="3" placeholder={i18n.t('profileModal.notePlaceholder')} class="input resize-y min-h-[68px]"></textarea>
-
-    <div class="flex gap-3 mt-2 items-end">
-      <div>
+      <div class="mt-2">
         <label for="pm-icon-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.icon')}</label>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 flex-wrap">
           <ProfileIcon icon={{ kind: iconKind, value: iconValue }} {name} kind={profileKind} />
           <select id="pm-icon-kind" bind:value={iconKind} class="input min-w-[112px]">
             <option value="builtin">{i18n.t('profileModal.builtin')}</option>
@@ -405,134 +523,49 @@
             <option value="file">{i18n.t('profileModal.filePath')}</option>
             <option value="data">{i18n.t('profileModal.dataUri')}</option>
           </select>
+          {#if iconKind === 'builtin'}
+            <button
+              type="button"
+              class="btn-secondary text-[11px] py-0.5 px-2"
+              onclick={() => { iconGridExpanded = !iconGridExpanded; }}
+            >
+              {iconGridExpanded ? i18n.t('profileModal.collapseIconGrid') : i18n.t('profileModal.expandIconGrid')}
+            </button>
+          {/if}
         </div>
-      </div>
-      <div class="flex-1">
         {#if iconKind === 'builtin'}
-          <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.builtinIcon')}</span>
-          <div class="profile-icon-grid" role="listbox" aria-label={i18n.t('profileModal.builtinIcon')}>
-            {#each BUILTIN_PROFILE_ICONS as icon (icon)}
-              <button
-                type="button"
-                role="option"
-                aria-selected={iconValue === icon}
-                class="profile-icon-grid-btn {iconValue === icon ? 'selected' : ''}"
-                style={`--profile-tone-fg:${builtinIconTone(icon).fg};--profile-tone-bg:${builtinIconTone(icon).bg};--profile-tone-border:${builtinIconTone(icon).border};`}
-                onclick={() => { iconValue = icon; }}
-              >
-                <ProfileIcon icon={{ kind: 'builtin', value: icon }} name={icon} kind={profileKind} size={14} />
-                <span>{icon}</span>
-              </button>
-            {/each}
-          </div>
+          {#if iconGridExpanded}
+            <div class="profile-icon-grid mt-2" role="listbox" aria-label={i18n.t('profileModal.builtinIcon')}>
+              {#each BUILTIN_PROFILE_ICONS as icon (icon)}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={iconValue === icon}
+                  class="profile-icon-grid-btn {iconValue === icon ? 'selected' : ''}"
+                  style={`--profile-tone-fg:${builtinIconTone(icon).fg};--profile-tone-bg:${builtinIconTone(icon).bg};--profile-tone-border:${builtinIconTone(icon).border};`}
+                  onclick={() => { iconValue = icon; }}
+                >
+                  <ProfileIcon icon={{ kind: 'builtin', value: icon }} name={icon} kind={profileKind} size={14} />
+                  <span>{icon}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         {:else}
-          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.iconValue')}</label>
+          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.iconValue')}</label>
           <div class="flex gap-2">
             <input id="pm-icon-value" bind:value={iconValue} placeholder={iconKind === 'emoji' ? 'emoji or short text' : iconKind === 'remote' ? 'https://host/a.svg|https://host/b.png' : 'path, URL, name, or data URI'} class="input flex-1 min-w-0" />
             <button type="button" class="btn-secondary shrink-0 px-2" onclick={() => { void chooseIconFile(); }}>{i18n.t('profileModal.chooseIconFile')}</button>
           </div>
         {/if}
       </div>
-    </div>
+    </fieldset>
 
-    <div class="flex gap-3 mt-2">
-      <div class="flex-1">
-        <label for="pm-host" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.host')}</label>
-        <input id="pm-host" bind:value={host} required placeholder="example.com" class="input" />
-      </div>
-      <div style="max-width:110px">
-        <label for="pm-port" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.port')}</label>
-        <input id="pm-port" bind:value={port} type="number" min="1" max="65535" class="input" />
-      </div>
-    </div>
-
-    {#if profileKind === 'ssh'}
-      <label for="pm-user" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.user')}</label>
-      <input id="pm-user" bind:value={user} required placeholder="root" class="input" />
-
-      <label for="pm-auth" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.authMethod')}</label>
-      <select id="pm-auth" bind:value={authKind} class="input">
-        <option value="password">{i18n.t('profileModal.password')}</option>
-        <option value="key">{i18n.t('profileModal.publicKey')}</option>
-        <option value="vault">{i18n.t('profileModal.vault')}</option>
-      </select>
-
-      {#if authKind === 'vault'}
-        {#if !vaultUnlocked}
-          <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-2">{i18n.t('profileModal.vaultLockedHint')}</p>
-        {:else}
-          <label for="pm-vault-entry" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-            {i18n.t('profileModal.vaultEntry')}
-          </label>
-          <select id="pm-vault-entry" bind:value={vaultEntryId} class="input">
-            <option value="">—</option>
-            {#each vaultEntries as ve (ve.id)}
-              <option value={ve.id}>{ve.label} ({ve.kind})</option>
-            {/each}
-          </select>
-          <label for="pm-vault-pass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-            {i18n.t('profileModal.vaultPassphraseEntry')}
-          </label>
-          <select id="pm-vault-pass" bind:value={vaultPassphraseEntryId} class="input">
-            <option value="">—</option>
-            {#each vaultEntries.filter((e) => e.kind === 'password') as ve (ve.id)}
-              <option value={ve.id}>{ve.label}</option>
-            {/each}
-          </select>
-        {/if}
-      {:else if authKind === 'password'}
-        <label for="pm-pw" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-          {i18n.t('profileModal.passwordStoredLocally')}
-        </label>
-        <input id="pm-pw" type="password" bind:value={password} class="input" />
-      {:else}
-        <label for="pm-keypath" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.privateKeyPath')}</label>
-        <div class="path-field">
-          <input
-            id="pm-keypath"
-            bind:value={keyPath}
-            placeholder="~/.ssh/id_ed25519"
-            class="input path-field-input"
-          />
-          <button
-            type="button"
-            class="btn-secondary path-field-btn"
-            title={i18n.t('profileModal.browsePrivateKey')}
-            aria-label={i18n.t('profileModal.browsePrivateKey')}
-            onclick={() => { void browsePrivateKeyPath(); }}
-          >
-            <FolderOpen size={14} />
-            <span>{i18n.t('profileModal.browsePrivateKey')}</span>
-          </button>
-        </div>
-        <label for="pm-keypass" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-          {i18n.t('profileModal.keyPassphrase')}
-        </label>
-        <input id="pm-keypass" type="password" bind:value={keyPassphrase} class="input" />
-      {/if}
-
-      <div class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
-        {i18n.t('profileModal.proxyJump')}
-      </div>
-      {#key editing?.id ?? 'new'}
-        <JumpChainEditor
-          profiles={tunnelProfiles}
-          excludeProfileId={editing?.id}
-          bind:jumpChainLines
-          onError={onError}
-        />
-      {/key}
-    {:else}
-      <label for="pm-tunnel" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.sshTunnel')}</label>
-      <select id="pm-tunnel" bind:value={remoteSshProfileId} class="input">
-        <option value="">(direct)</option>
-        {#each tunnelProfiles as tp (tp.id)}
-          <option value={tp.id}>{tp.name}</option>
-        {/each}
-      </select>
-      <label for="pm-lport" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.localBindPort')}</label>
-      <input id="pm-lport" bind:value={localBindPort} type="number" min="1" max="65535" class="input" placeholder="auto" />
-    {/if}
+    <fieldset class="profile-modal-section">
+      <legend>{i18n.t('profileModal.sectionNote')}</legend>
+      <label for="pm-note" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.note')}</label>
+      <textarea id="pm-note" bind:value={note} rows="3" placeholder={i18n.t('profileModal.notePlaceholder')} class="input resize-y min-h-[68px]"></textarea>
+    </fieldset>
 
     <div class="flex justify-end gap-2 mt-5">
       <button type="button" onclick={close} class="btn-secondary">{i18n.t('common.cancel')}</button>
@@ -592,5 +625,26 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  .profile-modal-section {
+    border: 1px solid var(--color-border-soft);
+    border-radius: var(--radius-md, 6px);
+    padding: 10px 12px 12px;
+    margin: 0 0 10px;
+    min-width: 0;
+  }
+  .profile-modal-section legend {
+    padding: 0 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-fg-muted);
+  }
+  .vault-locked-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
   }
 </style>

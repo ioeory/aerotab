@@ -4,9 +4,9 @@
   // profile list but with grouping, search, and inline edit/delete.
 
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Activity, Plus, Trash2, Pencil, Plug, Search, ShieldAlert, ShieldCheck, ShieldX, Star } from '@lucide/svelte';
+  import { Activity, Plus, Plug, Search } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
-  import type { ProfileHealthResult, ProfileHealthStatus, StoredProfile } from '../../../lib/types';
+  import type { ProfileHealthResult, StoredProfile } from '../../../lib/types';
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm, appPrompt } from '../../../lib/confirm.svelte';
   import {
@@ -20,7 +20,7 @@
     upsertProfilesGroup,
   } from '../../../lib/profileGroupMove';
   import { tabs } from '../../../lib/tabs.svelte';
-  import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, summarizeProfiles } from '../../../lib/profileMeta';
+  import { matchesProfileQuery, profileGroupName, sortProfiles, summarizeProfiles, displayGroupName, isUngroupedGroupKey } from '../../../lib/profileMeta';
   import {
     invertProfileSelection,
     profilesFromSelection,
@@ -33,8 +33,7 @@
   import { withRpcTimeout } from '../../../lib/rpcTimeout';
   import { focusProfileInTabs } from '../../../lib/focusProfileSession';
   import ProfileModal from '../../ProfileModal.svelte';
-  import ProfileIcon from '../../ProfileIcon.svelte';
-  import ProfileKindBadge from '../../ProfileKindBadge.svelte';
+  import ProfileListRow from '../../ProfileListRow.svelte';
   import ProfileTag from '../../ProfileTag.svelte';
   import { groupStyle, normalizeGroupKey, normalizeTagKey } from '../../../lib/profileVisuals';
   import { profileVisualsStore } from '../../../lib/profileVisualsStore.svelte';
@@ -223,6 +222,7 @@
       selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
       selectionAnchorId = p.id;
     } else {
+      selectedProfileIds = new Set([p.id]);
       selectionAnchorId = p.id;
     }
   }
@@ -407,18 +407,6 @@
     }
   }
 
-  function healthLabel(status: ProfileHealthStatus): string {
-    if (status === 'ok') return i18n.t('profiles.healthOk');
-    if (status === 'warning') return i18n.t('profiles.healthWarning');
-    return i18n.t('profiles.healthError');
-  }
-
-  function healthTitle(result: ProfileHealthResult): string {
-    const issues = result.checks.filter((check) => check.status !== 'ok');
-    const visible = issues.length > 0 ? issues : result.checks.slice(0, 1);
-    return visible.map((check) => `${check.name}: ${check.message}`).join('\n') || i18n.t('profiles.healthNoIssues');
-  }
-
   function healthIssues(result: ProfileHealthResult) {
     return result.checks.filter((check) => check.status !== 'ok').slice(0, 3);
   }
@@ -452,6 +440,7 @@
     <input
       type="search" bind:value={query} placeholder={i18n.t('profiles.filterPlaceholder')}
       class="input pl-7"
+      aria-label={i18n.t('profiles.filterPlaceholder')}
     />
   </div>
 
@@ -598,75 +587,26 @@
       {:else}
         {#each grouped() as [groupName, items] (groupName)}
           <div class="group-block">
-            <div class="group-name profile-group-header" style={groupStyle(groupName === '(Ungrouped)' ? '' : groupName, profileVisualsStore.overrides)}>
+            <div class="group-name profile-group-header" style={groupStyle(isUngroupedGroupKey(groupName) ? '' : groupName, profileVisualsStore.overrides)}>
               <span class="profile-group-swatch" aria-hidden="true"></span>
-              <span>{groupName}</span>
+              <span>{displayGroupName(groupName, (key) => i18n.t(key))}</span>
             </div>
             {#each items as p (p.id)}
               {@const h = health[p.id]}
-              <div
-                class="profile-row {selectedProfileIds.has(p.id) ? 'profile-row--selected' : ''}"
-                onclick={(ev) => onProfileRowClick(p, ev)}
-                onkeydown={() => {}}
-                role="presentation"
-              >
-                <input
-                  type="checkbox"
-                  class="shrink-0"
-                  checked={selectedProfileIds.has(p.id)}
-                  onclick={(ev) => {
-                    ev.stopPropagation();
-                    toggleProfileCheckbox(p);
-                  }}
-                  aria-label={p.name}
-                />
-                <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={14} />
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-1 text-[12.5px] font-medium truncate">
-                    <span class="truncate">{p.name}</span>
-                    <ProfileKindBadge kind={p.kind} compact />
-                    {#if h}
-                      <span class={`health-chip ${h.status}`} title={healthTitle(h)} aria-label={healthLabel(h.status)}>
-                        {#if h.status === 'ok'}
-                          <ShieldCheck size={11} />
-                        {:else if h.status === 'warning'}
-                          <ShieldAlert size={11} />
-                        {:else}
-                          <ShieldX size={11} />
-                        {/if}
-                      </span>
-                    {/if}
-                    {#if p.favorite}
-                      <Star size={11} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
-                    {/if}
-                  </div>
-                  <div class="text-[11px] text-[var(--color-fg-muted)] truncate font-mono">
-                    {profileEndpointLabel(p)}
-                  </div>
-                  {#if (p.tags ?? []).length > 0}
-                    <div class="tag-row">
-                      {#each (p.tags ?? []).slice(0, 6) as tag (tag)}
-                        <ProfileTag {tag} />
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if h && h.status !== 'ok'}
-                    <div class="health-details">
-                      {#each healthIssues(h) as check (`${p.id}-${check.name}`)}
-                        <span>{check.name}: {check.message}</span>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-                <div class="flex items-center gap-1">
-                    <button type="button" class="icon-btn" title={i18n.t('profiles.connect')}
-                          onclick={() => connect(p)}><Plug size={12} /></button>
-                    <button type="button" class="icon-btn" title={i18n.t('common.edit')}
-                      onclick={() => editProfile(p)}><Pencil size={12} /></button>
-                    <button type="button" class="icon-btn" title={i18n.t('common.delete')}
-                          onclick={() => remove(p)}><Trash2 size={12} /></button>
-                </div>
-              </div>
+              <ProfileListRow
+                profile={p}
+                variant="settings"
+                health={h}
+                healthIssues={h ? healthIssues(h) : []}
+                selected={selectedProfileIds.has(p.id)}
+                showSelection={hasProfileSelection}
+                onOpen={() => connect(p)}
+                onClick={(ev) => onProfileRowClick(p, ev)}
+                onCheckboxToggle={() => toggleProfileCheckbox(p)}
+                onConnect={() => connect(p)}
+                onEdit={() => editProfile(p)}
+                onRemove={() => remove(p)}
+              />
             {/each}
           </div>
         {/each}
@@ -705,11 +645,6 @@
     border: 1px solid var(--color-border-soft);
     background: var(--color-panel-2);
     margin-bottom: 4px;
-    cursor: pointer;
-  }
-  .profile-row--selected {
-    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
-    border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border-soft));
   }
   .summary-strip {
     display: flex;
@@ -723,38 +658,6 @@
     border-radius: 999px;
     padding: 1px 7px;
     background: var(--color-panel-2);
-  }
-  .tag-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 4px;
-    font-size: 10px;
-    color: var(--color-fg-muted);
-  }
-  .health-chip {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 999px;
-    border: 1px solid var(--color-border-soft);
-    color: var(--color-fg-muted);
-    background: var(--color-panel);
-    flex: 0 0 auto;
-  }
-  .health-chip.ok { color: var(--color-success); }
-  .health-chip.warning { color: var(--color-warning); }
-  .health-chip.error { color: var(--color-danger); }
-  .health-details {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-top: 4px;
-    color: var(--color-fg-muted);
-    font-size: 10.5px;
-    line-height: 1.35;
   }
   .group-block { margin-bottom: 8px; }
   .visual-settings {

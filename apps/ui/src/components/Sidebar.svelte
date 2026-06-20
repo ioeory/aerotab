@@ -31,7 +31,8 @@
     saveCollapsedPaths,
     type ProfileTreeFolder,
   } from '../lib/profileTree';
-  import SidebarProfileTree, { type ProfileQuickAction } from './SidebarProfileTree.svelte';
+  import SidebarProfileTree from './SidebarProfileTree.svelte';
+  import { type ProfileQuickAction } from './ProfileListRow.svelte';
   import VisualColorPicker from './VisualColorPicker.svelte';
   import ProfileTag from './ProfileTag.svelte';
   import { normalizeGroupKey, normalizeTagKey } from '../lib/profileVisuals';
@@ -397,10 +398,8 @@
   let menuTarget = $state<SidebarMenu | null>(null);
   let menuEl = $state<HTMLDivElement | null>(null);
   let jumpSubmenuQuery = $state('');
-  let submenuLeft = $state(8);
-  let submenuTop = $state(8);
+  let jumpSearchInput: HTMLInputElement | null = null;
   let focusedProfileId = $state<string | null>(null);
-  let focusedGroupPath = $state<string | null>(null);
   let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectionAnchorId = $state<string | null>(null);
@@ -455,6 +454,9 @@
     menuX = clamped.x;
     menuY = clamped.y;
     lastMenuPosition = { x: menuX, y: menuY };
+    await tick();
+    menuEl?.focus();
+    menuFocusables()[0]?.focus();
   }
 
   function focusProfile(p: StoredProfile) {
@@ -474,6 +476,7 @@
       selectionAnchorId = p.id;
     } else {
       focusProfile(p);
+      selectedProfileIds = new Set([p.id]);
       selectionAnchorId = p.id;
     }
   }
@@ -617,6 +620,7 @@
 
   async function promptAndMoveProfiles(profiles: StoredProfile[]) {
     if (profiles.length === 0) return;
+    closeMenu();
     const value = await appPrompt(
       i18n.t('profiles.moveToGroupPrompt', { count: profiles.length }),
       {
@@ -673,7 +677,6 @@
   }
 
   function showFolderMenu(folder: ProfileTreeFolder, ev: MouseEvent) {
-    focusedGroupPath = folder.path;
     openMenu({ kind: 'group', folder, groupLabel: folder.name || i18n.t('sidebar.ungrouped') }, ev);
   }
 
@@ -695,16 +698,16 @@
     );
   }
 
-  async function alignSubmenu(ev: MouseEvent) {
+  async function alignSubmenu(ev: MouseEvent, focusJumpSearch = false) {
     const wrap = ev.currentTarget as HTMLElement;
     const trigger = wrap.querySelector(':scope > .menu-item') as HTMLElement | null;
     const panel = wrap.querySelector(':scope > .submenu-panel') as HTMLElement | null;
-    if (!trigger) return;
+    if (!trigger || !panel) return;
     const rect = trigger.getBoundingClientRect();
     await tick();
     const pad = 8;
-    const pw = panel?.offsetWidth ?? 260;
-    const ph = panel?.offsetHeight ?? 280;
+    const pw = panel.offsetWidth || 260;
+    const ph = panel.offsetHeight || 280;
     let x = rect.right;
     let y = rect.top;
     if (x + pw + pad > window.innerWidth) {
@@ -713,8 +716,63 @@
     if (y + ph + pad > window.innerHeight) {
       y = Math.max(pad, window.innerHeight - ph - pad);
     }
-    submenuLeft = Math.max(pad, x);
-    submenuTop = Math.max(pad, y);
+    panel.style.left = `${Math.max(pad, x)}px`;
+    panel.style.top = `${Math.max(pad, y)}px`;
+    if (focusJumpSearch) {
+      jumpSearchInput?.focus();
+    }
+  }
+
+  function realignVisibleSubmenus() {
+    if (!menuEl) return;
+    for (const wrap of menuEl.querySelectorAll<HTMLElement>('.menu-with-submenu:hover')) {
+      const trigger = wrap.querySelector(':scope > .menu-item') as HTMLElement | null;
+      const panel = wrap.querySelector(':scope > .submenu-panel') as HTMLElement | null;
+      if (!trigger || !panel) continue;
+      const rect = trigger.getBoundingClientRect();
+      const pad = 8;
+      const pw = panel.offsetWidth || 260;
+      const ph = panel.offsetHeight || 280;
+      let x = rect.right;
+      let y = rect.top;
+      if (x + pw + pad > window.innerWidth) x = rect.left - pw;
+      if (y + ph + pad > window.innerHeight) y = Math.max(pad, window.innerHeight - ph - pad);
+      panel.style.left = `${Math.max(pad, x)}px`;
+      panel.style.top = `${Math.max(pad, y)}px`;
+    }
+  }
+
+  function menuFocusables(): HTMLElement[] {
+    if (!menuEl) return [];
+    return Array.from(menuEl.querySelectorAll<HTMLElement>(
+      '.menu-item:not(.menu-item--submenu), .menu-with-submenu > .menu-item',
+    ));
+  }
+
+  function onContextMenuKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMenu();
+      return;
+    }
+    const items = menuFocusables();
+    if (items.length === 0) return;
+    const active = document.activeElement as HTMLElement | null;
+    let idx = items.findIndex((el) => el === active);
+    if (idx < 0) idx = 0;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[(idx + 1) % items.length]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(idx - 1 + items.length) % items.length]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1]?.focus();
+    }
   }
 
   function menuOpenInNewTab(p: StoredProfile) {
@@ -747,6 +805,7 @@
   }
 
   function menuMoveToGroup(p: StoredProfile) {
+    closeMenu();
     void promptAndMoveProfiles(profilesToMove(p));
   }
   function menuMoveToExistingGroup(p: StoredProfile, group: string | null) {
@@ -1215,7 +1274,8 @@
     data-aerotab-context-menu=""
     class="panel context-menu-scroll fixed z-[56] min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
     style="left: {menuX}px; top: {menuY}px;"
-    onkeydown={(e) => e.stopPropagation()}
+    onkeydown={onContextMenuKeydown}
+    onscroll={realignVisibleSubmenus}
     onclick={(e) => e.stopPropagation()}
   >
       {#if menuTarget.kind === 'group'}
@@ -1258,14 +1318,14 @@
       {:else}
         {@const mp = menuTarget.profile}
         {@const moveCount = selectedProfileIds.has(mp.id) ? selectedProfileIds.size : 1}
-        <div class="menu-with-submenu" onmouseenter={alignSubmenu}>
-          <button type="button" class="menu-item menu-item--submenu" onclick={() => menuMoveToGroup(mp)}>
+        <div class="menu-with-submenu" onmouseenter={(ev) => { void alignSubmenu(ev); }}>
+          <button type="button" class="menu-item menu-item--submenu" tabindex="0">
             <span>{moveCount > 1
               ? i18n.t('sidebar.moveProfilesToGroup', { count: moveCount })
               : i18n.t('sidebar.moveProfileToGroup')}</span>
             <span class="submenu-arrow">›</span>
           </button>
-          <div class="submenu-panel" role="menu" style="left: {submenuLeft}px; top: {submenuTop}px;">
+          <div class="submenu-panel" role="menu">
             <button type="button" class="menu-item" onclick={() => menuMoveToExistingGroup(mp, null)}>{i18n.t('sidebar.ungrouped')}</button>
             {#each allGroupPaths as group (group)}
               <button
@@ -1278,17 +1338,21 @@
                 <span class="truncate">{groupLabel(group)}</span>
               </button>
             {/each}
+            <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+            <button type="button" class="menu-item" onclick={() => menuMoveToGroup(mp)}>
+              {i18n.t('sidebar.moveToCustomGroup')}
+            </button>
           </div>
         </div>
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={(ev) => { void menuEditTags(mp, ev); }}>{i18n.t('sidebar.editTags')}</button>
         {#if (mp.tags ?? []).length > 0}
-          <div class="menu-with-submenu" onmouseenter={alignSubmenu}>
-            <button type="button" class="menu-item menu-item--submenu">
+          <div class="menu-with-submenu" onmouseenter={(ev) => { void alignSubmenu(ev); }}>
+            <button type="button" class="menu-item menu-item--submenu" tabindex="0">
               <span>{i18n.t('profiles.tagColors')}</span>
               <span class="submenu-arrow">›</span>
             </button>
-            <div class="submenu-panel tag-color-submenu" role="menu" style="left: {submenuLeft}px; top: {submenuTop}px;">
+            <div class="submenu-panel tag-color-submenu" role="menu">
               {#each (mp.tags ?? []) as tag (tag)}
                 <div class="menu-tag-color-row">
                   <ProfileTag {tag} compact />
@@ -1336,18 +1400,22 @@
         </button>
         {#if mp.kind === 'ssh'}
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-          <div class="menu-with-submenu" onmouseenter={alignSubmenu}>
-            <button type="button" class="menu-item menu-item--submenu">
+          <div class="menu-with-submenu" onmouseenter={(ev) => { void alignSubmenu(ev, true); }}>
+            <button type="button" class="menu-item menu-item--submenu" tabindex="0">
               <span>{i18n.t('sidebar.connectViaJump')}</span>
               <span class="submenu-arrow">›</span>
             </button>
-            <div class="submenu-panel jump-host-submenu" role="menu" style="left: {submenuLeft}px; top: {submenuTop}px;" onclick={(e) => e.stopPropagation()}>
+            <div class="submenu-panel jump-host-submenu" role="menu" onclick={(e) => e.stopPropagation()}>
+              <p class="jump-host-hint px-3 pt-1 pb-0 text-[10px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpHint')}</p>
               <div class="jump-host-search px-2 py-1.5">
                 <input
+                  bind:this={jumpSearchInput}
                   type="search"
                   class="input text-[11px] py-1"
                   placeholder={i18n.t('sidebar.jumpHostSearch')}
+                  aria-label={i18n.t('sidebar.jumpHostSearch')}
                   bind:value={jumpSubmenuQuery}
+                  oninput={realignVisibleSubmenus}
                   onclick={(e) => e.stopPropagation()}
                 />
               </div>
@@ -1472,5 +1540,8 @@
     z-index: 1;
     background: var(--color-panel);
     border-bottom: 1px solid var(--color-border-soft);
+  }
+  .jump-host-hint {
+    line-height: 1.35;
   }
 </style>

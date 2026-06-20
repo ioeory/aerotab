@@ -36,7 +36,7 @@
     {/each}
   </div>
   {#if value}
-    <button type="button" class="visual-color-reset" onclick={() => onPick(null)}>
+    <button type="button" class="visual-color-reset" onclick={() => onPick(null)} aria-label={i18n.t('profiles.visualColorClear')}>
       {menu ? '×' : i18n.t('profiles.visualColorReset')}
     </button>
   {/if}

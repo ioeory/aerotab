@@ -16,7 +16,7 @@
   import type { StoredProfile } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
-  import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles } from '../lib/profileMeta';
+  import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, displayGroupName, isUngroupedGroupKey, UNGROUPED_GROUP_KEY } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
   import ProfileKindBadge from './ProfileKindBadge.svelte';
   import ProfileTag from './ProfileTag.svelte';
@@ -119,8 +119,8 @@
     return Array.from(map.entries())
       .map(([groupName, ps]) => [groupName, sortProfiles(ps)] as [string, StoredProfile[]])
       .sort(([a], [b]) => {
-        if (a === '(Ungrouped)') return -1;
-        if (b === '(Ungrouped)') return 1;
+        if (isUngroupedGroupKey(a)) return -1;
+        if (isUngroupedGroupKey(b)) return 1;
         return a.localeCompare(b);
       });
   });
@@ -148,8 +148,8 @@
     for (const [groupName, ps] of groupedProfiles) {
       blocks.push({
         kind: 'header',
-        title: `${groupName} · ${ps.length}`,
-        key: `hdr:${groupName || '__ungrouped__'}`,
+        title: `${displayGroupName(groupName, (key) => i18n.t(key))} · ${ps.length}`,
+        key: `hdr:${groupName || UNGROUPED_GROUP_KEY}`,
       });
       for (const p of ps) {
         pushRow(`group:${groupName}:${p.id}`, { kind: 'profile', profile: p });
@@ -256,7 +256,7 @@
   role="dialog"
   aria-modal="true"
   aria-label={i18n.t('picker.aria')}
-  class="fixed inset-0 z-50 grid place-items-start pt-12"
+  class="fixed inset-0 z-50 bg-black/50 grid place-items-start pt-12"
   onclick={(e) => { if (e.target === e.currentTarget) onClose(); }}
   onkeydown={(e) => { if (e.key === 'Escape') onClose(); }}
   tabindex="-1"

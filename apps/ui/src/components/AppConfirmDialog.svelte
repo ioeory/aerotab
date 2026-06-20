@@ -94,6 +94,13 @@
       onCancel();
     }
   }
+  function dialogLabelledBy(): string {
+    return pending?.title ? 'app-confirm-title' : 'app-confirm-message';
+  }
+
+  function dialogDescribedBy(): string | undefined {
+    return pending?.title ? 'app-confirm-message' : undefined;
+  }
 </script>
 
 {#if pending}
@@ -104,7 +111,8 @@
       style={dialogStyle()}
       onclose={onDialogClose}
       onkeydown={onKeydown}
-      aria-labelledby="app-confirm-message"
+      aria-labelledby={dialogLabelledBy()}
+      aria-describedby={dialogDescribedBy()}
     >
       <div class="p-5">
         {#if pending.title}
