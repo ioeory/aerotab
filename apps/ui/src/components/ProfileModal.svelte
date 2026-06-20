@@ -15,9 +15,9 @@
   import { defaultPortForKind } from '../lib/profileDefaults';
   import {
     BUILTIN_PROFILE_ICONS,
-    formatTags,
+    collectProfileTags,
+    normalizeTags,
     parseProfileIconInput,
-    parseTagsInput,
     suggestDuplicateProfileName,
   } from '../lib/profileMeta';
   import { notifyProfilesChanged } from '../lib/profileEvents';
@@ -26,6 +26,7 @@
   import JumpChainEditor from './JumpChainEditor.svelte';
   import ProfileIcon from './ProfileIcon.svelte';
   import ProfileTag from './ProfileTag.svelte';
+  import ProfileTagEditor from './ProfileTagEditor.svelte';
   import VisualColorPicker from './VisualColorPicker.svelte';
 
   interface Props {
@@ -44,10 +45,11 @@
   let remoteSshProfileId = $state('');
   let localBindPort = $state<number | ''>('');
   let tunnelProfiles = $state<StoredProfile[]>([]);
+  let catalogProfiles = $state<StoredProfile[]>([]);
   let name = $state('');
   let group = $state('');
-  let tagsText = $state('');
-  const parsedTags = $derived(parseTagsInput(tagsText));
+  let selectedTags = $state<string[]>([]);
+  const knownTags = $derived(collectProfileTags(catalogProfiles));
   let note = $state('');
   let favorite = $state(false);
   let iconKind = $state<'builtin' | 'emoji' | 'file' | 'data' | 'remote' | 'selfhst'>('builtin');
@@ -107,7 +109,7 @@
     profileKind = existing.kind;
     name = existing.name;
     group = existing.group ?? '';
-    tagsText = formatTags(existing.tags);
+    selectedTags = normalizeTags(existing.tags);
     note = existing.note ?? '';
     favorite = !!existing.favorite;
     iconKind = (existing.icon?.kind as typeof iconKind) ?? 'builtin';
@@ -172,7 +174,7 @@
     profileKind = 'ssh';
     name = '';
     group = groupDefault;
-    tagsText = '';
+    selectedTags = [];
     note = '';
     favorite = false;
     iconKind = 'builtin';
@@ -198,12 +200,13 @@
     void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
       .then((list) => {
+        catalogProfiles = list;
         tunnelProfiles = list.filter((p) => p.kind === 'ssh');
         if (existing && !options?.duplicateFrom) {
           loadFieldsFromProfile(existing, tunnelProfiles);
         }
       })
-      .catch(() => { tunnelProfiles = []; });
+      .catch(() => { tunnelProfiles = []; catalogProfiles = []; });
     if (options?.duplicateFrom) {
       editing = null;
       cloning = true;
@@ -253,7 +256,7 @@
       id: editing?.id ?? uuidv4(),
       name: name || 'profile',
       group: group.trim() || null,
-      tags: parseTagsInput(tagsText),
+      tags: selectedTags,
       note: note.trim() || null,
       favorite,
       icon: iconKind === 'builtin' ? parseProfileIconInput(iconValue) : iconKind === 'selfhst' ? parseProfileIconInput(`selfhst:${iconValue}`) : (iconValue.trim() ? { kind: iconKind, value: iconValue.trim() } : null),
@@ -493,12 +496,18 @@
         </label>
       </div>
 
-      <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
-      <input id="pm-tags" bind:value={tagsText} placeholder="prod, db, singapore" class="input" />
-      {#if parsedTags.length > 0}
+      <label class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
+      <div class="profile-modal-tag-editor">
+        <ProfileTagEditor
+          {knownTags}
+          selected={selectedTags}
+          onSelectedChange={(tags) => { selectedTags = tags; }}
+        />
+      </div>
+      {#if selectedTags.length > 0}
         <div class="profile-modal-tag-colors mt-1">
           <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.tagColors')}</span>
-          {#each parsedTags as tag (tag)}
+          {#each selectedTags as tag (tag)}
             <div class="profile-modal-color-row">
               <ProfileTag {tag} compact />
               <VisualColorPicker

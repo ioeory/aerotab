@@ -119,6 +119,23 @@ class ProfileVisualsStore {
     await this.save(rpc);
   }
 
+  /** Remap custom group colors when a folder path is renamed. */
+  async renameGroupPaths(rpc: RpcClient, oldPath: string, newPath: string) {
+    const oldKey = normalizeGroupKey(oldPath);
+    const newKey = normalizeGroupKey(newPath);
+    if (!oldKey || !newKey || oldKey === newKey) return;
+    const next: Record<string, string> = {};
+    for (const [key, color] of Object.entries(this.groupColors)) {
+      let remapped = key;
+      if (key === oldKey || key.startsWith(`${oldKey}/`)) {
+        remapped = `${newKey}${key.slice(oldKey.length)}`;
+      }
+      next[remapped] = color;
+    }
+    this.groupColors = next;
+    await this.save(rpc);
+  }
+
   async setShowSshKindBadge(rpc: RpcClient, value: boolean) {
     this.showSshKindBadge = value;
     await this.save(rpc);

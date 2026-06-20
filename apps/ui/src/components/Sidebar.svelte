@@ -7,7 +7,8 @@
   import { tabs } from '../lib/tabs.svelte';
   import { healthIssueDetailText, summarizeHealthResults } from '../lib/profileHealthUi';
   import { focusProfileInTabs } from '../lib/focusProfileSession';
-  import { formatTags, matchesProfileQuery, parseProfileIconInput, parseTagsInput, profileEndpointLabel } from '../lib/profileMeta';
+  import { collectProfileTags, matchesProfileQuery, normalizeTags, parseProfileIconInput, profileEndpointLabel } from '../lib/profileMeta';
+  import ProfileTagPickerPopover from './ProfileTagPickerPopover.svelte';
   import { pickIconFilePath } from '../lib/localFiles';
   import type { ProfileModalOpenOptions } from './ProfileModal.svelte';
   import {
@@ -46,6 +47,9 @@
   import {
     defaultGroupForMove,
     normalizeProfileGroupInput,
+    profilesUnderGroupPath,
+    replaceGroupPathPrefix,
+    resolveRenamedGroupPath,
     upsertProfilesGroup,
   } from '../lib/profileGroupMove';
   import {
@@ -184,6 +188,125 @@
     saveCollapsedPaths(next);
   }
 
+  function migrateCollapsedGroupPaths(oldPrefix: string, newPrefix: string) {
+    const next = new Set<string>();
+    for (const path of collapsedPaths) {
+      next.add(replaceGroupPathPrefix(path, oldPrefix, newPrefix));
+    }
+    collapsedPaths = next;
+    saveCollapsedPaths(next);
+  }
+
+  async function applyGroupPathPrefixChange(source: string, target: string) {
+    bulkBusy = true;
+    try {
+      for (const profile of profilesUnderGroupPath(profiles, source)) {
+        const group = normalizeGroupPath(profile.group);
+        if (!group) continue;
+        const nextGroup = replaceGroupPathPrefix(group, source, target);
+        await rpc.call('profile.upsert', { ...profile, group: nextGroup });
+      }
+      const nextGroups = [...new Set(
+        explicitGroupPaths
+          .map((group) => replaceGroupPathPrefix(group, source, target))
+          .filter(Boolean),
+      )];
+      if (!nextGroups.includes(target)) nextGroups.push(target);
+      await saveExplicitGroups(nextGroups);
+      await profileVisualsStore.renameGroupPaths(rpc, source, target);
+      migrateCollapsedGroupPaths(source, target);
+      expandFoldersForGroup(target);
+      notifyProfilesChanged({ group: target });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function renameGroup(groupPath: string) {
+    startInlineGroupRename(groupPath);
+  }
+
+  function startInlineGroupRename(groupPath: string) {
+    closeMenu();
+    inlineEditGroupPath = groupPath;
+    inlineEditGroupDraft = groupPath.split('/').pop() ?? groupPath;
+  }
+
+  async function commitInlineGroupRename(path: string) {
+    if (inlineEditGroupPath !== path) return;
+    const source = normalizeGroupPath(path);
+    const draft = inlineEditGroupDraft;
+    inlineEditGroupPath = null;
+    if (!source) return;
+    const target = resolveRenamedGroupPath(source, draft);
+    if (!target) {
+      if (draft.trim()) onError(i18n.t('sidebar.renameGroupInvalid'));
+      return;
+    }
+    if (target === source) return;
+    await applyGroupPathPrefixChange(source, target);
+  }
+
+  function cancelInlineGroupRename() {
+    inlineEditGroupPath = null;
+  }
+
+  function menuRenameGroup(groupPath: string) {
+    startInlineGroupRename(groupPath);
+  }
+
+  function startInlineProfileRename(p: StoredProfile) {
+    inlineEditProfileId = p.id;
+    inlineEditProfileDraft = p.name;
+  }
+
+  async function commitInlineProfileRename(p: StoredProfile) {
+    if (inlineEditProfileId !== p.id) return;
+    const trimmed = inlineEditProfileDraft.trim();
+    inlineEditProfileId = null;
+    if (!trimmed || trimmed === p.name) return;
+    try {
+      const fresh = await latestProfile(p);
+      await rpc.call('profile.upsert', { ...fresh, name: trimmed });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+
+  function cancelInlineProfileRename() {
+    inlineEditProfileId = null;
+  }
+
+  function openTagPickerAt(p: StoredProfile, position: { x: number; y: number }) {
+    tagEditSession = {
+      profileId: p.id,
+      tags: normalizeTags(p.tags),
+      x: position.x,
+      y: position.y,
+    };
+  }
+
+  async function saveTagPicker(tags: string[]) {
+    const session = tagEditSession;
+    if (!session) return;
+    tagEditSession = null;
+    const p = profiles.find((profile) => profile.id === session.profileId);
+    if (!p) return;
+    try {
+      const fresh = await latestProfile(p);
+      await rpc.call('profile.upsert', { ...fresh, tags: normalizeTags(tags) });
+      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
+      await refresh();
+    } catch (e) {
+      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
+    }
+  }
+
   export async function refresh() {
     if (profilesRefreshing) return;
     profilesRefreshing = true;
@@ -245,13 +368,13 @@
         void promptEditNote(p);
         break;
       case 'tags':
-        void promptEditTags(p);
+        openTagPickerAt(p, { x: ev.clientX, y: ev.clientY });
         break;
       case 'icon':
         void promptEditIcon(p);
         break;
-      case 'edit':
-        void editProfile(p);
+      case 'rename':
+        startInlineProfileRename(p);
         break;
       case 'sftp':
         openSftp(p);
@@ -297,22 +420,10 @@
     void openProfileViaJump(target, jump);
   }
 
-  async function promptEditTags(p: StoredProfile) {
-    const fresh = await latestProfile(p);
-    const value = await appPrompt(i18n.t('sidebar.editTagsPrompt'), {
-      defaultValue: formatTags(fresh.tags),
-      placeholder: 'prod, db, singapore',
-      confirmLabel: i18n.t('common.save'),
-      position: lastMenuPosition ?? undefined,
-    });
-    if (value === null) return;
-    try {
-      await rpc.call('profile.upsert', { ...fresh, tags: parseTagsInput(value) });
-      notifyProfilesChanged({ profileId: p.id, group: fresh.group });
-      await refresh();
-    } catch (e) {
-      onError(i18n.t('profileModal.saveFailed', { message: (e as Error).message }));
-    }
+  async function menuEditTags(p: StoredProfile, ev: MouseEvent) {
+    setDialogAnchor(ev);
+    closeMenu();
+    openTagPickerAt(p, lastMenuPosition ?? { x: ev.clientX, y: ev.clientY });
   }
 
   async function promptEditNote(p: StoredProfile) {
@@ -399,6 +510,9 @@
   let menuEl = $state<HTMLDivElement | null>(null);
   let jumpSubmenuQuery = $state('');
   let jumpSearchInput: HTMLInputElement | null = null;
+  type SubmenuKey = 'move' | 'tagColors' | 'jump';
+  let activeSubmenu = $state<SubmenuKey | null>(null);
+  let submenuCloseTimer: ReturnType<typeof setTimeout> | null = null;
   let focusedProfileId = $state<string | null>(null);
   let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
   let selectedProfileIds = $state<Set<string>>(new Set());
@@ -406,6 +520,13 @@
   let bulkBusy = $state(false);
   let healthRunning = $state(false);
   let profileHealth = $state<Record<string, ProfileHealthResult>>({});
+  let inlineEditProfileId = $state<string | null>(null);
+  let inlineEditProfileDraft = $state('');
+  let inlineEditGroupPath = $state<string | null>(null);
+  let inlineEditGroupDraft = $state('');
+  let tagEditSession = $state<{ profileId: string; tags: string[]; x: number; y: number } | null>(null);
+
+  const knownProfileTags = $derived(collectProfileTags(profiles));
 
   const bulkOpenDeps = $derived({
     rpc,
@@ -449,6 +570,8 @@
     menuX = ev.clientX;
     menuY = ev.clientY;
     menuOpen = true;
+    activeSubmenu = null;
+    jumpSubmenuQuery = '';
     await tick();
     const clamped = clampMenuToViewport(menuX, menuY, menuEl);
     menuX = clamped.x;
@@ -684,6 +807,38 @@
     menuOpen = false;
     menuTarget = null;
     jumpSubmenuQuery = '';
+    activeSubmenu = null;
+    if (submenuCloseTimer) {
+      clearTimeout(submenuCloseTimer);
+      submenuCloseTimer = null;
+    }
+  }
+
+  function cancelSubmenuClose() {
+    if (submenuCloseTimer) {
+      clearTimeout(submenuCloseTimer);
+      submenuCloseTimer = null;
+    }
+  }
+
+  function scheduleSubmenuClose() {
+    cancelSubmenuClose();
+    submenuCloseTimer = setTimeout(() => {
+      activeSubmenu = null;
+      submenuCloseTimer = null;
+    }, 120);
+  }
+
+  async function openSubmenu(key: SubmenuKey, wrap: HTMLElement, focusJumpSearch = false) {
+    cancelSubmenuClose();
+    activeSubmenu = key;
+    if (key !== 'jump') jumpSubmenuQuery = '';
+    await alignSubmenuFromWrap(wrap, focusJumpSearch);
+  }
+
+  function keepSubmenuOpen(key: SubmenuKey) {
+    cancelSubmenuClose();
+    activeSubmenu = key;
   }
 
   function filteredJumpHosts(target: StoredProfile): Array<StoredProfile & { kind: 'ssh' }> {
@@ -698,8 +853,7 @@
     );
   }
 
-  async function alignSubmenu(ev: MouseEvent, focusJumpSearch = false) {
-    const wrap = ev.currentTarget as HTMLElement;
+  async function alignSubmenuFromWrap(wrap: HTMLElement, focusJumpSearch = false) {
     const trigger = wrap.querySelector(':scope > .menu-item') as HTMLElement | null;
     const panel = wrap.querySelector(':scope > .submenu-panel') as HTMLElement | null;
     if (!trigger || !panel) return;
@@ -714,32 +868,37 @@
       x = rect.left - pw;
     }
     if (y + ph + pad > window.innerHeight) {
-      y = Math.max(pad, window.innerHeight - ph - pad);
+      y = Math.max(pad, rect.bottom - ph);
     }
+    y = Math.max(pad, Math.min(y, window.innerHeight - ph - pad));
     panel.style.left = `${Math.max(pad, x)}px`;
-    panel.style.top = `${Math.max(pad, y)}px`;
+    panel.style.top = `${y}px`;
     if (focusJumpSearch) {
       jumpSearchInput?.focus();
     }
   }
 
-  function realignVisibleSubmenus() {
-    if (!menuEl) return;
-    for (const wrap of menuEl.querySelectorAll<HTMLElement>('.menu-with-submenu:hover')) {
-      const trigger = wrap.querySelector(':scope > .menu-item') as HTMLElement | null;
-      const panel = wrap.querySelector(':scope > .submenu-panel') as HTMLElement | null;
-      if (!trigger || !panel) continue;
-      const rect = trigger.getBoundingClientRect();
-      const pad = 8;
-      const pw = panel.offsetWidth || 260;
-      const ph = panel.offsetHeight || 280;
-      let x = rect.right;
-      let y = rect.top;
-      if (x + pw + pad > window.innerWidth) x = rect.left - pw;
-      if (y + ph + pad > window.innerHeight) y = Math.max(pad, window.innerHeight - ph - pad);
-      panel.style.left = `${Math.max(pad, x)}px`;
-      panel.style.top = `${Math.max(pad, y)}px`;
+
+  function realignActiveSubmenu() {
+    if (!menuEl || !activeSubmenu) return;
+    const wrap = menuEl.querySelector<HTMLElement>(`.menu-with-submenu[data-submenu="${activeSubmenu}"]`);
+    if (!wrap) return;
+    const trigger = wrap.querySelector(':scope > .menu-item') as HTMLElement | null;
+    const panel = wrap.querySelector(':scope > .submenu-panel') as HTMLElement | null;
+    if (!trigger || !panel) return;
+    const rect = trigger.getBoundingClientRect();
+    const pad = 8;
+    const pw = panel.offsetWidth || 260;
+    const ph = panel.offsetHeight || 280;
+    let x = rect.right;
+    let y = rect.top;
+    if (x + pw + pad > window.innerWidth) x = rect.left - pw;
+    if (y + ph + pad > window.innerHeight) {
+      y = Math.max(pad, rect.bottom - ph);
     }
+    y = Math.max(pad, Math.min(y, window.innerHeight - ph - pad));
+    panel.style.left = `${Math.max(pad, x)}px`;
+    panel.style.top = `${y}px`;
   }
 
   function menuFocusables(): HTMLElement[] {
@@ -766,6 +925,19 @@
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       items[(idx - 1 + items.length) % items.length]?.focus();
+    } else if (e.key === 'ArrowRight') {
+      const wrap = active?.closest('.menu-with-submenu') as HTMLElement | null;
+      const key = wrap?.dataset.submenu as SubmenuKey | undefined;
+      if (wrap && key) {
+        e.preventDefault();
+        void openSubmenu(key, wrap, key === 'jump');
+      }
+    } else if (e.key === 'ArrowLeft') {
+      if (activeSubmenu) {
+        e.preventDefault();
+        activeSubmenu = null;
+        cancelSubmenuClose();
+      }
     } else if (e.key === 'Home') {
       e.preventDefault();
       items[0]?.focus();
@@ -810,11 +982,6 @@
   }
   function menuMoveToExistingGroup(p: StoredProfile, group: string | null) {
     void moveProfilesToExistingGroup(profilesToMove(p), group);
-  }
-  async function menuEditTags(p: StoredProfile, ev: MouseEvent) {
-    setDialogAnchor(ev);
-    closeMenu();
-    await promptEditTags(p);
   }
   async function menuEditNote(p: StoredProfile, ev: MouseEvent) {
     setDialogAnchor(ev);
@@ -1017,31 +1184,7 @@
     const name = source.split('/').pop() ?? source;
     const target = targetParent ? `${targetParent}/${name}` : name;
     if (target === source) return;
-    bulkBusy = true;
-    try {
-      const changedProfiles = profiles.filter((p) => {
-        const group = normalizeGroupPath(p.group);
-        return group === source || group?.startsWith(`${source}/`);
-      });
-      for (const profile of changedProfiles) {
-        const group = normalizeGroupPath(profile.group);
-        if (!group) continue;
-        const nextGroup = `${target}${group.slice(source.length)}`;
-        await rpc.call('profile.upsert', { ...profile, group: nextGroup });
-      }
-      const nextGroups = explicitGroupPaths.map((group) => {
-        if (group === source || group.startsWith(`${source}/`)) return `${target}${group.slice(source.length)}`;
-        return group;
-      });
-      await saveExplicitGroups([...nextGroups, target]);
-      expandFoldersForGroup(target);
-      notifyProfilesChanged({ group: target });
-      await refresh();
-    } catch (e) {
-      onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
-    } finally {
-      bulkBusy = false;
-    }
+    await applyGroupPathPrefixChange(source, target);
   }
 
   async function handleDropToGroup(targetGroup: string | null, ev: DragEvent) {
@@ -1251,10 +1394,32 @@
         onFolderDragOver={onFolderDragOver}
         onFolderDrop={onFolderDrop}
         showUngroupedLabel={profileTree.folders.length > 0}
+        inlineEditGroupPath={inlineEditGroupPath}
+        inlineEditGroupDraft={inlineEditGroupDraft}
+        onInlineGroupDraftChange={(value) => { inlineEditGroupDraft = value; }}
+        onInlineGroupRenameCommit={(path) => { void commitInlineGroupRename(path); }}
+        onInlineGroupRenameCancel={cancelInlineGroupRename}
+        onStartInlineGroupRename={startInlineGroupRename}
+        inlineEditProfileId={inlineEditProfileId}
+        inlineEditProfileDraft={inlineEditProfileDraft}
+        onInlineProfileDraftChange={(value) => { inlineEditProfileDraft = value; }}
+        onInlineProfileRenameCommit={(p) => { void commitInlineProfileRename(p); }}
+        onInlineProfileRenameCancel={cancelInlineProfileRename}
       />
     {/if}
   </div>
 </aside>
+
+{#if tagEditSession}
+  <ProfileTagPickerPopover
+    x={tagEditSession.x}
+    y={tagEditSession.y}
+    selected={tagEditSession.tags}
+    knownTags={knownProfileTags}
+    onSave={(tags) => { void saveTagPicker(tags); }}
+    onClose={() => { tagEditSession = null; }}
+  />
+{/if}
 
 {#if menuOpen && menuTarget}
   <div use:portal class="contents">
@@ -1275,7 +1440,7 @@
     class="panel context-menu-scroll fixed z-[56] min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
     style="left: {menuX}px; top: {menuY}px;"
     onkeydown={onContextMenuKeydown}
-    onscroll={realignVisibleSubmenus}
+    onscroll={realignActiveSubmenu}
     onclick={(e) => e.stopPropagation()}
   >
       {#if menuTarget.kind === 'group'}
@@ -1312,20 +1477,32 @@
         />
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={() => menuCreateGroup(groupPath)}>{i18n.t('sidebar.createSubgroup')}</button>
+        <button type="button" class="menu-item" onclick={() => menuRenameGroup(groupPath)}>{i18n.t('sidebar.renameGroup')}</button>
         <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
           {i18n.t('sidebar.newProfileInGroup')}
         </button>
       {:else}
         {@const mp = menuTarget.profile}
         {@const moveCount = selectedProfileIds.has(mp.id) ? selectedProfileIds.size : 1}
-        <div class="menu-with-submenu" onmouseenter={(ev) => { void alignSubmenu(ev); }}>
-          <button type="button" class="menu-item menu-item--submenu" tabindex="0">
+        <div
+          class="menu-with-submenu"
+          data-submenu="move"
+          role="presentation"
+          onmouseenter={(ev) => { void openSubmenu('move', ev.currentTarget as HTMLElement); }}
+          onmouseleave={scheduleSubmenuClose}
+        >
+          <button type="button" class="menu-item menu-item--submenu {activeSubmenu === 'move' ? 'submenu-parent--open' : ''}" tabindex="0">
             <span>{moveCount > 1
               ? i18n.t('sidebar.moveProfilesToGroup', { count: moveCount })
               : i18n.t('sidebar.moveProfileToGroup')}</span>
             <span class="submenu-arrow">›</span>
           </button>
-          <div class="submenu-panel" role="menu">
+          <div
+            class="submenu-panel {activeSubmenu === 'move' ? 'submenu-panel--open' : ''}"
+            role="menu"
+            onmouseenter={() => keepSubmenuOpen('move')}
+            onmouseleave={scheduleSubmenuClose}
+          >
             <button type="button" class="menu-item" onclick={() => menuMoveToExistingGroup(mp, null)}>{i18n.t('sidebar.ungrouped')}</button>
             {#each allGroupPaths as group (group)}
               <button
@@ -1347,12 +1524,23 @@
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={(ev) => { void menuEditTags(mp, ev); }}>{i18n.t('sidebar.editTags')}</button>
         {#if (mp.tags ?? []).length > 0}
-          <div class="menu-with-submenu" onmouseenter={(ev) => { void alignSubmenu(ev); }}>
-            <button type="button" class="menu-item menu-item--submenu" tabindex="0">
+          <div
+            class="menu-with-submenu"
+            data-submenu="tagColors"
+            role="presentation"
+            onmouseenter={(ev) => { void openSubmenu('tagColors', ev.currentTarget as HTMLElement); }}
+            onmouseleave={scheduleSubmenuClose}
+          >
+            <button type="button" class="menu-item menu-item--submenu {activeSubmenu === 'tagColors' ? 'submenu-parent--open' : ''}" tabindex="0">
               <span>{i18n.t('profiles.tagColors')}</span>
               <span class="submenu-arrow">›</span>
             </button>
-            <div class="submenu-panel tag-color-submenu" role="menu">
+            <div
+              class="submenu-panel tag-color-submenu {activeSubmenu === 'tagColors' ? 'submenu-panel--open' : ''}"
+              role="menu"
+              onmouseenter={() => keepSubmenuOpen('tagColors')}
+              onmouseleave={scheduleSubmenuClose}
+            >
               {#each (mp.tags ?? []) as tag (tag)}
                 <div class="menu-tag-color-row">
                   <ProfileTag {tag} compact />
@@ -1400,12 +1588,24 @@
         </button>
         {#if mp.kind === 'ssh'}
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-          <div class="menu-with-submenu" onmouseenter={(ev) => { void alignSubmenu(ev, true); }}>
-            <button type="button" class="menu-item menu-item--submenu" tabindex="0">
+          <div
+            class="menu-with-submenu"
+            data-submenu="jump"
+            role="presentation"
+            onmouseenter={(ev) => { void openSubmenu('jump', ev.currentTarget as HTMLElement, true); }}
+            onmouseleave={scheduleSubmenuClose}
+          >
+            <button type="button" class="menu-item menu-item--submenu {activeSubmenu === 'jump' ? 'submenu-parent--open' : ''}" tabindex="0">
               <span>{i18n.t('sidebar.connectViaJump')}</span>
               <span class="submenu-arrow">›</span>
             </button>
-            <div class="submenu-panel jump-host-submenu" role="menu" onclick={(e) => e.stopPropagation()}>
+            <div
+              class="submenu-panel jump-host-submenu {activeSubmenu === 'jump' ? 'submenu-panel--open' : ''}"
+              role="menu"
+              onmouseenter={() => keepSubmenuOpen('jump')}
+              onmouseleave={scheduleSubmenuClose}
+              onclick={(e) => e.stopPropagation()}
+            >
               <p class="jump-host-hint px-3 pt-1 pb-0 text-[10px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpHint')}</p>
               <div class="jump-host-search px-2 py-1.5">
                 <input
@@ -1415,7 +1615,7 @@
                   placeholder={i18n.t('sidebar.jumpHostSearch')}
                   aria-label={i18n.t('sidebar.jumpHostSearch')}
                   bind:value={jumpSubmenuQuery}
-                  oninput={realignVisibleSubmenus}
+                  oninput={realignActiveSubmenu}
                   onclick={(e) => e.stopPropagation()}
                 />
               </div>
@@ -1499,10 +1699,15 @@
     border-radius: var(--radius-md);
     background: var(--color-panel);
     box-shadow: var(--shadow-lg);
+    pointer-events: none;
   }
-  .menu-with-submenu:hover .submenu-panel,
-  .menu-with-submenu:focus-within .submenu-panel {
+  .submenu-panel--open {
     display: block;
+    pointer-events: auto;
+  }
+  .menu-item--submenu.submenu-parent--open,
+  .menu-with-submenu:focus-within > .menu-item--submenu {
+    background: var(--color-panel-2);
   }
   .group-menu-item {
     padding-left: calc(10px + max(0, var(--group-depth, 1) - 1) * 12px);

@@ -31,6 +31,17 @@
     onFolderDragOver: (folder: ProfileTreeFolder, ev: DragEvent) => void;
     onFolderDrop: (folder: ProfileTreeFolder, ev: DragEvent) => void;
     showUngroupedLabel?: boolean;
+    inlineEditGroupPath?: string | null;
+    inlineEditGroupDraft?: string;
+    onInlineGroupDraftChange?: (value: string) => void;
+    onInlineGroupRenameCommit?: (path: string) => void;
+    onInlineGroupRenameCancel?: () => void;
+    onStartInlineGroupRename?: (path: string) => void;
+    inlineEditProfileId?: string | null;
+    inlineEditProfileDraft?: string;
+    onInlineProfileDraftChange?: (value: string) => void;
+    onInlineProfileRenameCommit?: (p: StoredProfile) => void;
+    onInlineProfileRenameCancel?: () => void;
   }
 
   let {
@@ -56,6 +67,17 @@
     onFolderDragStart,
     onFolderDragOver,
     onFolderDrop,
+    inlineEditGroupPath = null,
+    inlineEditGroupDraft = '',
+    onInlineGroupDraftChange,
+    onInlineGroupRenameCommit,
+    onInlineGroupRenameCancel,
+    onStartInlineGroupRename,
+    inlineEditProfileId = null,
+    inlineEditProfileDraft = '',
+    onInlineProfileDraftChange,
+    onInlineProfileRenameCommit,
+    onInlineProfileRenameCancel,
   }: Props = $props();
 
   function isExpanded(path: string): boolean {
@@ -63,8 +85,16 @@
     return !collapsed.has(path);
   }
 
-  function quickAction(p: StoredProfile, action: ProfileQuickAction, ev: MouseEvent) {
-    onProfileQuickAction?.(p, action, ev);
+  function onGroupRenameKeydown(path: string, ev: KeyboardEvent) {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      onInlineGroupRenameCommit?.(path);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      onInlineGroupRenameCancel?.();
+    }
   }
 </script>
 
@@ -94,15 +124,38 @@
           <ChevronRight size={12} />
         {/if}
       </button>
-      <button
-        type="button"
-        class="profile-group-header flex-1 min-w-0 text-left truncate text-[11px] font-medium text-[var(--color-fg)] cursor-pointer"
+      <div
+        class="profile-group-header-wrap flex-1 min-w-0 flex items-center"
         style={groupStyle(child.path, profileVisualsStore.overrides)}
-        onclick={() => onToggleFolder(child.path)}
       >
         <span class="profile-group-swatch" aria-hidden="true"></span>
-        <span class="truncate">{child.name}</span>
-      </button>
+        {#if inlineEditGroupPath === child.path}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            type="text"
+            class="profile-inline-rename input flex-1 min-w-0 text-[11px] font-medium"
+            value={inlineEditGroupDraft}
+            autofocus
+            onclick={(ev) => ev.stopPropagation()}
+            oninput={(ev) => onInlineGroupDraftChange?.((ev.currentTarget as HTMLInputElement).value)}
+            onkeydown={(ev) => onGroupRenameKeydown(child.path, ev)}
+            onblur={() => onInlineGroupRenameCommit?.(child.path)}
+            aria-label={i18n.t('sidebar.renameGroup')}
+          />
+        {:else}
+          <button
+            type="button"
+            class="profile-group-header flex-1 min-w-0 text-left truncate text-[11px] font-medium text-[var(--color-fg)] cursor-pointer"
+            onclick={() => onToggleFolder(child.path)}
+            ondblclick={(ev) => {
+              ev.stopPropagation();
+              onStartInlineGroupRename?.(child.path);
+            }}
+          >
+            <span class="truncate">{child.name}</span>
+          </button>
+        {/if}
+      </div>
       <span class="ml-auto shrink-0 text-[10px] opacity-70 pr-0.5">
         {child.profiles.length + child.folders.length}
       </span>
@@ -131,6 +184,17 @@
           {onFolderDragStart}
           {onFolderDragOver}
           {onFolderDrop}
+          {inlineEditGroupPath}
+          {inlineEditGroupDraft}
+          {onInlineGroupDraftChange}
+          {onInlineGroupRenameCommit}
+          {onInlineGroupRenameCancel}
+          {onStartInlineGroupRename}
+          {inlineEditProfileId}
+          {inlineEditProfileDraft}
+          {onInlineProfileDraftChange}
+          {onInlineProfileRenameCommit}
+          {onInlineProfileRenameCancel}
         />
       </div>
     {/if}
@@ -159,7 +223,12 @@
     onContextMenu={(ev) => onProfileContextMenu(p, ev)}
     onDragStart={(ev) => onProfileDragStart(p, ev)}
     onKeydown={(ev) => onProfileKeydown(p, ev)}
-    onQuickAction={(action, ev) => quickAction(p, action, ev)}
+    onQuickAction={(action, ev) => onProfileQuickAction?.(p, action, ev)}
+    renaming={inlineEditProfileId === p.id}
+    renameDraft={inlineEditProfileDraft}
+    onRenameDraftChange={onInlineProfileDraftChange}
+    onRenameCommit={() => onInlineProfileRenameCommit?.(p)}
+    onRenameCancel={onInlineProfileRenameCancel}
   />
 {/each}
 
@@ -176,5 +245,13 @@
     background: transparent;
     border: none;
     font: inherit;
+  }
+  .profile-group-header-wrap {
+    gap: 4px;
+    min-width: 0;
+  }
+  .profile-inline-rename {
+    padding: 1px 4px;
+    height: 20px;
   }
 </style>

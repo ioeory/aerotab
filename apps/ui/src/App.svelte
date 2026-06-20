@@ -50,7 +50,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.10-ui-20260526';
+  const buildId = '0.2.12-ui-20260607';
   type SettingsSectionId =
     | 'application'
     | 'appearance'

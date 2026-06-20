@@ -98,8 +98,25 @@ export function parseTagsInput(text: string): string[] {
   return normalizeTags(text.split(/[\n,;]+/));
 }
 
-export function formatTags(tags: string[] | null | undefined): string {
-  return normalizeTags(tags).join(', ');
+export function collectProfileTags(profiles: StoredProfile[]): string[] {
+  const seen = new Map<string, string>();
+  for (const profile of profiles) {
+    for (const tag of normalizeTags(profile.tags)) {
+      const key = tag.toLowerCase();
+      if (!seen.has(key)) seen.set(key, tag);
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+export function toggleProfileTag(selected: string[], tag: string): string[] {
+  const trimmed = tag.trim();
+  if (!trimmed) return selected;
+  const key = trimmed.toLowerCase();
+  if (selected.some((t) => t.toLowerCase() === key)) {
+    return selected.filter((t) => t.toLowerCase() !== key);
+  }
+  return normalizeTags([...selected, trimmed]);
 }
 
 /** Internal bucket key for profiles without an explicit group. */
