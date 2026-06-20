@@ -294,16 +294,7 @@
     try {
       let meta: { id: string; kind: string; title: string };
       let next: SessionMeta;
-      if (session.profileId) {
-        meta = await rpc.call('session.openSshProfile', { profile_id: session.profileId });
-        next = {
-          id: meta.id,
-          kind: meta.kind,
-          title: meta.title,
-          profileId: session.profileId,
-          sshProfile: session.sshProfile,
-        };
-      } else if (session.sshProfile) {
+      if (session.sshProfile) {
         meta = await rpc.call('session.openSsh', {
           title: session.title,
           profile: session.sshProfile,
@@ -312,7 +303,16 @@
           id: meta.id,
           kind: meta.kind,
           title: meta.title,
+          profileId: session.profileId,
           sshProfile: session.sshProfile,
+        };
+      } else if (session.profileId) {
+        meta = await rpc.call('session.openSshProfile', { profile_id: session.profileId });
+        next = {
+          id: meta.id,
+          kind: meta.kind,
+          title: meta.title,
+          profileId: session.profileId,
         };
       } else {
         return;

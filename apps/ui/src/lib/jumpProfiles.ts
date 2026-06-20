@@ -153,21 +153,17 @@ function hopMatches(a: SshProfileSpec, b: SshProfileSpec): boolean {
   return a.host === b.host && a.port === b.port && a.user === b.user;
 }
 
-/** One-time SSH spec: connect to `target` via `jump` as the first hop. */
+/** One-time SSH spec: connect to `target` only via `jump` (ignores saved ProxyJump). */
 export function profileSpecViaJump(
   target: StoredProfile & { kind: 'ssh' },
   jump: StoredProfile & { kind: 'ssh' },
   profiles: StoredProfile[],
 ): SshProfileSpec {
   const hop = parseJumpLine(jumpLineForProfile(jump), target.ssh.auth, profiles);
-  const existing = target.ssh.jump_via ?? [];
-  if (
-    hopMatches(hop, target.ssh)
-    || existing.some((h) => hopMatches(h, hop))
-  ) {
-    return { ...target.ssh };
+  if (hopMatches(hop, target.ssh)) {
+    return { ...target.ssh, jump_via: [] };
   }
-  return { ...target.ssh, jump_via: [hop, ...existing] };
+  return { ...target.ssh, jump_via: [hop] };
 }
 
 /** SSH profiles that can be selected as a one-time jump host for `target`. */

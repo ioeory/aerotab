@@ -263,23 +263,26 @@
     jump: StoredProfile,
     mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab',
   ) {
-    if (target.kind !== 'ssh' || jump.kind !== 'ssh') return;
+    const freshTarget = await latestProfile(target);
+    const freshJump = profiles.find((p) => p.id === jump.id) ?? jump;
+    if (freshTarget.kind !== 'ssh' || freshJump.kind !== 'ssh') return;
     try {
-      const profile = profileSpecViaJump(target, jump, profiles);
+      const profile = profileSpecViaJump(freshTarget, freshJump, profiles);
       const meta = await rpc.call<SessionMeta>('session.openSsh', {
-        title: target.name,
+        title: freshTarget.name,
         rows: 24,
         cols: 80,
         profile,
       });
       const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
+      const paneMeta = { ...meta, profileId: freshTarget.id, sshProfile: profile };
       if (mode !== 'new-tab' && activeTab) {
-        tabs.addPane(activeTab.id, { ...meta, profileId: target.id, sshProfile: profile }, mode === 'split-down' ? 'col' : 'row');
+        tabs.addPane(activeTab.id, paneMeta, mode === 'split-down' ? 'col' : 'row');
       } else {
-        tabs.add({ ...meta, profileId: target.id, sshProfile: profile });
+        tabs.add(paneMeta);
       }
     } catch (e) {
-      onError(`ssh ${target.name} via ${jump.name}: ${(e as Error).message}`);
+      onError(`ssh ${freshTarget.name} via ${freshJump.name}: ${(e as Error).message}`);
     }
   }
 
@@ -394,6 +397,8 @@
   let menuTarget = $state<SidebarMenu | null>(null);
   let menuEl = $state<HTMLDivElement | null>(null);
   let jumpSubmenuQuery = $state('');
+  let submenuLeft = $state(8);
+  let submenuTop = $state(8);
   let focusedProfileId = $state<string | null>(null);
   let focusedGroupPath = $state<string | null>(null);
   let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
@@ -688,6 +693,28 @@
         .toLowerCase()
         .includes(needle),
     );
+  }
+
+  async function alignSubmenu(ev: MouseEvent) {
+    const wrap = ev.currentTarget as HTMLElement;
+    const trigger = wrap.querySelector(':scope > .menu-item') as HTMLElement | null;
+    const panel = wrap.querySelector(':scope > .submenu-panel') as HTMLElement | null;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    await tick();
+    const pad = 8;
+    const pw = panel?.offsetWidth ?? 260;
+    const ph = panel?.offsetHeight ?? 280;
+    let x = rect.right;
+    let y = rect.top;
+    if (x + pw + pad > window.innerWidth) {
+      x = rect.left - pw;
+    }
+    if (y + ph + pad > window.innerHeight) {
+      y = Math.max(pad, window.innerHeight - ph - pad);
+    }
+    submenuLeft = Math.max(pad, x);
+    submenuTop = Math.max(pad, y);
   }
 
   function menuOpenInNewTab(p: StoredProfile) {
@@ -1187,7 +1214,7 @@
     tabindex="-1"
     data-aerotab-context-menu=""
     class="panel context-menu-scroll fixed z-[56] min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
-    style="left: {menuX}px; top: {menuY}px; --submenu-x: {menuX}px; --submenu-y: {menuY}px;"
+    style="left: {menuX}px; top: {menuY}px;"
     onkeydown={(e) => e.stopPropagation()}
     onclick={(e) => e.stopPropagation()}
   >
@@ -1231,14 +1258,14 @@
       {:else}
         {@const mp = menuTarget.profile}
         {@const moveCount = selectedProfileIds.has(mp.id) ? selectedProfileIds.size : 1}
-        <div class="menu-with-submenu">
+        <div class="menu-with-submenu" onmouseenter={alignSubmenu}>
           <button type="button" class="menu-item menu-item--submenu" onclick={() => menuMoveToGroup(mp)}>
             <span>{moveCount > 1
               ? i18n.t('sidebar.moveProfilesToGroup', { count: moveCount })
               : i18n.t('sidebar.moveProfileToGroup')}</span>
             <span class="submenu-arrow">›</span>
           </button>
-          <div class="submenu-panel" role="menu">
+          <div class="submenu-panel" role="menu" style="left: {submenuLeft}px; top: {submenuTop}px;">
             <button type="button" class="menu-item" onclick={() => menuMoveToExistingGroup(mp, null)}>{i18n.t('sidebar.ungrouped')}</button>
             {#each allGroupPaths as group (group)}
               <button
@@ -1256,12 +1283,12 @@
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={(ev) => { void menuEditTags(mp, ev); }}>{i18n.t('sidebar.editTags')}</button>
         {#if (mp.tags ?? []).length > 0}
-          <div class="menu-with-submenu">
+          <div class="menu-with-submenu" onmouseenter={alignSubmenu}>
             <button type="button" class="menu-item menu-item--submenu">
               <span>{i18n.t('profiles.tagColors')}</span>
               <span class="submenu-arrow">›</span>
             </button>
-            <div class="submenu-panel tag-color-submenu" role="menu">
+            <div class="submenu-panel tag-color-submenu" role="menu" style="left: {submenuLeft}px; top: {submenuTop}px;">
               {#each (mp.tags ?? []) as tag (tag)}
                 <div class="menu-tag-color-row">
                   <ProfileTag {tag} compact />
@@ -1309,12 +1336,12 @@
         </button>
         {#if mp.kind === 'ssh'}
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-          <div class="menu-with-submenu">
+          <div class="menu-with-submenu" onmouseenter={alignSubmenu}>
             <button type="button" class="menu-item menu-item--submenu">
               <span>{i18n.t('sidebar.connectViaJump')}</span>
               <span class="submenu-arrow">›</span>
             </button>
-            <div class="submenu-panel jump-host-submenu" role="menu" onclick={(e) => e.stopPropagation()}>
+            <div class="submenu-panel jump-host-submenu" role="menu" style="left: {submenuLeft}px; top: {submenuTop}px;" onclick={(e) => e.stopPropagation()}>
               <div class="jump-host-search px-2 py-1.5">
                 <input
                   type="search"
@@ -1394,8 +1421,6 @@
   .submenu-panel {
     display: none;
     position: fixed;
-    left: min(calc(var(--submenu-x, 0px) + 220px), calc(100vw - 240px));
-    top: max(8px, min(var(--submenu-y, 0px), calc(100vh - 320px)));
     z-index: 57;
     min-width: 220px;
     max-width: min(320px, calc(100vw - 24px));
