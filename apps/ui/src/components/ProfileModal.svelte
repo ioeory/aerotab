@@ -1,16 +1,16 @@
 <script lang="ts">
-  import { ChevronDown, ChevronUp, FolderOpen, X } from '@lucide/svelte';
+  import { FolderOpen, X } from '@lucide/svelte';
   import { pickIconFilePath, pickPrivateKeyPath } from '../lib/localFiles';
   import type { RpcClient } from '../lib/rpc';
   import { uuidv4 } from '../lib/rpc';
   import type { RemoteDesktopSpec, StoredProfile, SshAuth, SshProfileSpec } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
   import {
-    appendJumpProfileLines,
     formatJumpLinesForEdit,
+    joinJumpLines,
     loadProfilesForJumps,
     parseJumpLines,
-    profilesInSelectionOrder,
+    splitJumpLines,
   } from '../lib/jumpProfiles';
   import { defaultPortForKind } from '../lib/profileDefaults';
   import {
@@ -18,10 +18,10 @@
     formatTags,
     parseProfileIconInput,
     parseTagsInput,
-    profileEndpointLabel,
     suggestDuplicateProfileName,
   } from '../lib/profileMeta';
   import { notifyProfilesChanged } from '../lib/profileEvents';
+  import JumpChainEditor from './JumpChainEditor.svelte';
   import ProfileIcon from './ProfileIcon.svelte';
 
   interface Props {
@@ -57,14 +57,8 @@
   let vaultPassphraseEntryId = $state('');
   let vaultEntries = $state<Array<{ id: string; label: string; kind: string }>>([]);
   let vaultUnlocked = $state(false);
-  /** One bastion per line: `@ProfileName` or `user@host[:port]`. */
-  let jumpsText = $state('');
-  /** Profile ids selected for append, in hop order (first = first line / first hop). */
-  let jumpPickerOrder = $state<string[]>([]);
-
-  const jumpPickProfiles = $derived(
-    tunnelProfiles.filter((p) => p.kind === 'ssh' && p.id !== editing?.id),
-  );
+  /** Ordered ProxyJump lines (`@ProfileName` or `user@host[:port]`). */
+  let jumpChainLines = $state<string[]>([]);
 
   function loadRemoteFields(spec: RemoteDesktopSpec) {
     host = spec.host;
@@ -75,7 +69,7 @@
     password = '';
     keyPath = '';
     keyPassphrase = '';
-    jumpsText = '';
+    jumpChainLines = [];
   }
 
   async function refreshVaultEntries() {
@@ -115,7 +109,7 @@
       host = existing.ssh.host;
       port = existing.ssh.port;
       user = existing.ssh.user;
-      jumpsText = formatJumpLinesForEdit(existing.ssh.jump_via ?? [], profiles);
+      jumpChainLines = splitJumpLines(formatJumpLinesForEdit(existing.ssh.jump_via ?? [], profiles));
       remoteSshProfileId = '';
       localBindPort = '';
       if (typeof existing.ssh.auth === 'object' && 'Password' in existing.ssh.auth) {
@@ -162,7 +156,7 @@
       keyPassphrase = '';
       vaultEntryId = '';
       vaultPassphraseEntryId = '';
-      jumpsText = '';
+      jumpChainLines = [];
       authKind = 'password';
     }
   }
@@ -185,7 +179,7 @@
     keyPassphrase = '';
     vaultEntryId = '';
     vaultPassphraseEntryId = '';
-    jumpsText = '';
+    jumpChainLines = [];
     remoteSshProfileId = '';
     localBindPort = '';
   }
@@ -193,7 +187,6 @@
   export function open(existing?: StoredProfile, options?: ProfileModalOpenOptions) {
     cloning = false;
     editing = existing ?? null;
-    jumpPickerOrder = [];
     void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
       .then((list) => {
@@ -222,41 +215,6 @@
 
   function close() {
     dialog?.close();
-  }
-
-  function toggleJumpPicker(id: string) {
-    if (jumpPickerOrder.includes(id)) {
-      jumpPickerOrder = jumpPickerOrder.filter((x) => x !== id);
-    } else {
-      jumpPickerOrder = [...jumpPickerOrder, id];
-    }
-  }
-
-  function moveJumpPicker(id: string, delta: -1 | 1) {
-    const i = jumpPickerOrder.indexOf(id);
-    if (i < 0) return;
-    const j = i + delta;
-    if (j < 0 || j >= jumpPickerOrder.length) return;
-    const next = jumpPickerOrder.slice();
-    const [item] = next.splice(i, 1);
-    if (!item) return;
-    next.splice(j, 0, item);
-    jumpPickerOrder = next;
-  }
-
-  function removeJumpPicker(id: string) {
-    jumpPickerOrder = jumpPickerOrder.filter((x) => x !== id);
-  }
-
-  function clearJumpPicker() {
-    jumpPickerOrder = [];
-  }
-
-  function appendJumpPickerSelection() {
-    const picked = profilesInSelectionOrder(jumpPickProfiles, jumpPickerOrder);
-    if (picked.length === 0) return;
-    jumpsText = appendJumpProfileLines(jumpsText, picked);
-    jumpPickerOrder = [];
   }
 
   async function chooseIconFile() {
@@ -313,7 +271,7 @@
       let jump_via: SshProfileSpec[];
       try {
         const profiles = await loadProfilesForJumps(rpc);
-        jump_via = parseJumpLines(jumpsText, auth, profiles);
+        jump_via = parseJumpLines(joinJumpLines(jumpChainLines), auth, profiles);
       } catch (e) {
         onError((e as Error).message);
         return;
@@ -345,7 +303,7 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="min-w-[420px]" onclose={() => onClosed?.()}>
+<dialog bind:this={dialog} class="min-w-[min(480px,96vw)] max-w-[min(560px,96vw)]" onclose={() => onClosed?.()}>
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-3">
       <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">
@@ -499,116 +457,17 @@
         <input id="pm-keypass" type="password" bind:value={keyPassphrase} class="input" />
       {/if}
 
-      <label for="pm-jumps" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
+      <div class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">
         {i18n.t('profileModal.proxyJump')}
-      </label>
-      {#if jumpPickProfiles.length > 0}
-        <div class="jump-picker mt-2 border border-[var(--color-border-soft)] rounded-md overflow-hidden">
-          <div class="px-2 py-1.5 text-[10.5px] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
-            {i18n.t('profileModal.jumpPickFromList')}
-          </div>
-          <div class="jump-picker-list max-h-[140px] overflow-y-auto px-1 py-1">
-            {#each jumpPickProfiles as jp (jp.id)}
-              {@const pickIdx = jumpPickerOrder.indexOf(jp.id)}
-              <label class="jump-picker-row flex items-start gap-2 px-2 py-1 rounded hover:bg-[var(--color-panel-2)] cursor-pointer text-[11.5px]">
-                <input
-                  type="checkbox"
-                  class="mt-0.5 shrink-0"
-                  checked={pickIdx >= 0}
-                  onchange={() => toggleJumpPicker(jp.id)}
-                />
-                <span class="min-w-0 flex-1">
-                  <span class="flex items-center gap-1.5">
-                    {#if pickIdx >= 0}
-                      <span class="shrink-0 min-w-[1.25rem] text-center text-[10px] font-medium text-[var(--color-accent)]">
-                        {pickIdx + 1}
-                      </span>
-                    {/if}
-                    <span class="truncate text-[var(--color-fg)]">{jp.name}</span>
-                  </span>
-                  <span class="block truncate text-[10px] text-[var(--color-fg-muted)] pl-0 {pickIdx >= 0 ? 'ml-[1.6rem]' : ''}">
-                    {profileEndpointLabel(jp)}
-                  </span>
-                </span>
-              </label>
-            {/each}
-          </div>
-          {#if jumpPickerOrder.length > 0}
-            <div class="px-2 py-1.5 border-t border-[var(--color-border-soft)] bg-[var(--color-panel)]">
-              <div class="text-[10px] text-[var(--color-fg-muted)] mb-1">
-                {i18n.t('profileModal.jumpSelectionOrderHint')}
-              </div>
-              <ol class="space-y-0.5 mb-1.5 list-none p-0 m-0">
-                {#each jumpPickerOrder as pid, hopIndex (pid)}
-                  {@const jp = jumpPickProfiles.find((p) => p.id === pid)}
-                  {#if jp}
-                    <li class="flex items-center gap-1 text-[11px]">
-                      <span class="w-4 shrink-0 text-[var(--color-accent)] font-medium">{hopIndex + 1}</span>
-                      <span class="min-w-0 flex-1 truncate">{jp.name}</span>
-                      <button
-                        type="button"
-                        class="btn-ghost p-0.5"
-                        disabled={hopIndex === 0}
-                        title={i18n.t('profileModal.jumpMoveUp')}
-                        aria-label={i18n.t('profileModal.jumpMoveUp')}
-                        onclick={(e) => { e.preventDefault(); moveJumpPicker(pid, -1); }}
-                      >
-                        <ChevronUp size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        class="btn-ghost p-0.5"
-                        disabled={hopIndex === jumpPickerOrder.length - 1}
-                        title={i18n.t('profileModal.jumpMoveDown')}
-                        aria-label={i18n.t('profileModal.jumpMoveDown')}
-                        onclick={(e) => { e.preventDefault(); moveJumpPicker(pid, 1); }}
-                      >
-                        <ChevronDown size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        class="btn-ghost p-0.5 text-[var(--color-danger)]"
-                        title={i18n.t('profileModal.jumpRemoveFromSelection')}
-                        aria-label={i18n.t('profileModal.jumpRemoveFromSelection')}
-                        onclick={(e) => { e.preventDefault(); removeJumpPicker(pid); }}
-                      >
-                        <X size={14} />
-                      </button>
-                    </li>
-                  {/if}
-                {/each}
-              </ol>
-            </div>
-          {/if}
-          <div class="px-2 py-1.5 border-t border-[var(--color-border-soft)] flex justify-end gap-1.5">
-            {#if jumpPickerOrder.length > 0}
-              <button
-                type="button"
-                class="btn-secondary text-[11px] py-0.5 px-2"
-                onclick={clearJumpPicker}
-              >
-                {i18n.t('profileModal.jumpClearSelection')}
-              </button>
-            {/if}
-            <button
-              type="button"
-              class="btn-secondary text-[11px] py-0.5 px-2"
-              disabled={jumpPickerOrder.length === 0}
-              onclick={appendJumpPickerSelection}
-            >
-              {i18n.t('profileModal.jumpAddSelected')}
-            </button>
-          </div>
-        </div>
-      {/if}
-      <textarea
-        id="pm-jumps"
-        bind:value={jumpsText}
-        rows="2"
-        placeholder="jumpuser@bastion.example.com&#10;@prod-bastion"
-        class="input font-mono text-[11.5px] mt-2"
-      ></textarea>
-      <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">{i18n.t('profileModal.proxyJumpProfileRef')}</p>
+      </div>
+      {#key editing?.id ?? 'new'}
+        <JumpChainEditor
+          profiles={tunnelProfiles}
+          excludeProfileId={editing?.id}
+          bind:jumpChainLines
+          onError={onError}
+        />
+      {/key}
     {:else}
       <label for="pm-tunnel" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.sshTunnel')}</label>
       <select id="pm-tunnel" bind:value={remoteSshProfileId} class="input">

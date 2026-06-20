@@ -81,9 +81,89 @@ export function parseJumpLines(
     .map((line) => parseJumpLine(line, auth, profiles));
 }
 
+export function splitJumpLines(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}
+
+export function joinJumpLines(lines: string[]): string {
+  return lines.join('\n');
+}
+
+/** Whether a saved profile is already referenced in the jump chain. */
+export function isProfileInJumpChain(profile: StoredProfile, chain: string[]): boolean {
+  if (profile.kind !== 'ssh') return false;
+  const byName = jumpLineForProfile(profile).toLowerCase();
+  const byId = `@${profile.id}`.toLowerCase();
+  return chain.some((line) => {
+    const lower = line.toLowerCase();
+    return lower === byName || lower === byId;
+  });
+}
+
+/** Display title for one jump chain line in the editor. */
+export function jumpLineTitle(line: string, profiles: StoredProfile[]): string {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('@')) return trimmed;
+  const ref = trimmed.slice(1).trim();
+  const hit = profiles.find((p) => p.id === ref || p.name === ref);
+  if (hit && hit.kind === 'ssh') return hit.name;
+  return ref;
+}
+
+/** Endpoint subtitle for one jump chain line. */
+export function jumpLineSubtitle(line: string, profiles: StoredProfile[]): string {
+  const trimmed = line.trim();
+  if (trimmed.startsWith('@')) {
+    const ref = trimmed.slice(1).trim();
+    const hit = profiles.find((p) => p.id === ref || p.name === ref);
+    if (hit && hit.kind === 'ssh') {
+      const portSuffix = hit.ssh.port === 22 ? '' : `:${hit.ssh.port}`;
+      return `${hit.ssh.user}@${hit.ssh.host}${portSuffix}`;
+    }
+    return trimmed;
+  }
+  return trimmed;
+}
+
+/** Match profile against picker search (name, group, host, port, user, tags). */
+export function profileMatchesJumpSearch(profile: StoredProfile, query: string): boolean {
+  if (profile.kind !== 'ssh') return false;
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  const hay = [
+    profile.name,
+    profile.group ?? '',
+    profile.ssh.host,
+    String(profile.ssh.port),
+    profile.ssh.user,
+    ...(profile.tags ?? []),
+  ].join(' ').toLowerCase();
+  return hay.includes(needle);
+}
+
 /** Format a saved SSH profile as a ProxyJump line (`@Name`). */
 export function jumpLineForProfile(profile: StoredProfile): string {
   return `@${profile.name}`;
+}
+
+export function reorderJumpLines(lines: string[], from: number, to: number): string[] {
+  if (from === to || from < 0 || to < 0 || from >= lines.length || to >= lines.length) return lines;
+  const next = lines.slice();
+  const [item] = next.splice(from, 1);
+  if (!item) return lines;
+  next.splice(to, 0, item);
+  return next;
+}
+
+export function formatManualJumpLine(user: string, host: string, port: number): string {
+  const u = user.trim();
+  const h = host.trim();
+  const p = Number(port) || 22;
+  if (!u || !h) throw new Error('jump host requires user and host');
+  return `${u}@${h}${p === 22 ? '' : `:${p}`}`;
 }
 
 /** Resolve profiles in the given id order (skips unknown ids). */
