@@ -170,8 +170,9 @@
     ev.stopPropagation();
     focusPane();
     rememberActionPosition(ev);
-    if (!selectedNames.has(entry.name)) selectEntry(entry);
+    selectedNames = new Set([entry.name]);
     focusedName = entry.name;
+    lastSelectedName = entry.name;
     menuEntry = entry;
     menuOpen = true;
     menuX = Math.min(ev.clientX, window.innerWidth - 190);
@@ -304,6 +305,9 @@
     focusPane();
     rememberActionPosition(e);
     menuEntry = null;
+    focusedName = null;
+    lastSelectedName = null;
+    selectedNames = new Set();
     menuOpen = true;
     menuX = Math.min(e.clientX, window.innerWidth - 190);
     menuY = Math.min(e.clientY, window.innerHeight - 170);

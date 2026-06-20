@@ -85,8 +85,60 @@ fn vault_err(e: VaultError) -> SshError {
     }
 }
 
+/// Normalize private key text from vault storage (line endings, escaped newlines).
+fn normalize_vault_private_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let unescaped = if trimmed.contains("\\n") && !trimmed.contains('\n') {
+        trimmed.replace("\\n", "\n")
+    } else {
+        trimmed.to_string()
+    };
+    let normalized = unescaped.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.ends_with('\n') {
+        normalized
+    } else {
+        format!("{normalized}\n")
+    }
+}
+
 fn write_temp_key(pem: &str) -> Result<PathBuf, SshError> {
-    let path = std::env::temp_dir().join(format!("aerotab-vault-key-{}.pem", Uuid::new_v4()));
-    std::fs::write(&path, pem.as_bytes()).map_err(|e| SshError::Io(e.to_string()))?;
+    let path = std::env::temp_dir().join(format!("aerotab-vault-key-{}", Uuid::new_v4()));
+    let normalized = normalize_vault_private_key(pem);
+    std::fs::write(&path, normalized.as_bytes()).map_err(|e| SshError::Io(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| SshError::Io(e.to_string()))?;
+    }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_vault_private_key_unescapes_literal_newlines() {
+        let raw = "-----BEGIN OPENSSH PRIVATE KEY-----\\nLINE\\n-----END OPENSSH PRIVATE KEY-----";
+        let out = normalize_vault_private_key(raw);
+        assert!(out.contains('\n'));
+        assert!(!out.contains("\\n"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn normalize_vault_private_key_preserves_real_newlines() {
+        let raw = "-----BEGIN OPENSSH PRIVATE KEY-----\nLINE\n-----END OPENSSH PRIVATE KEY-----\n";
+        let out = normalize_vault_private_key(raw);
+        assert_eq!(out.matches('\n').count(), 3);
+    }
+
+    #[test]
+    fn normalize_vault_private_key_normalizes_crlf() {
+        let raw = "-----BEGIN RSA PRIVATE KEY-----\r\nBODY\r\n-----END RSA PRIVATE KEY-----";
+        let out = normalize_vault_private_key(raw);
+        assert!(!out.contains('\r'));
+        assert!(out.ends_with('\n'));
+    }
 }

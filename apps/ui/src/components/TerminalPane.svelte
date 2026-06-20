@@ -1,3 +1,47 @@
+<script module lang="ts">
+  const HIDDEN_OUTPUT_REPLAY_LIMIT = 256 * 1024;
+  const VISIBLE_OUTPUT_MAX_CHUNKS = 256;
+  const INTERRUPT_OUTPUT_MAX_CHUNKS = 32;
+  const HIDDEN_OUTPUT_MAX_CHUNKS = 32;
+  const OUTPUT_CATCHUP_DELAY_MS = 8;
+  const INTERRUPT_CATCHUP_DELAY_MS = 16;
+  const INTERRUPT_OUTPUT_COOLDOWN_MS = 700;
+  interface ReplayChunk { seq: number; bytes: Uint8Array }
+
+  const sessionReplay = new Map<string, ReplayChunk[]>();
+  const sessionReplayBytes = new Map<string, number>();
+  const sessionReplaySeq = new Map<string, number>();
+
+  function appendReplayChunk(sessionId: string, bytes: Uint8Array): number {
+    if (bytes.byteLength === 0) return sessionReplaySeq.get(sessionId) ?? 0;
+    const chunks = sessionReplay.get(sessionId) ?? [];
+    const seq = (sessionReplaySeq.get(sessionId) ?? 0) + 1;
+    sessionReplaySeq.set(sessionId, seq);
+    chunks.push({ seq, bytes });
+    let total = (sessionReplayBytes.get(sessionId) ?? 0) + bytes.byteLength;
+    while (total > HIDDEN_OUTPUT_REPLAY_LIMIT && chunks.length > 1) {
+      total -= chunks.shift()?.bytes.byteLength ?? 0;
+    }
+    sessionReplay.set(sessionId, chunks);
+    sessionReplayBytes.set(sessionId, total);
+    return seq;
+  }
+
+  function cachedReplayChunks(sessionId: string): ReplayChunk[] {
+    return sessionReplay.get(sessionId) ?? [];
+  }
+
+  function replayChunksAfter(sessionId: string, seq: number): ReplayChunk[] {
+    return cachedReplayChunks(sessionId).filter((chunk) => chunk.seq > seq);
+  }
+
+  function dropReplayChunks(sessionId: string) {
+    sessionReplay.delete(sessionId);
+    sessionReplayBytes.delete(sessionId);
+    sessionReplaySeq.delete(sessionId);
+  }
+</script>
+
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import { SESSIONS_CLOSING, type SessionsClosingDetail } from '../lib/sessionLifecycle';
@@ -44,7 +88,7 @@
     active: boolean;
     /** False while pane is hidden by maximize (display:none); avoids fit() at zero size. */
     layoutVisible?: boolean;
-    /** False when this pane's tab is not the active tab (stops output polling). */
+    /** False when this pane's tab is not the active tab (drains output without rendering). */
     tabVisible?: boolean;
     /** Bumped by parent whenever persisted settings change. */
     settingsRev?: number;
@@ -87,6 +131,10 @@
   let engineCanvas: HTMLCanvasElement | null = null;
   let pollHandle: number | null = null;
   let pollIntervalMs = 0;
+  let pollInFlight = false;
+  let lastTabVisibleForReplay = false;
+  let replayCursorSeq = 0;
+  let interruptOutputCooldownUntil = 0;
   /** Bumped to drop in-flight `session.poll` results when the pane or tab is closing. */
   let pollEpoch = 0;
   let documentHidden = $state(false);
@@ -145,6 +193,28 @@
   );
 
   interface PollResult { chunks: string[]; alive: boolean }
+
+  function pollMaxChunks(): number {
+    if (!tabVisible) return HIDDEN_OUTPUT_MAX_CHUNKS;
+    if (performance.now() < interruptOutputCooldownUntil) return INTERRUPT_OUTPUT_MAX_CHUNKS;
+    return VISIBLE_OUTPUT_MAX_CHUNKS;
+  }
+
+  function pollCatchupDelay(): number {
+    if (performance.now() < interruptOutputCooldownUntil) return INTERRUPT_CATCHUP_DELAY_MS;
+    return OUTPUT_CATCHUP_DELAY_MS;
+  }
+
+  function replayCachedOutput(sessionId: string, replace = false) {
+    if (!term) return;
+    const chunks = replace ? cachedReplayChunks(sessionId) : replayChunksAfter(sessionId, replayCursorSeq);
+    if (!chunks || chunks.length === 0) return;
+    if (replace) term.clear();
+    for (const chunk of chunks) {
+      term.write(chunk.bytes);
+      replayCursorSeq = chunk.seq;
+    }
+  }
 
   function markExited() {
     if (exited) return;
@@ -266,26 +336,32 @@
     stopPolling();
   }
 
-  async function pollOnce() {
-    if (!term) return;
+  async function pollOnce(): Promise<boolean> {
+    if (!term) return false;
     const epoch = pollEpoch;
+    const maxChunks = pollMaxChunks();
     try {
       const r = await rpc.call<PollResult>('session.poll', {
         id: session.id,
-        max_chunks: 64,
+        max_chunks: maxChunks,
       });
-      if (epoch !== pollEpoch || !term) return;
+      if (epoch !== pollEpoch || !term) return false;
       for (const c of r.chunks) {
         const bytes = b64decode(c);
         const text = decoder.decode(bytes);
         inspectTransferOutput(text);
-        processSessionOutput(bytes, text);
+        const replaySeq = appendReplayChunk(session.id, bytes);
+        if (tabVisible) {
+          processSessionOutput(bytes, text);
+          replayCursorSeq = replaySeq;
+        }
       }
       if (r.chunks.length > 0 && !active) tabs.markActivity(session.id, 'output');
       if (!r.alive && !exited) {
         markExited();
         stopPolling();
       }
+      return tabVisible && r.alive && r.chunks.length >= maxChunks;
     } catch (e) {
       const msg = (e as Error).message ?? String(e);
       if (msg.toLowerCase().includes('not found')) {
@@ -293,7 +369,20 @@
       } else {
         console.warn('poll', session.id, e);
       }
+      return false;
     }
+  }
+
+  function schedulePoll(delayMs: number) {
+    if (pollIntervalMs <= 0 || pollHandle != null || pollInFlight) return;
+    pollHandle = window.setTimeout(async () => {
+      pollHandle = null;
+      pollInFlight = true;
+      const caughtUp = await pollOnce();
+      pollInFlight = false;
+      if (pollIntervalMs <= 0) return;
+      schedulePoll(caughtUp ? pollCatchupDelay() : pollIntervalMs);
+    }, delayMs);
   }
 
   function startPolling(intervalMs: number) {
@@ -301,17 +390,15 @@
       stopPolling();
       return;
     }
-    if (pollHandle != null && pollIntervalMs === intervalMs) return;
+    if ((pollHandle != null || pollInFlight) && pollIntervalMs === intervalMs) return;
     stopPolling();
     pollIntervalMs = intervalMs;
-    pollHandle = window.setInterval(() => {
-      void pollOnce();
-    }, intervalMs);
+    schedulePoll(0);
   }
 
   function stopPolling() {
     if (pollHandle != null) {
-      window.clearInterval(pollHandle);
+      window.clearTimeout(pollHandle);
       pollHandle = null;
     }
     pollIntervalMs = 0;
@@ -495,20 +582,30 @@
     return encoder.encode(String(input));
   }
 
+  async function sendSessionBytes(bytes: Uint8Array): Promise<void> {
+    const data = b64encode(bytes);
+    const targets =
+      broadcastEnabled && broadcastTargetIds.length > 1
+        ? broadcastTargetIds
+        : [session.id];
+    if (targets.length > 1) {
+      await rpc.call('session.writeMany', { ids: targets, data });
+    } else {
+      await rpc.call('session.write', { id: session.id, data });
+    }
+  }
+
   function sendSessionInput(input: TrzszTerminalInput): void {
+    if (typeof input === 'string') {
+      if (input.includes('\x03')) {
+        interruptOutputCooldownUntil = performance.now() + INTERRUPT_OUTPUT_COOLDOWN_MS;
+      }
+      void sendSessionBytes(encoder.encode(input))
+        .catch((err: unknown) => console.warn('terminal write failed', err));
+      return;
+    }
     void terminalInputBytes(input)
-      .then(async (bytes) => {
-        const data = b64encode(bytes);
-        const targets =
-          broadcastEnabled && broadcastTargetIds.length > 1
-            ? broadcastTargetIds
-            : [session.id];
-        if (targets.length > 1) {
-          await rpc.call('session.writeMany', { ids: targets, data });
-        } else {
-          await rpc.call('session.write', { id: session.id, data });
-        }
-      })
+      .then(sendSessionBytes)
       .catch((err: unknown) => console.warn('terminal write failed', err));
   }
 
@@ -655,6 +752,7 @@
         };
     term.loadAddon(new WebLinksAddon(linkHandler));
     term.open(host);
+    replayCachedOutput(session.id, true);
     await applyRenderer(cfg.renderer);
     scheduleSafeFit();
 
@@ -779,7 +877,10 @@
 
     const onSessionsClosing = (ev: Event) => {
       const ids = (ev as CustomEvent<SessionsClosingDetail>).detail?.sessionIds;
-      if (ids?.includes(session.id)) cancelPolling();
+      if (ids?.includes(session.id)) {
+        dropReplayChunks(session.id);
+        cancelPolling();
+      }
     };
     document.addEventListener(SESSIONS_CLOSING, onSessionsClosing);
 
@@ -805,6 +906,8 @@
     exited = false;
     reconnecting = false;
     exitedOverlayEl = null;
+    lastTabVisibleForReplay = tabVisible;
+    replayCursorSeq = 0;
   });
 
   $effect(() => {
@@ -822,7 +925,11 @@
 
   $effect(() => {
     void tabVisible;
+    void active;
+    const becameVisible = tabVisible && !lastTabVisibleForReplay;
+    lastTabVisibleForReplay = tabVisible;
     if (!tabVisible || !layoutVisible || !term) return;
+    if (becameVisible) replayCachedOutput(session.id);
     scheduleSafeFit(true);
     scheduleTerminalFit(() => {
       if (!term) return;

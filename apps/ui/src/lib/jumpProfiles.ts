@@ -1,6 +1,33 @@
 import type { RpcClient } from './rpc';
 import type { SshAuth, SshProfileSpec, StoredProfile } from './types';
 
+/** Find a saved SSH profile matching a bastion hop (host + port + user). */
+export function findProfileForJumpHop(
+  host: string,
+  port: number,
+  user: string,
+  profiles: StoredProfile[],
+): (StoredProfile & { kind: 'ssh' }) | undefined {
+  const hit = profiles.find(
+    (p) => p.kind === 'ssh'
+      && p.ssh.host === host
+      && p.ssh.port === port
+      && p.ssh.user === user,
+  );
+  return hit?.kind === 'ssh' ? hit : undefined;
+}
+
+/** Format jump hops for the profile editor; prefer `@ProfileName` when a saved profile matches. */
+export function formatJumpLinesForEdit(jumps: SshProfileSpec[], profiles: StoredProfile[]): string {
+  return jumps
+    .map((j) => {
+      const hit = findProfileForJumpHop(j.host, j.port, j.user, profiles);
+      if (hit) return jumpLineForProfile(hit);
+      return `${j.user}@${j.host}${j.port === 22 ? '' : ':' + j.port}`;
+    })
+    .join('\n');
+}
+
 /** Parse one bastion line: `user@host[:port]` or `@profile-id` / `@Profile Name`. */
 export function parseJumpLine(
   line: string,
@@ -29,6 +56,16 @@ export function parseJumpLine(
   const colon = rest.lastIndexOf(':');
   const h = colon >= 0 ? rest.slice(0, colon) : rest;
   const p = colon >= 0 ? Number(rest.slice(colon + 1)) || 22 : 22;
+  const matched = findProfileForJumpHop(h, p, u, profiles);
+  if (matched) {
+    return {
+      host: matched.ssh.host,
+      port: matched.ssh.port,
+      user: matched.ssh.user,
+      auth: matched.ssh.auth,
+      jump_via: [],
+    };
+  }
   return { host: h, port: p, user: u, auth, jump_via: [] };
 }
 

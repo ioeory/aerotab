@@ -7,6 +7,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import {
     appendJumpProfileLines,
+    formatJumpLinesForEdit,
     loadProfilesForJumps,
     parseJumpLines,
     profilesInSelectionOrder,
@@ -56,8 +57,7 @@
   let vaultPassphraseEntryId = $state('');
   let vaultEntries = $state<Array<{ id: string; label: string; kind: string }>>([]);
   let vaultUnlocked = $state(false);
-  /** One bastion per line, in `user@host[:port]` form. Each hop reuses the
-   * target profile's auth method (key or password). */
+  /** One bastion per line: `@ProfileName` or `user@host[:port]`. */
   let jumpsText = $state('');
   /** Profile ids selected for append, in hop order (first = first line / first hop). */
   let jumpPickerOrder = $state<string[]>([]);
@@ -65,12 +65,6 @@
   const jumpPickProfiles = $derived(
     tunnelProfiles.filter((p) => p.kind === 'ssh' && p.id !== editing?.id),
   );
-
-  function formatJumps(jumps: SshProfileSpec[]): string {
-    return jumps
-      .map((j) => `${j.user}@${j.host}${j.port === 22 ? '' : ':' + j.port}`)
-      .join('\n');
-  }
 
   function loadRemoteFields(spec: RemoteDesktopSpec) {
     host = spec.host;
@@ -108,7 +102,7 @@
     existingNames?: string[];
   }
 
-  function loadFieldsFromProfile(existing: StoredProfile) {
+  function loadFieldsFromProfile(existing: StoredProfile, profiles: StoredProfile[] = tunnelProfiles) {
     profileKind = existing.kind;
     name = existing.name;
     group = existing.group ?? '';
@@ -121,7 +115,7 @@
       host = existing.ssh.host;
       port = existing.ssh.port;
       user = existing.ssh.user;
-      jumpsText = formatJumps(existing.ssh.jump_via ?? []);
+      jumpsText = formatJumpLinesForEdit(existing.ssh.jump_via ?? [], profiles);
       remoteSshProfileId = '';
       localBindPort = '';
       if (typeof existing.ssh.auth === 'object' && 'Password' in existing.ssh.auth) {
@@ -202,19 +196,24 @@
     jumpPickerOrder = [];
     void refreshVaultEntries();
     void rpc.call<StoredProfile[]>('profile.list')
-      .then((list) => { tunnelProfiles = list.filter((p) => p.kind === 'ssh'); })
+      .then((list) => {
+        tunnelProfiles = list.filter((p) => p.kind === 'ssh');
+        if (existing && !options?.duplicateFrom) {
+          loadFieldsFromProfile(existing, tunnelProfiles);
+        }
+      })
       .catch(() => { tunnelProfiles = []; });
     if (options?.duplicateFrom) {
       editing = null;
       cloning = true;
-      loadFieldsFromProfile(options.duplicateFrom);
+      loadFieldsFromProfile(options.duplicateFrom, tunnelProfiles);
       name = suggestDuplicateProfileName(
         options.duplicateFrom.name,
         options.existingNames ?? [],
       );
       favorite = false;
     } else if (existing) {
-      loadFieldsFromProfile(existing);
+      loadFieldsFromProfile(existing, tunnelProfiles);
     } else {
       resetNewProfileFields(options?.group?.trim() ?? '');
     }
