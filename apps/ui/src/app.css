@@ -160,6 +160,15 @@ dialog {
 }
 dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
 
+/* Positioned confirm/prompt dialogs (anchored near click) */
+dialog.app-confirm-dialog {
+  position: fixed;
+  margin: 0;
+  inset: auto;
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+}
+
 .btn-danger {
   padding: 6px 14px;
   border-radius: var(--radius-md);
@@ -501,6 +510,104 @@ dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
   background: var(--color-panel-2);
 }
 .toolbtn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+/* Profile visuals — tags, kind badges, group headers, icon picker */
+.profile-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid var(--profile-tone-border, var(--color-border-soft));
+  background: var(--profile-tone-bg, var(--color-panel-2));
+  color: var(--profile-tone-fg, var(--color-fg-muted));
+  font-size: 9.5px;
+  line-height: 1.35;
+  padding: 1px 6px;
+  font-weight: 500;
+}
+.profile-tag--compact {
+  max-width: 64px;
+  font-size: 9px;
+  padding: 0 5px;
+}
+
+.profile-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+  border: 1px solid var(--profile-tone-border, var(--color-border-soft));
+  background: var(--profile-tone-bg, var(--color-panel-2));
+  color: var(--profile-tone-fg, var(--color-fg-muted));
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  padding: 1px 4px;
+  font-family: var(--font-mono);
+}
+.profile-kind-badge--compact {
+  font-size: 8px;
+  padding: 0 3px;
+}
+
+.profile-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.profile-group-swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: var(--profile-tone-fg, var(--color-accent));
+  box-shadow: 0 0 0 1px var(--profile-tone-border, transparent);
+}
+.profile-group-rail {
+  border-left: 2px solid var(--profile-tone-border, var(--color-border-soft));
+  padding-left: 6px;
+  margin-left: 2px;
+}
+
+.profile-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+  gap: 6px;
+}
+.profile-icon-grid-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-soft);
+  background: var(--color-panel-2);
+  color: var(--color-fg-muted);
+  font-size: 9px;
+  line-height: 1.1;
+  text-transform: lowercase;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.profile-icon-grid-btn:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-raised);
+}
+.profile-icon-grid-btn.selected {
+  border-color: var(--profile-tone-border, var(--color-accent));
+  background: color-mix(in srgb, var(--profile-tone-bg, var(--color-accent-soft)) 80%, var(--color-panel-2));
+  color: var(--profile-tone-fg, var(--color-accent));
+}
+.profile-icon-grid-btn:focus-visible {
   outline: none;
   box-shadow: var(--ring-focus);
 }

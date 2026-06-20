@@ -41,6 +41,7 @@
     selectedSyncGroups,
   } from './lib/syncConfig';
   import { bootstrapVault } from './lib/vaultBootstrap';
+  import { profileVisualsStore } from './lib/profileVisualsStore.svelte';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
   import { profileEndpointLabel } from './lib/profileMeta';
@@ -567,6 +568,7 @@
 
   onMount(async () => {
     await i18n.load(rpc);
+    await profileVisualsStore.load(rpc);
     await loadSftpDockWidth();
     await loadSessionWorkspaces();
     setStatus(i18n.t('app.status.idle'));

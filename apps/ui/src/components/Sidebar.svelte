@@ -32,6 +32,10 @@
     type ProfileTreeFolder,
   } from '../lib/profileTree';
   import SidebarProfileTree from './SidebarProfileTree.svelte';
+  import VisualColorPicker from './VisualColorPicker.svelte';
+  import ProfileTag from './ProfileTag.svelte';
+  import { normalizeGroupKey, normalizeTagKey } from '../lib/profileVisuals';
+  import { profileVisualsStore } from '../lib/profileVisualsStore.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { notifyProfilesChanged, PROFILES_CHANGED, type ProfilesChangedDetail } from '../lib/profileEvents';
   import { withRpcTimeout } from '../lib/rpcTimeout';
@@ -1110,6 +1114,17 @@
           </button>
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         {/if}
+        <div class="menu-section-label px-3 py-1 text-[10px] uppercase tracking-[0.08em] text-[var(--color-fg-muted)]">
+          {i18n.t('profiles.groupColor')}
+        </div>
+        <VisualColorPicker
+          compact
+          value={profileVisualsStore.groupColors[normalizeGroupKey(groupPath)] ?? null}
+          onPick={(color) => {
+            void profileVisualsStore.setGroupColor(rpc, groupPath, color);
+          }}
+        />
+        <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={() => menuCreateGroup(groupPath)}>{i18n.t('sidebar.createSubgroup')}</button>
         <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
           {i18n.t('sidebar.newProfileInGroup')}
@@ -1141,6 +1156,25 @@
         </div>
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={() => { void menuEditTags(mp); }}>{i18n.t('sidebar.editTags')}</button>
+        {#if (mp.tags ?? []).length > 0}
+          <div class="menu-section-label px-3 py-1 text-[10px] uppercase tracking-[0.08em] text-[var(--color-fg-muted)]">
+            {i18n.t('profiles.tagColors')}
+          </div>
+          {#each (mp.tags ?? []) as tag (tag)}
+            <div class="px-2 py-1 flex items-center gap-2 min-w-0">
+              <ProfileTag {tag} compact />
+              <div class="min-w-0 flex-1">
+                <VisualColorPicker
+                  compact
+                  value={profileVisualsStore.tagColors[normalizeTagKey(tag)] ?? null}
+                  onPick={(color) => {
+                    void profileVisualsStore.setTagColor(rpc, tag, color);
+                  }}
+                />
+              </div>
+            </div>
+          {/each}
+        {/if}
         <button type="button" class="menu-item" onclick={() => { void menuEditNote(mp); }}>{i18n.t('sidebar.editNote')}</button>
         <button type="button" class="menu-item" onclick={() => { void menuViewNote(mp); }}>{i18n.t('sidebar.viewNote')}</button>
         <button type="button" class="menu-item" onclick={() => { void menuEditIcon(mp); }}>{i18n.t('sidebar.editIcon')}</button>

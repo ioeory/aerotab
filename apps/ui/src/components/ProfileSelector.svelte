@@ -18,6 +18,8 @@
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
+  import ProfileKindBadge from './ProfileKindBadge.svelte';
+  import ProfileTag from './ProfileTag.svelte';
 
   // Backend-supplied discovery payload.
   interface ShellEntry {
@@ -296,11 +298,12 @@
             onclick={() => chooseRecord(block.item)}
             onmouseenter={() => { hover = block.navIndex; }}
           >
-            <ProfileIcon icon={p.icon} name={p.name} size={13} />
+            <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={13} />
             <span class="picker-label">{p.name}</span>
+            <ProfileKindBadge kind={p.kind} compact />
             {#if p.favorite}<span class="picker-pill">{i18n.t('picker.favorite')}</span>{/if}
             {#each (p.tags ?? []).slice(0, 2) as tag (tag)}
-              <span class="picker-pill">{tag}</span>
+              <ProfileTag {tag} compact />
             {/each}
             <span class="picker-sub">{profileEndpointLabel(p)}</span>
             {#if hover === block.navIndex}

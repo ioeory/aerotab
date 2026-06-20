@@ -34,6 +34,11 @@
   import { focusProfileInTabs } from '../../../lib/focusProfileSession';
   import ProfileModal from '../../ProfileModal.svelte';
   import ProfileIcon from '../../ProfileIcon.svelte';
+  import ProfileKindBadge from '../../ProfileKindBadge.svelte';
+  import ProfileTag from '../../ProfileTag.svelte';
+  import { groupStyle, normalizeGroupKey, normalizeTagKey } from '../../../lib/profileVisuals';
+  import { profileVisualsStore } from '../../../lib/profileVisualsStore.svelte';
+  import VisualColorPicker from '../../VisualColorPicker.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -56,6 +61,8 @@
   let loadError = $state('');
   let loadGen = 0;
   let healthRunning = $state(false);
+  let visualStatus = $state('');
+  let visualImportInput: HTMLInputElement | null = null;
   let health = $state<Record<string, ProfileHealthResult>>({});
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectionAnchorId = $state<string | null>(null);
@@ -367,6 +374,39 @@
     }
   }
 
+  function exportVisualSettings() {
+    const json = JSON.stringify(profileVisualsStore.exportPayload(), null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'aerotab-profile-visuals.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    visualStatus = i18n.t('profiles.exportVisualsDone');
+  }
+
+  function triggerVisualImport() {
+    visualImportInput?.click();
+  }
+
+  async function importVisualSettings(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      await profileVisualsStore.importPayload(rpc, parsed, true);
+      visualStatus = i18n.t('profiles.importVisualsDone', { name: file.name });
+    } catch (e) {
+      onError(i18n.t('profiles.importVisualsFailed', { message: (e as Error).message }));
+    }
+  }
+
   function healthLabel(status: ProfileHealthStatus): string {
     if (status === 'ok') return i18n.t('profiles.healthOk');
     if (status === 'warning') return i18n.t('profiles.healthWarning');
@@ -457,6 +497,79 @@
     </div>
   {/if}
 
+  <div class="visual-settings panel mb-3">
+    <div class="section-h">{i18n.t('profiles.visualTitle')}</div>
+    <p class="hint mb-2">{i18n.t('profiles.visualHelp')}</p>
+    <label class="row">
+      <span class="row-label">{i18n.t('profiles.showSshKindBadge')}</span>
+      <input
+        type="checkbox"
+        checked={profileVisualsStore.showSshKindBadge}
+        onchange={(e) => {
+          void profileVisualsStore.setShowSshKindBadge(rpc, (e.currentTarget as HTMLInputElement).checked);
+        }}
+      />
+    </label>
+    {#if Object.keys(profileVisualsStore.groupColors).length > 0}
+      <div class="visual-custom-list">
+        <span class="visual-custom-label">{i18n.t('profiles.customGroupColors', { count: Object.keys(profileVisualsStore.groupColors).length })}</span>
+        <button type="button" class="visual-color-reset" onclick={() => { void profileVisualsStore.resetGroupColors(rpc); }}>
+          {i18n.t('profiles.resetGroupColors')}
+        </button>
+      </div>
+      <div class="visual-color-items">
+        {#each Object.entries(profileVisualsStore.groupColors) as [key, color] (key)}
+          <div class="visual-color-item">
+            <span class="visual-color-item-label" title={key}>{key}</span>
+            <VisualColorPicker
+              compact
+              value={color}
+              onPick={(c) => {
+                void profileVisualsStore.setGroupColor(rpc, key, c);
+              }}
+            />
+          </div>
+        {/each}
+      </div>
+    {/if}
+    {#if Object.keys(profileVisualsStore.tagColors).length > 0}
+      <div class="visual-custom-list">
+        <span class="visual-custom-label">{i18n.t('profiles.customTagColors', { count: Object.keys(profileVisualsStore.tagColors).length })}</span>
+        <button type="button" class="visual-color-reset" onclick={() => { void profileVisualsStore.resetTagColors(rpc); }}>
+          {i18n.t('profiles.resetTagColors')}
+        </button>
+      </div>
+      <div class="visual-color-items">
+        {#each Object.entries(profileVisualsStore.tagColors) as [key, color] (key)}
+          <div class="visual-color-item">
+            <ProfileTag tag={key} compact />
+            <VisualColorPicker
+              compact
+              value={color}
+              onPick={(c) => {
+                void profileVisualsStore.setTagColor(rpc, key, c);
+              }}
+            />
+          </div>
+        {/each}
+      </div>
+    {/if}
+    <div class="visual-actions">
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={exportVisualSettings}>
+        {i18n.t('profiles.exportVisuals')}
+      </button>
+      <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={triggerVisualImport}>
+        {i18n.t('profiles.importVisuals')}
+      </button>
+      <input bind:this={visualImportInput} type="file" accept="application/json,.json" class="hidden" onchange={(e) => { void importVisualSettings(e); }} />
+    </div>
+    {#if visualStatus}
+      <p class="hint mt-1">{visualStatus}</p>
+    {/if}
+    <p class="hint mt-2">{i18n.t('profiles.visualContextHint')}</p>
+    <p class="hint">{i18n.t('profiles.visualSyncHint')}</p>
+  </div>
+
   <div class="summary-strip">
     <span>{i18n.t('profiles.groups', { count: summary().groups })}</span>
     <span>{i18n.t('profiles.tags', { count: summary().tags })}</span>
@@ -485,7 +598,10 @@
       {:else}
         {#each grouped() as [groupName, items] (groupName)}
           <div class="group-block">
-            <div class="group-name">{groupName}</div>
+            <div class="group-name profile-group-header" style={groupStyle(groupName === '(Ungrouped)' ? '' : groupName, profileVisualsStore.overrides)}>
+              <span class="profile-group-swatch" aria-hidden="true"></span>
+              <span>{groupName}</span>
+            </div>
             {#each items as p (p.id)}
               {@const h = health[p.id]}
               <div
@@ -504,10 +620,11 @@
                   }}
                   aria-label={p.name}
                 />
-                <ProfileIcon icon={p.icon} name={p.name} size={14} />
+                <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={14} />
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-1 text-[12.5px] font-medium truncate">
                     <span class="truncate">{p.name}</span>
+                    <ProfileKindBadge kind={p.kind} compact />
                     {#if h}
                       <span class={`health-chip ${h.status}`} title={healthTitle(h)} aria-label={healthLabel(h.status)}>
                         {#if h.status === 'ok'}
@@ -529,7 +646,7 @@
                   {#if (p.tags ?? []).length > 0}
                     <div class="tag-row">
                       {#each (p.tags ?? []).slice(0, 6) as tag (tag)}
-                        <span>{tag}</span>
+                        <ProfileTag {tag} />
                       {/each}
                     </div>
                   {/if}
@@ -601,8 +718,7 @@
     color: var(--color-fg-muted);
     font-size: 11px;
   }
-  .summary-strip span,
-  .tag-row span {
+  .summary-strip span {
     border: 1px solid var(--color-border-soft);
     border-radius: 999px;
     padding: 1px 7px;
@@ -641,11 +757,70 @@
     line-height: 1.35;
   }
   .group-block { margin-bottom: 8px; }
+  .visual-settings {
+    padding: 10px 12px;
+  }
+  .visual-custom-list {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--color-fg-muted);
+  }
+  .visual-custom-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .visual-color-reset {
+    flex-shrink: 0;
+    font-size: 10.5px;
+    color: var(--color-fg-muted);
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+  }
+  .visual-color-reset:hover {
+    color: var(--color-accent);
+    text-decoration: underline;
+  }
+  .visual-color-items {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    margin-bottom: 6px;
+  }
+  .visual-color-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .visual-color-item-label {
+    min-width: 72px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10.5px;
+    color: var(--color-fg-muted);
+  }
+  .visual-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
   .group-name {
     font-size: 10.5px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--color-fg-muted);
+    color: var(--profile-tone-fg, var(--color-fg-muted));
     padding: 4px 0;
   }
   .icon-btn {

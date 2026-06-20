@@ -21,8 +21,12 @@
     suggestDuplicateProfileName,
   } from '../lib/profileMeta';
   import { notifyProfilesChanged } from '../lib/profileEvents';
+  import { builtinIconTone, groupStyle, normalizeGroupKey, normalizeTagKey } from '../lib/profileVisuals';
+  import { profileVisualsStore } from '../lib/profileVisualsStore.svelte';
   import JumpChainEditor from './JumpChainEditor.svelte';
   import ProfileIcon from './ProfileIcon.svelte';
+  import ProfileTag from './ProfileTag.svelte';
+  import VisualColorPicker from './VisualColorPicker.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -42,6 +46,7 @@
   let name = $state('');
   let group = $state('');
   let tagsText = $state('');
+  const parsedTags = $derived(parseTagsInput(tagsText));
   let note = $state('');
   let favorite = $state(false);
   let iconKind = $state<'builtin' | 'emoji' | 'file' | 'data' | 'remote' | 'selfhst'>('builtin');
@@ -336,7 +341,29 @@
     <div class="flex gap-3 mt-2">
       <div class="flex-1">
         <label for="pm-group" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.group')}</label>
-        <input id="pm-group" bind:value={group} placeholder={i18n.t('profileModal.groupPlaceholder')} class="input" />
+        <div class="group-input-row">
+          <input id="pm-group" bind:value={group} placeholder={i18n.t('profileModal.groupPlaceholder')} class="input flex-1 min-w-0" />
+          {#if group.trim()}
+            <span
+              class="group-color-preview"
+              style={groupStyle(group.trim(), profileVisualsStore.overrides)}
+              title={group.trim()}
+              aria-hidden="true"
+            ></span>
+          {/if}
+        </div>
+        {#if group.trim()}
+          <div class="profile-modal-color-row mt-1">
+            <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.groupColor')}</span>
+            <VisualColorPicker
+              compact
+              value={profileVisualsStore.groupColors[normalizeGroupKey(group)] ?? null}
+              onPick={(color) => {
+                void profileVisualsStore.setGroupColor(rpc, group.trim(), color);
+              }}
+            />
+          </div>
+        {/if}
       </div>
       <label class="favorite-row">
         <input type="checkbox" bind:checked={favorite} />
@@ -346,6 +373,23 @@
 
     <label for="pm-tags" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.tags')}</label>
     <input id="pm-tags" bind:value={tagsText} placeholder="prod, db, singapore" class="input" />
+    {#if parsedTags.length > 0}
+      <div class="profile-modal-tag-colors mt-1">
+        <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.tagColors')}</span>
+        {#each parsedTags as tag (tag)}
+          <div class="profile-modal-color-row">
+            <ProfileTag {tag} compact />
+            <VisualColorPicker
+              compact
+              value={profileVisualsStore.tagColors[normalizeTagKey(tag)] ?? null}
+              onPick={(color) => {
+                void profileVisualsStore.setTagColor(rpc, tag, color);
+              }}
+            />
+          </div>
+        {/each}
+      </div>
+    {/if}
 
     <label for="pm-note" class="block text-[11px] text-[var(--color-fg-muted)] mb-1 mt-2">{i18n.t('profileModal.note')}</label>
     <textarea id="pm-note" bind:value={note} rows="3" placeholder={i18n.t('profileModal.notePlaceholder')} class="input resize-y min-h-[68px]"></textarea>
@@ -354,7 +398,7 @@
       <div>
         <label for="pm-icon-kind" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.icon')}</label>
         <div class="flex items-center gap-2">
-          <ProfileIcon icon={{ kind: iconKind, value: iconValue }} {name} />
+          <ProfileIcon icon={{ kind: iconKind, value: iconValue }} {name} kind={profileKind} />
           <select id="pm-icon-kind" bind:value={iconKind} class="input min-w-[112px]">
             <option value="builtin">{i18n.t('profileModal.builtin')}</option>
             <option value="emoji">{i18n.t('profileModal.emoji')}</option>
@@ -365,12 +409,22 @@
       </div>
       <div class="flex-1">
         {#if iconKind === 'builtin'}
-          <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.builtinIcon')}</label>
-          <select id="pm-icon-value" bind:value={iconValue} class="input">
+          <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.builtinIcon')}</span>
+          <div class="profile-icon-grid" role="listbox" aria-label={i18n.t('profileModal.builtinIcon')}>
             {#each BUILTIN_PROFILE_ICONS as icon (icon)}
-              <option value={icon}>{icon}</option>
+              <button
+                type="button"
+                role="option"
+                aria-selected={iconValue === icon}
+                class="profile-icon-grid-btn {iconValue === icon ? 'selected' : ''}"
+                style={`--profile-tone-fg:${builtinIconTone(icon).fg};--profile-tone-bg:${builtinIconTone(icon).bg};--profile-tone-border:${builtinIconTone(icon).border};`}
+                onclick={() => { iconValue = icon; }}
+              >
+                <ProfileIcon icon={{ kind: 'builtin', value: icon }} name={icon} kind={profileKind} size={14} />
+                <span>{icon}</span>
+              </button>
             {/each}
-          </select>
+          </div>
         {:else}
           <label for="pm-icon-value" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.iconValue')}</label>
           <div class="flex gap-2">
@@ -513,5 +567,30 @@
     gap: 6px;
     white-space: nowrap;
     flex-shrink: 0;
+  }
+  .group-input-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .group-color-preview {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    border: 1px solid var(--profile-tone-border, var(--color-border-soft));
+    background: var(--profile-tone-bg, var(--color-panel-2));
+    box-shadow: inset 3px 0 0 var(--profile-tone-fg, var(--color-accent));
+  }
+  .profile-modal-color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .profile-modal-tag-colors {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
 </style>

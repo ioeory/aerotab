@@ -13,7 +13,14 @@ export type ConfirmOptions = {
 export type PromptOptions = ConfirmOptions & {
   defaultValue?: string;
   placeholder?: string;
+  /** Use a multi-line textarea instead of a single-line input. */
+  multiline?: boolean;
+  rows?: number;
 };
+
+export function dialogAnchorFromEvent(ev: MouseEvent): { x: number; y: number } {
+  return { x: ev.clientX, y: ev.clientY };
+}
 
 type PendingConfirm = {
   kind: 'confirm';
@@ -32,6 +39,8 @@ type PendingPrompt = {
   title: string | null;
   defaultValue: string;
   placeholder: string | null;
+  multiline: boolean;
+  rows: number;
   confirmLabel: string;
   cancelLabel: string;
   position?: { x: number; y: number };
@@ -73,6 +82,8 @@ class ConfirmUi {
         title: options.title ?? null,
         defaultValue: options.defaultValue ?? '',
         placeholder: options.placeholder ?? null,
+        multiline: !!options.multiline,
+        rows: options.rows ?? 4,
         confirmLabel: options.confirmLabel ?? '',
         cancelLabel: options.cancelLabel ?? '',
         position: options.position,

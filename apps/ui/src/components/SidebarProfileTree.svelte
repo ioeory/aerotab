@@ -3,8 +3,12 @@
   import type { ProfileHealthResult, StoredProfile } from '../lib/types';
   import type { ProfileTreeFolder } from '../lib/profileTree';
   import { profileEndpointLabel } from '../lib/profileMeta';
+  import { groupStyle } from '../lib/profileVisuals';
+  import { profileVisualsStore } from '../lib/profileVisualsStore.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import ProfileIcon from './ProfileIcon.svelte';
+  import ProfileKindBadge from './ProfileKindBadge.svelte';
+  import ProfileTag from './ProfileTag.svelte';
   import Self from './SidebarProfileTree.svelte';
 
   interface Props {
@@ -103,17 +107,19 @@
       </button>
       <button
         type="button"
-        class="flex-1 min-w-0 text-left truncate text-[11px] font-medium text-[var(--color-fg)] cursor-pointer"
+        class="profile-group-header flex-1 min-w-0 text-left truncate text-[11px] font-medium text-[var(--color-fg)] cursor-pointer"
+        style={groupStyle(child.path, profileVisualsStore.overrides)}
         onclick={() => onToggleFolder(child.path)}
       >
-        {child.name}
+        <span class="profile-group-swatch" aria-hidden="true"></span>
+        <span class="truncate">{child.name}</span>
       </button>
       <span class="ml-auto shrink-0 text-[10px] opacity-70 pr-0.5">
         {child.profiles.length + child.folders.length}
       </span>
     </div>
     {#if expanded}
-      <div class="folder-children">
+      <div class="folder-children profile-group-rail" style={groupStyle(child.path, profileVisualsStore.overrides)}>
         <Self
           folder={child}
           depth={depth + 1}
@@ -184,10 +190,11 @@
       }}
       aria-label={p.name}
     />
-    <ProfileIcon icon={p.icon} name={p.name} size={12} />
+    <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={12} />
     <div class="flex-1 min-w-0 text-left py-1 text-[11.5px]">
       <div class="flex items-center gap-1 truncate text-[var(--color-fg)]">
         <span class="truncate">{p.name}</span>
+        <ProfileKindBadge kind={p.kind} compact />
         {#if h}
           <span class="health-chip {h.status}" title={healthTitle(h)} aria-label={healthLabel(h.status)}>
             {#if h.status === 'ok'}
@@ -224,10 +231,7 @@
       {#if (p.tags ?? []).length > 0}
         <div class="mt-0.5 flex gap-1 overflow-hidden">
           {#each (p.tags ?? []).slice(0, 3) as tag (tag)}
-            <span
-              class="shrink-0 max-w-[64px] truncate rounded-full border border-[var(--color-border-soft)]
-                     px-1.5 text-[9.5px] text-[var(--color-fg-muted)]"
-            >{tag}</span>
+            <ProfileTag {tag} compact />
           {/each}
         </div>
       {/if}

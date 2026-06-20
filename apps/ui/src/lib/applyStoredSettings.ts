@@ -9,9 +9,11 @@ import { applyCustomCss, applyLigatures } from './customCss';
 import { applyWindowSettings } from './windowSettings';
 import { hotkeys } from './hotkeys';
 import { i18n } from './i18n.svelte';
+import { profileVisualsStore } from './profileVisualsStore.svelte';
 
 export async function applyStoredSettingsToUi(rpc: RpcClient): Promise<void> {
   await i18n.load(rpc);
+  await profileVisualsStore.load(rpc);
 
   try {
     const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'theme' });
