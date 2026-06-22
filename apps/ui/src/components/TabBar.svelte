@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree, ArrowLeftRight } from '@lucide/svelte';
+  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree, ArrowLeftRight, PanelLeft, PanelTop } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
   import {
@@ -21,6 +21,8 @@
     onAddTab?: () => void;
     onAddTransferTab?: () => void;
     onSplit?: (direction: SplitDir) => void;
+    onSplitLeft?: () => void;
+    onSplitUp?: () => void;
     onOpenSftp?: () => void;
     onDuplicateTab?: (tab: Tab) => void;
     onCloseTab?: (tab: Tab) => void;
@@ -33,6 +35,8 @@
     onAddTab,
     onAddTransferTab,
     onSplit,
+    onSplitLeft,
+    onSplitUp,
     onOpenSftp,
     onDuplicateTab,
     onCloseTab,
@@ -102,7 +106,18 @@
   }
 
   function onTabHover(tab: Tab) {
-    if (getWindowSettings().focusFollowsMouse) tabs.activate(tab.id);
+    if (getWindowSettings().focusFollowsMouse) {
+      tabs.activate(tab.id);
+      requestAnimationFrame(() => dispatchFocusPane(tab.activePaneId));
+    }
+  }
+
+  function onTabListKeydown(ev: KeyboardEvent) {
+    if (ev.key === 'Escape' && tabListOpen) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      tabListOpen = false;
+    }
   }
 
   async function splitActive(direction: 'row' | 'col', ev: Event) {
@@ -169,7 +184,7 @@
   }
 </script>
 
-<svelte:window onclick={closeMenu} />
+<svelte:window onclick={closeMenu} onkeydown={onTabListKeydown} />
 
 <div data-aerotab-context-menu="" class="tabbar-shell flex items-stretch gap-1 px-2 pt-2 select-none">
   <div class="tab-strip flex items-stretch gap-1 min-w-0 overflow-x-auto">
@@ -250,9 +265,17 @@
               class="btn-ghost p-1" onclick={toggleTabList}>
         <ListTree size={14} />
       </button>
+      <button type="button" title={i18n.t('action.splitLeft')} aria-label={i18n.t('action.splitLeft')}
+              class="btn-ghost p-1" onclick={(e) => { e.stopPropagation(); onSplitLeft?.(); }}>
+        <PanelLeft size={14} />
+      </button>
       <button type="button" title={i18n.t('tabbar.splitRight')} aria-label={i18n.t('tabbar.splitRight')}
               class="btn-ghost p-1" onclick={(e) => splitActive('row', e)}>
         <Columns2 size={14} />
+      </button>
+      <button type="button" title={i18n.t('action.splitUp')} aria-label={i18n.t('action.splitUp')}
+              class="btn-ghost p-1" onclick={(e) => { e.stopPropagation(); onSplitUp?.(); }}>
+        <PanelTop size={14} />
       </button>
       <button type="button" title={i18n.t('tabbar.splitDown')} aria-label={i18n.t('tabbar.splitDown')}
               class="btn-ghost p-1" onclick={(e) => splitActive('col', e)}>
@@ -268,8 +291,17 @@
 
 {#if tabListOpen}
   <div
+    role="presentation"
+    data-aerotab-menu-open=""
+    class="fixed inset-0 z-[calc(var(--z-menu)-1)] bg-black/20"
+    onclick={() => { tabListOpen = false; }}
+  ></div>
+  <div
+    data-aerotab-tab-list=""
     data-aerotab-context-menu=""
-    class="panel fixed right-2 top-10 z-[200] w-[min(360px,calc(100vw-16px))] max-h-[min(520px,calc(100vh-64px))] overflow-y-auto py-1 text-[12px]"
+    data-aerotab-menu-open=""
+    class="panel fixed right-2 top-10 w-[min(360px,calc(100vw-16px))] max-h-[min(520px,calc(100vh-64px))] overflow-y-auto py-1 text-[12px]"
+    style="z-index: var(--z-menu);"
     role="menu"
   >
     <div class="px-3 py-1.5 text-[10px] uppercase tracking-wide text-[var(--color-fg-muted)]">
@@ -305,6 +337,7 @@
   <div
     bind:this={menuEl}
     data-aerotab-context-menu=""
+    data-aerotab-menu-open=""
     class="panel fixed z-[200] min-w-[180px] py-1 text-[12px]"
     style="left: {menuX}px; top: {menuY}px;"
     role="menu"

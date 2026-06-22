@@ -394,6 +394,7 @@
 
 {#if menuOpen}
   <div
+    data-aerotab-menu-open=""
     class="panel local-context-menu fixed z-[80] min-w-[176px] py-1 text-[12px] text-[var(--color-fg)]"
     style="left: {menuX}px; top: {menuY}px;"
     role="menu"

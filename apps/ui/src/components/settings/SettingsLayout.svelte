@@ -108,7 +108,23 @@
       onError((e as Error).message);
     }
   }
+
+  async function requestClose() {
+    if (settingsCoord.dirty) {
+      if (!(await appConfirm(i18n.t('settings.unsavedCloseConfirm')))) return;
+    }
+    onClose();
+  }
+
+  function onOverlayKeydown(ev: KeyboardEvent) {
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      void requestClose();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onOverlayKeydown} />
 
 <div class="settings-overlay-root fixed inset-0 z-50" data-aerotab-modal="">
   <!-- Full-screen backdrop: grid centering left gaps where wheel reached the terminal. -->
@@ -116,7 +132,7 @@
     type="button"
     class="settings-overlay-backdrop absolute inset-0 border-0 p-0 bg-black/60 cursor-default"
     aria-label={i18n.t('common.close')}
-    onclick={onClose}
+    onclick={() => { void requestClose(); }}
     onwheel={(e) => e.stopPropagation()}
   ></button>
   <div class="relative z-10 flex min-h-full w-full items-center justify-center p-6 pointer-events-none">
@@ -137,7 +153,7 @@
       <button
         type="button"
         class="btn-ghost ml-auto p-1"
-        onclick={onClose}
+        onclick={() => { void requestClose(); }}
         aria-label={i18n.t('common.close')}
       >
         <X size={14} />
@@ -201,7 +217,7 @@
         <RotateCcw size={12} /> {i18n.t('common.reset')}
       </button>
       <div class="ml-auto flex items-center gap-2">
-        <button type="button" onclick={onClose} class="btn-secondary">{i18n.t('common.close')}</button>
+        <button type="button" onclick={() => { void requestClose(); }} class="btn-secondary">{i18n.t('common.close')}</button>
         <button
           type="button"
           onclick={save}

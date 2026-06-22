@@ -229,6 +229,11 @@
     dialog?.close();
   }
 
+  function openVaultSettings() {
+    close();
+    onOpenVault?.();
+  }
+
   async function chooseIconFile() {
     try {
       const path = await pickIconFilePath();
@@ -377,7 +382,7 @@
             <div class="vault-locked-row mt-2">
               <p class="text-[10.5px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.vaultLockedHint')}</p>
               {#if onOpenVault}
-                <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={() => onOpenVault?.()}>
+                <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={openVaultSettings}>
                   {i18n.t('profileModal.vaultUnlock')}
                 </button>
               {/if}

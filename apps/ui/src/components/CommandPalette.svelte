@@ -122,7 +122,8 @@
       {/each}
       {#if filtered.length === 0}
         <li class="px-3 py-4 text-center text-[var(--color-fg-muted)] text-[12px]">
-          {i18n.t('common.noMatches')}
+          <div>{i18n.t('common.noMatches')}</div>
+          <div class="mt-1.5 text-[11px] opacity-80">{i18n.t('commandPalette.noMatchesHint')}</div>
         </li>
       {/if}
     </ul>

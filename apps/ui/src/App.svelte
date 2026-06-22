@@ -15,7 +15,7 @@
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
   import { selectClient, uuidv4 } from './lib/rpc';
-  import { tabs, type PaneNode, type SplitDir, type SplitSide, type Tab } from './lib/tabs.svelte';
+  import { tabs, type PaneNode, type SplitDir, type SplitSide, type Tab, type TransferBootstrap } from './lib/tabs.svelte';
   import { applyStoredSettingsToUi } from './lib/applyStoredSettings';
   import { applyTheme, BUILTIN_THEMES } from './lib/theme';
   import { applyCustomCss, applyLigatures } from './lib/customCss';
@@ -24,9 +24,9 @@
   import { i18n } from './lib/i18n.svelte';
   import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
-  import { hotkeys, shouldDeferToTextInput } from './lib/hotkeys';
+  import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
-  import { isModalOverlayActive } from './lib/modalFocus';
+  import { isOverlayBlockingInput } from './lib/modalFocus';
   import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
   import { b64encode } from './lib/rpc';
   import { withRpcTimeout } from './lib/rpcTimeout';
@@ -46,11 +46,32 @@
   import { PROFILES_CHANGED } from './lib/profileEvents';
   import { profileEndpointLabel } from './lib/profileMeta';
   import { startHorizontalPanelResize } from './lib/panelResize';
+  import {
+    dockTargetFromState,
+    fetchProfileDockTarget,
+    isDockTargetLoading,
+    isSshPane,
+    resolveDockTargetState,
+    resolveTabActivePane,
+    type DockProfileCacheEntry,
+    type SftpDockTarget,
+  } from './lib/sftpDockTarget';
+  import { transferTabBridge } from './lib/transferTabBridge.svelte';
+  import type { LocalUploadTransferRequest, RemoteCrossTransferRequest } from './lib/sftpTransferTypes';
+  import { sidebarFocus } from './lib/sidebarFocus.svelte';
+  import {
+    getSidebarProfileHandlers,
+  } from './lib/sidebarProfileBridge';
+  import {
+    PROFILE_SIDEBAR_ACTION_IDS,
+    runProfileSidebarAction,
+    type ProfileSidebarActionKey,
+  } from './lib/profileSidebarShortcuts';
   import { FolderOpen, PanelLeftClose, PanelLeftOpen, PanelRightOpen, RefreshCw, X } from '@lucide/svelte';
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.12-ui-20260607';
+  const buildId = '0.2.13-ui-20260607';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -113,12 +134,8 @@
   const SFTP_DOCK_WIDTH_MIN = 280;
   const SFTP_DOCK_WIDTH_MAX = 720;
   let sftpDockWidthPx = $state(400);
+  let sftpDockTransferHeightPx = $state(200);
 
-  interface SftpDockTarget {
-    name: string;
-    ssh: SshProfileSpec;
-    sudo?: boolean;
-  }
   interface SftpWindow {
     id: string;
     target: SftpDockTarget;
@@ -131,8 +148,13 @@
   let sftpDockCollapsed = $state<Record<string, boolean>>({});
   let sftpWindows = $state<SftpWindow[]>([]);
   let sftpWindowSeq = 0;
-  let paneSftpTarget = $state<SftpDockTarget | null>(null);
-  let paneSftpTargetSeq = 0;
+  /** Per-tab resolved profile when active pane only has profileId. */
+  let dockProfileByTab = $state<Record<string, DockProfileCacheEntry>>({});
+  let dockProfileLoadingByTab = $state<Record<string, boolean>>({});
+  let dockProfileFetchSeq = $state<Record<string, number>>({});
+  let dockTransferCounts = $state<Record<string, number>>({});
+  const SFTP_DOCK_TRANSFER_HEIGHT_MIN = 120;
+  const SFTP_DOCK_TRANSFER_HEIGHT_MAX = 360;
   /** Per-tab broadcast mode: one keystroke → all SSH panes in the tab. */
   let broadcastByTab = $state<Record<string, boolean>>({});
 
@@ -144,59 +166,97 @@
 
   $effect(() => {
     void tabs.revision;
-    void activeTab?.activePaneId;
-    const tabId = tabs.activeId;
-    if (!tabId || !sftpDockOpen[tabId]) {
-      paneSftpTarget = null;
-      return;
+    void tabs.activeId;
+    for (const tab of tabs.tabs) {
+      if (tab.kind === 'transfer') continue;
+      const tabId = tab.id;
+      if (!sftpDockOpen[tabId]) continue;
+      // Resolve profile targets only for the visible dock (avoids background work on other tabs).
+      if (tabs.activeId !== tabId) continue;
+
+      const pane = resolveTabActivePane(tab.panes, tab.activePaneId);
+      if (!pane?.profileId || pane.sshProfile) continue;
+
+      const profileId = pane.profileId;
+      const cached = dockProfileByTab[tabId];
+      if (cached?.profileId === profileId) continue;
+      if (dockProfileLoadingByTab[tabId]) continue;
+
+      const seq = (dockProfileFetchSeq[tabId] ?? 0) + 1;
+      dockProfileFetchSeq = { ...dockProfileFetchSeq, [tabId]: seq };
+      dockProfileLoadingByTab = { ...dockProfileLoadingByTab, [tabId]: true };
+
+      void fetchProfileDockTarget(rpc, profileId)
+        .then((target) => {
+          if (dockProfileFetchSeq[tabId] !== seq) return;
+          dockProfileByTab = {
+            ...dockProfileByTab,
+            [tabId]: { profileId, target },
+          };
+          dockProfileLoadingByTab = { ...dockProfileLoadingByTab, [tabId]: false };
+        })
+        .catch(() => {
+          if (dockProfileFetchSeq[tabId] !== seq) return;
+          dockProfileByTab = {
+            ...dockProfileByTab,
+            [tabId]: { profileId, target: null },
+          };
+          dockProfileLoadingByTab = { ...dockProfileLoadingByTab, [tabId]: false };
+        });
     }
-    const pane = activeTab ? tabs.activePane(activeTab) : undefined;
-    if (!pane?.profileId || pane.sshProfile) {
-      paneSftpTarget = null;
-      return;
-    }
-    const seq = ++paneSftpTargetSeq;
-    void rpc.call<StoredProfile>('profile.get', { id: pane.profileId })
-      .then((profile) => {
-        if (seq !== paneSftpTargetSeq) return;
-        if (profile.kind !== 'ssh') {
-          paneSftpTarget = null;
-          return;
-        }
-        paneSftpTarget = { name: profile.name, ssh: profile.ssh };
-      })
-      .catch(() => {
-        if (seq === paneSftpTargetSeq) paneSftpTarget = null;
-      });
   });
 
+  function dockPaneForTab(tab: Tab): SessionMeta | undefined {
+    return resolveTabActivePane(tab.panes, tab.activePaneId);
+  }
+
+  function dockStateForTab(tab: Tab) {
+    const pane = dockPaneForTab(tab);
+    return resolveDockTargetState(
+      !!sftpDockOpen[tab.id],
+      sftpDockPinned[tab.id],
+      pane,
+      dockProfileByTab[tab.id],
+      !!dockProfileLoadingByTab[tab.id],
+    );
+  }
+
+  function sftpDockTargetForTab(tab: Tab): SftpDockTarget | null {
+    return dockTargetFromState(dockStateForTab(tab));
+  }
+
+  function sftpDockLoadingForTab(tab: Tab): boolean {
+    return isDockTargetLoading(dockStateForTab(tab));
+  }
+
   const currentSftpDock = $derived.by((): SftpDockTarget | null => {
-    const key = activeSftpKey;
-    if (!sftpDockOpen[key]) return null;
-    if (activePane?.sshProfile) {
-      return { name: activePane.title || 'SSH session', ssh: activePane.sshProfile };
-    }
-    if (activePane?.profileId) return paneSftpTarget ?? sftpDockPinned[key] ?? null;
-    return sftpDockPinned[key] ?? null;
+    const tab = activeTab;
+    if (!tab || tab.kind === 'transfer') return sftpDockOpen[activeSftpKey] ? sftpDockPinned[activeSftpKey] ?? null : null;
+    return sftpDockTargetForTab(tab);
+  });
+  const currentSftpDockLoading = $derived.by((): boolean => {
+    const tab = activeTab;
+    if (!tab || tab.kind === 'transfer') return false;
+    return sftpDockLoadingForTab(tab);
   });
   const currentSftpCollapsed = $derived(sftpDockCollapsed[activeSftpKey] ?? false);
   const sftpDockSessionId = $derived(
-    activePane?.kind === 'ssh' || activePane?.sshProfile ? activePane?.id ?? null : null,
+    activePane && isSshPane(activePane) ? activePane.id : null,
   );
 
-  function sftpDockTargetForTab(tab: Tab): SftpDockTarget | null {
-    if (!sftpDockOpen[tab.id]) return null;
-    const pane = tabs.activePane(tab);
-    if (pane?.sshProfile) return { name: pane.title || 'SSH session', ssh: pane.sshProfile };
-    return sftpDockPinned[tab.id] ?? null;
-  }
-
   function sftpDockSessionIdForTab(tab: Tab): string | null {
-    const pane = tabs.activePane(tab);
-    return pane?.kind === 'ssh' || pane?.sshProfile ? pane?.id ?? null : null;
+    const pane = dockPaneForTab(tab);
+    return pane && isSshPane(pane) ? pane.id : null;
   }
 
-  const hasOpenSftpDock = $derived.by(() => tabs.tabs.some((tab) => sftpDockTargetForTab(tab) !== null));
+  /** SFTP dock column visible only for the active tab (each tab keeps its own open/collapsed state). */
+  const hasOpenSftpDock = $derived.by(() => {
+    const tabId = tabs.activeId;
+    if (!tabId) return false;
+    const tab = tabs.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.kind === 'transfer') return false;
+    return !!sftpDockOpen[tabId];
+  });
 
   // ── M9 — session restore ────────────────────────────────────────────────
   // A `Restorable` describes how to re-open a session after a restart. We
@@ -569,7 +629,7 @@
   onMount(async () => {
     await i18n.load(rpc);
     await profileVisualsStore.load(rpc);
-    await loadSftpDockWidth();
+    await loadSftpDockSettings();
     await loadSessionWorkspaces();
     setStatus(i18n.t('app.status.idle'));
     try {
@@ -1053,13 +1113,19 @@
     requestAnimationFrame(() => focusActivePane());
   }
 
-  async function loadSftpDockWidth() {
+  async function loadSftpDockSettings() {
     try {
       const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sftp' });
       if (r.value && typeof r.value === 'object') {
         const v = r.value as Record<string, unknown>;
         if (typeof v.dockWidthPx === 'number') {
           sftpDockWidthPx = Math.max(SFTP_DOCK_WIDTH_MIN, Math.min(SFTP_DOCK_WIDTH_MAX, v.dockWidthPx));
+        }
+        if (typeof v.dockTransferHeightPx === 'number') {
+          sftpDockTransferHeightPx = Math.max(
+            SFTP_DOCK_TRANSFER_HEIGHT_MIN,
+            Math.min(SFTP_DOCK_TRANSFER_HEIGHT_MAX, v.dockTransferHeightPx),
+          );
         }
       }
     } catch { /* optional */ }
@@ -1089,13 +1155,17 @@
     });
   }
 
-  async function persistSftpDockWidth() {
+  async function persistSftpDockSettings() {
     try {
       const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sftp' });
       const current = r.value && typeof r.value === 'object' ? r.value as Record<string, unknown> : {};
       await rpc.call('settings.set', {
         key: 'sftp',
-        value: { ...current, dockWidthPx: sftpDockWidthPx },
+        value: {
+          ...current,
+          dockWidthPx: sftpDockWidthPx,
+          dockTransferHeightPx: sftpDockTransferHeightPx,
+        },
       });
     } catch (e) {
       onError(`sftp settings: ${(e as Error).message}`);
@@ -1109,7 +1179,7 @@
       maxPx: SFTP_DOCK_WIDTH_MAX,
       growWhenDraggingRight: false,
       onWidth: (w) => { sftpDockWidthPx = w; },
-      onEnd: () => { void persistSftpDockWidth(); },
+      onEnd: () => { void persistSftpDockSettings(); },
     });
   }
 
@@ -1131,11 +1201,46 @@
     sftpWindows = sftpWindows.filter((window) => window.id !== id);
   }
 
-  function openFileTransferWindow(initialTarget: SftpDockTarget | null = null, _initialProfileId: string | null = null) {
-    void initialTarget;
-    void _initialProfileId;
+  function openFileTransferWindow(initialTarget: SftpDockTarget | null = null, initialProfileId: string | null = null) {
+    const bootstrap: TransferBootstrap | undefined = initialProfileId
+      ? { leftId: '__local__', rightId: initialProfileId, rightProfileId: initialProfileId }
+      : undefined;
     const title = initialTarget?.name ?? i18n.t('transfer.tabTitle');
-    tabs.addTransferTab(title);
+    const existing = tabs.tabs.find((t) => t.kind === 'transfer');
+    if (existing) {
+      if (bootstrap) tabs.setTransferBootstrap(existing.id, bootstrap);
+      tabs.activate(existing.id);
+      return existing.id;
+    }
+    return tabs.addTransferTab(title, bootstrap).id;
+  }
+
+  function focusTransferTabId(): string {
+    const existing = tabs.tabs.find((t) => t.kind === 'transfer');
+    if (existing) {
+      tabs.activate(existing.id);
+      return existing.id;
+    }
+    return openFileTransferWindow();
+  }
+
+  function routeCrossTransferToCenter(request: RemoteCrossTransferRequest) {
+    const tabId = focusTransferTabId();
+    transferTabBridge.enqueueRemote(tabId, request);
+  }
+
+  function routeLocalUploadToCenter(request: LocalUploadTransferRequest) {
+    const tabId = focusTransferTabId();
+    transferTabBridge.enqueueLocal(tabId, request);
+  }
+
+  function onDockRemoteCrossTransfer(request: RemoteCrossTransferRequest) {
+    routeCrossTransferToCenter(request);
+  }
+
+  function onDockTransferCountChange(tabId: string, count: number) {
+    if ((dockTransferCounts[tabId] ?? 0) === count) return;
+    dockTransferCounts = { ...dockTransferCounts, [tabId]: count };
   }
 
   function closeCurrentTransferTab() {
@@ -1149,18 +1254,24 @@
     const { [tabId]: _open, ...restOpen } = sftpDockOpen;
     const { [tabId]: _pin, ...restPinned } = sftpDockPinned;
     const { [tabId]: _dropCollapsed, ...restCollapsed } = sftpDockCollapsed;
+    const { [tabId]: _profile, ...restProfile } = dockProfileByTab;
+    const { [tabId]: _loading, ...restLoading } = dockProfileLoadingByTab;
+    const { [tabId]: _seq, ...restSeq } = dockProfileFetchSeq;
     sftpDockOpen = restOpen;
     sftpDockPinned = restPinned;
     sftpDockCollapsed = restCollapsed;
+    dockProfileByTab = restProfile;
+    dockProfileLoadingByTab = restLoading;
+    dockProfileFetchSeq = restSeq;
   }
 
   function setCurrentSftpCollapsed(collapsed: boolean) {
-    if (!currentSftpDock) return;
+    if (!sftpDockOpen[activeSftpKey]) return;
     sftpDockCollapsed = { ...sftpDockCollapsed, [activeSftpKey]: collapsed };
   }
 
   function toggleCurrentSftpDock() {
-    if (!currentSftpDock) {
+    if (!sftpDockOpen[activeSftpKey]) {
       void openSftpForActivePane();
       return;
     }
@@ -1169,9 +1280,17 @@
 
   async function activeSftpTarget(): Promise<{ target: SftpDockTarget; tabId: string } | null> {
     const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
-    const pane = tab ? tabs.activePane(tab) : undefined;
-    if (!tab || !pane) {
+    if (!tab || tab.kind === 'transfer') {
       onError('sftp: no active SSH pane');
+      return null;
+    }
+    const pane = dockPaneForTab(tab);
+    if (!pane) {
+      onError('sftp: no active SSH pane');
+      return null;
+    }
+    if (!isSshPane(pane)) {
+      onError('sftp: active pane is not an SSH session');
       return null;
     }
     if (pane.sshProfile) {
@@ -1319,30 +1438,31 @@
 
 
   function buildActions(): Action[] {
+    const sk = (id: string, fallback?: string) => hotkeyLabel(id) ?? fallback;
     const acts: Action[] = [
-      { id: 'new-tab', title: i18n.t('action.newLocalTab'), shortcut: 'Ctrl+Shift+T', run: () => openLocal() },
-      { id: 'split-right', title: i18n.t('action.splitRight'), shortcut: 'Ctrl+Shift+D', run: () => splitActive('row') },
-      { id: 'split-left', title: i18n.t('action.splitLeft'), shortcut: 'Ctrl+Shift+A', run: () => splitActive('row', 'before') },
-      { id: 'split-down', title: i18n.t('action.splitDown'), shortcut: 'Ctrl+Shift+E', run: () => splitActive('col') },
-      { id: 'split-up', title: i18n.t('action.splitUp'), shortcut: 'Ctrl+Shift+W', run: () => splitActive('col', 'before') },
-      { id: 'maximize-pane', title: i18n.t('action.maximizePane'), shortcut: 'Alt+Z', run: () => toggleActivePaneMaximize() },
-      { id: 'close-pane', title: i18n.t('action.closePane'), shortcut: 'Ctrl+W', run: () => closeActivePane() },
-      { id: 'next-tab', title: i18n.t('action.nextTab'), shortcut: 'Ctrl+Tab', run: () => cycleTab(1) },
-      { id: 'prev-tab', title: i18n.t('action.previousTab'), shortcut: 'Ctrl+Shift+Tab', run: () => cycleTab(-1) },
-      { id: 'focus-left', title: i18n.t('action.focusPaneLeft'), shortcut: 'Alt+←', run: () => focusPaneDirection('left') },
-      { id: 'focus-right', title: i18n.t('action.focusPaneRight'), shortcut: 'Alt+→', run: () => focusPaneDirection('right') },
-      { id: 'focus-up', title: i18n.t('action.focusPaneUp'), shortcut: 'Alt+↑', run: () => focusPaneDirection('up') },
-      { id: 'focus-down', title: i18n.t('action.focusPaneDown'), shortcut: 'Alt+↓', run: () => focusPaneDirection('down') },
-      { id: 'next-pane', title: i18n.t('action.nextPane'), shortcut: 'Alt+]', run: () => cyclePane(1) },
-      { id: 'prev-pane', title: i18n.t('action.previousPane'), shortcut: 'Alt+[', run: () => cyclePane(-1) },
-      { id: 'settings', title: i18n.t('action.openSettings'), shortcut: 'Ctrl+,', run: () => openSettings() },
+      { id: 'new-tab', title: i18n.t('action.newLocalTab'), shortcut: sk('new-tab'), run: () => openLocal() },
+      { id: 'split-right', title: i18n.t('action.splitRight'), shortcut: sk('split-right'), run: () => splitActive('row') },
+      { id: 'split-left', title: i18n.t('action.splitLeft'), shortcut: sk('split-left'), run: () => splitActive('row', 'before') },
+      { id: 'split-down', title: i18n.t('action.splitDown'), shortcut: sk('split-down'), run: () => splitActive('col') },
+      { id: 'split-up', title: i18n.t('action.splitUp'), shortcut: sk('split-up'), run: () => splitActive('col', 'before') },
+      { id: 'maximize-pane', title: i18n.t('action.maximizePane'), shortcut: sk('maximize-pane'), run: () => toggleActivePaneMaximize() },
+      { id: 'close-pane', title: i18n.t('action.closePane'), shortcut: sk('close-pane'), run: () => closeActivePane() },
+      { id: 'next-tab', title: i18n.t('action.nextTab'), shortcut: sk('next-tab'), run: () => cycleTab(1) },
+      { id: 'prev-tab', title: i18n.t('action.previousTab'), shortcut: sk('prev-tab'), run: () => cycleTab(-1) },
+      { id: 'focus-left', title: i18n.t('action.focusPaneLeft'), shortcut: sk('focus-left'), run: () => focusPaneDirection('left') },
+      { id: 'focus-right', title: i18n.t('action.focusPaneRight'), shortcut: sk('focus-right'), run: () => focusPaneDirection('right') },
+      { id: 'focus-up', title: i18n.t('action.focusPaneUp'), shortcut: sk('focus-up'), run: () => focusPaneDirection('up') },
+      { id: 'focus-down', title: i18n.t('action.focusPaneDown'), shortcut: sk('focus-down'), run: () => focusPaneDirection('down') },
+      { id: 'next-pane', title: i18n.t('action.nextPane'), shortcut: sk('next-pane'), run: () => cyclePane(1) },
+      { id: 'prev-pane', title: i18n.t('action.previousPane'), shortcut: sk('prev-pane'), run: () => cyclePane(-1) },
+      { id: 'settings', title: i18n.t('action.openSettings'), shortcut: sk('settings'), run: () => openSettings() },
       { id: 'profile-health', title: i18n.t('action.profileHealthCheck'), subtitle: i18n.t('settings.nav.profiles'), run: () => openSettings('profiles') },
       { id: 'sync-status', title: i18n.t('action.syncStatus'), subtitle: i18n.t('settings.nav.configSync'), run: () => showSyncStatusFromPalette() },
       { id: 'sync-now', title: i18n.t('action.syncNow'), subtitle: i18n.t('settings.nav.configSync'), run: () => syncNowFromPalette() },
       { id: 'sync-settings', title: i18n.t('action.openSyncSettings'), subtitle: i18n.t('settings.nav.configSync'), run: () => openSettings('configsync') },
       { id: 'workspace-save', title: i18n.t('action.saveSessionWorkspace'), run: () => saveCurrentSessionWorkspace() },
       { id: 'diagnostics-export', title: i18n.t('application.exportDiagnostics'), subtitle: i18n.t('application.diagnostics'), run: () => exportDiagnosticsFromPalette() },
-      { id: 'toggle-sidebar', title: sidebarVisible ? i18n.t('action.hideSidebar') : i18n.t('action.showSidebar'), shortcut: 'Ctrl+Alt+S', run: () => { void setSidebarVisible(!sidebarVisible); } },
+      { id: 'toggle-sidebar', title: sidebarVisible ? i18n.t('action.hideSidebar') : i18n.t('action.showSidebar'), shortcut: sk('toggle-sidebar'), run: () => { void setSidebarVisible(!sidebarVisible); } },
       { id: 'new-profile', title: i18n.t('action.newSshProfile'), run: () => profileModal?.open() },
       { id: 'new-serial', title: i18n.t('action.newSerialConnection'), run: () => serialModal?.open() },
     ];
@@ -1365,15 +1485,23 @@
       title: i18n.t('action.batchCommand'),
       subtitle: i18n.t('batchCommand.scopeActiveTab'),
       keywords: ['batch', 'command', 'writeMany', 'multiplex'],
-      shortcut: 'Ctrl+Shift+Enter',
-      run: () => { batchCommandOpen = true; },
+      shortcut: sk('batch-command'),
+      run: () => {
+        const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const hasSsh = tab?.panes.some((p) => isSshPane(p));
+        if (!hasSsh) {
+          onError(i18n.t('batchCommand.noSshPanes'));
+          return;
+        }
+        batchCommandOpen = true;
+      },
     });
     acts.push({
       id: 'toggle-broadcast',
       title: broadcastOn ? i18n.t('action.broadcastOff') : i18n.t('action.broadcastOn'),
       subtitle: i18n.t('action.broadcastHint'),
       keywords: ['broadcast', 'multiplex', 'fanout'],
-      shortcut: 'Ctrl+Shift+B',
+      shortcut: sk('toggle-broadcast'),
       run: () => toggleBroadcast(),
     });
     for (const p of savedProfiles) {
@@ -1404,7 +1532,7 @@
     acts.push({
       id: 'open-sftp',
       title: i18n.t('action.openSftpCurrent'),
-      shortcut: 'Ctrl+Alt+F',
+      shortcut: sk('open-sftp'),
       run: () => { void openSftpForActivePane(); },
     });
     acts.push({
@@ -1421,7 +1549,7 @@
     acts.push({
       id: 'toggle-sftp-dock',
       title: currentSftpCollapsed ? i18n.t('action.expandSftpDock') : i18n.t('action.collapseSftpDock'),
-      shortcut: 'Ctrl+Alt+E',
+      shortcut: sk('toggle-sftp-dock'),
       run: () => toggleCurrentSftpDock(),
     });
     return acts;
@@ -1454,7 +1582,15 @@
     hotkeys.registerHandler('open-sftp', () => { void openSftpForActivePane(); });
     hotkeys.registerHandler('toggle-sftp-dock', () => toggleCurrentSftpDock());
     hotkeys.registerHandler('toggle-broadcast', () => toggleBroadcast());
-    hotkeys.registerHandler('batch-command', () => { batchCommandOpen = true; });
+    hotkeys.registerHandler('batch-command', () => {
+      const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
+      const hasSsh = tab?.panes.some((p) => isSshPane(p));
+      if (!hasSsh) {
+        onError(i18n.t('batchCommand.noSshPanes'));
+        return;
+      }
+      batchCommandOpen = true;
+    });
     hotkeys.registerHandler('focus-left',  () => focusPaneDirection('left'));
     hotkeys.registerHandler('focus-right', () => focusPaneDirection('right'));
     hotkeys.registerHandler('focus-up',    () => focusPaneDirection('up'));
@@ -1483,6 +1619,23 @@
       document.dispatchEvent(new CustomEvent('aerotab:session-ended-action', { detail: 'reconnect' }));
     });
 
+    const profileActionKeyById = Object.fromEntries(
+      Object.entries(PROFILE_SIDEBAR_ACTION_IDS).map(([key, id]) => [id, key]),
+    ) as Record<string, ProfileSidebarActionKey>;
+    for (const actionId of Object.values(PROFILE_SIDEBAR_ACTION_IDS)) {
+      hotkeys.registerHandler(actionId, () => {
+        const profileId = sidebarFocus.focusedProfileId;
+        if (!profileId) return;
+        const profile = savedProfiles.find((p) => p.id === profileId);
+        if (!profile) return;
+        const handlers = getSidebarProfileHandlers();
+        if (!handlers) return;
+        const key = profileActionKeyById[actionId];
+        if (!key) return;
+        runProfileSidebarAction(key, handlers, profile);
+      });
+    }
+
     // Load user-overridden bindings from settings.
     void (async () => {
       try {
@@ -1496,7 +1649,7 @@
     })();
 
     kbdHandler = (e: KeyboardEvent) => {
-      if (isModalOverlayActive()) return;
+      if (isOverlayBlockingInput()) return;
       if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'r' || e.key === 'R'))) {
         e.preventDefault();
         return;
@@ -1649,6 +1802,8 @@
         onAddTab={() => (pickerOpen = true)}
         onAddTransferTab={() => openFileTransferWindow()}
         onSplit={(direction) => { void splitActive(direction); }}
+        onSplitLeft={() => { void splitActive('row', 'before'); }}
+        onSplitUp={() => { void splitActive('col', 'before'); }}
         onOpenSftp={() => { void openSftpForActivePane(); }}
         onDuplicateTab={(tab) => { void duplicateTab(tab); }}
         onCloseTab={(tab) => { closeTabSessions(tab); }}
@@ -1665,6 +1820,8 @@
                 <FileTransferWindow
                   {rpc}
                   tabId={tab.id}
+                  transferBootstrap={tab.transferBootstrap}
+                  onOpenSftpDock={() => { void openSftpForActivePane(); }}
                   {onError}
                 />
               {:else}
@@ -1695,17 +1852,28 @@
         </div>
         {#if hasOpenSftpDock}
           {#if currentSftpCollapsed}
-            <div hidden={!currentSftpDock} class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-2 shadow-[inset_1px_0_0_var(--color-border-soft)]">
+            <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-1 shadow-[inset_1px_0_0_var(--color-border-soft)]">
               <button
                 type="button"
                 class="btn-ghost p-1.5 text-[var(--color-accent)]"
                 title={i18n.t('sftp.expandDock')}
-                aria-label={i18n.t('sftp.expandDock')}
+                aria-label={currentSftpDock
+                  ? i18n.t('sftp.expandDock') + ': ' + currentSftpDock.name
+                  : i18n.t('sftp.expandDock')}
                 onclick={() => setCurrentSftpCollapsed(false)}
               >
                 <PanelRightOpen size={15} />
               </button>
-              <FolderOpen size={14} class="text-[var(--color-fg-muted)]" />
+              {#if currentSftpDock}
+                <span class="text-[9px] text-[var(--color-fg-muted)] [writing-mode:vertical-rl] rotate-180 truncate max-h-[120px]" title={currentSftpDock.name}>
+                  {currentSftpDock.name}
+                </span>
+                {#if (dockTransferCounts[activeSftpKey] ?? 0) > 0}
+                  <span class="text-[9px] px-1 py-0.5 rounded bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
+                    {dockTransferCounts[activeSftpKey]}
+                  </span>
+                {/if}
+              {/if}
               <button
                 type="button"
                 class="btn-ghost mt-auto p-1 hover:!text-[var(--color-danger)]"
@@ -1721,32 +1889,50 @@
               type="button"
               aria-label={i18n.t('sftp.resizeDock')}
               class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
-              hidden={!currentSftpDock}
               onpointerdown={onSftpDockResizePointerDown}
             ></button>
             <div
               class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
-              hidden={!currentSftpDock}
               style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
             >
-              {#each tabs.tabs as dockTab (dockTab.id)}
-                {@const dockTarget = sftpDockTargetForTab(dockTab)}
-                {#if dockTarget && !sftpDockCollapsed[dockTab.id]}
-                  <div class="h-full w-full" hidden={activeSftpKey !== dockTab.id}>
+              {#if activeTab && activeTab.kind !== 'transfer'}
+                {@const dockTarget = sftpDockTargetForTab(activeTab)}
+                {@const dockLoading = sftpDockLoadingForTab(activeTab)}
+                <div class="h-full w-full">
+                  {#if dockLoading && !dockTarget}
+                    <div class="h-full grid place-items-center px-3 text-center text-[12px] text-[var(--color-fg-muted)]">
+                      {i18n.t('sftp.dockLoading')}
+                    </div>
+                  {:else if dockTarget}
+                    {#key `${activeTab.id}|${dockTarget.ssh.host}|${dockTarget.ssh.port}|${dockTarget.ssh.user}`}
                     <SftpBrowser
                       {rpc}
-                      registryId={`dock-${dockTab.id}`}
-                      terminalSessionId={sftpDockSessionIdForTab(dockTab)}
+                      registryId={`dock-${activeTab.id}`}
+                      terminalSessionId={sftpDockSessionIdForTab(activeTab)}
                       source={dockTarget}
                       mode="dock"
-                      onClose={() => closeSftpDock(dockTab.id)}
-                      onCollapse={() => { sftpDockCollapsed = { ...sftpDockCollapsed, [dockTab.id]: true }; }}
+                      dockWidthPx={sftpDockWidthPx}
+                      transferPanelHeightPx={sftpDockTransferHeightPx}
+                      onTransferPanelHeightChange={(h) => {
+                        sftpDockTransferHeightPx = h;
+                        void persistSftpDockSettings();
+                      }}
+                      onActiveTransferCountChange={(count) => onDockTransferCountChange(activeTab.id, count)}
+                      onRemoteCrossTransfer={onDockRemoteCrossTransfer}
+                      onOpenTransferCenter={() => { openFileTransferWindow(); }}
+                      onClose={() => closeSftpDock(activeTab.id)}
+                      onCollapse={() => { sftpDockCollapsed = { ...sftpDockCollapsed, [activeTab.id]: true }; }}
                       onPopOut={(sudo) => openSftpWindow({ ...dockTarget, sudo })}
                       {onError}
                     />
-                  </div>
-                {/if}
-              {/each}
+                    {/key}
+                  {:else}
+                    <div class="h-full grid place-items-center px-3 text-center text-[12px] text-[var(--color-fg-muted)]">
+                      {i18n.t('sftp.dockNoTarget')}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/if}
         {/if}
@@ -1797,9 +1983,13 @@
       {:else if hostStatsEnabled && hostStatsStatus === 'unavailable'}
         <span class="hidden lg:inline text-[var(--color-fg-muted)]" title={i18n.t('app.footer.hostStatsUnavailable')}>{i18n.t('app.footer.statsUnavailable')}</span>
       {/if}
+      {#if broadcastOn}
+        <span class="px-1.5 py-0.5 rounded text-[10px] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" title={i18n.t('app.footer.broadcastOn')}>
+          Bcast
+        </span>
+      {/if}
       <span class="ml-auto">{i18n.t('app.footer.sessions', { count: tabs.tabs.length, suffix: tabs.tabs.length === 1 ? '' : 's' })}</span>
       {#if coreVersion}<span>v{coreVersion}</span>{/if}
-      <span>{buildId}</span>
     </footer>
   </main>
 </div>

@@ -14,6 +14,17 @@ export function isModalOverlayActive(): boolean {
   return false;
 }
 
+/** Block global hotkeys when modals, context menus, or tab list overlays are open. */
+export function isOverlayBlockingInput(): boolean {
+  if (isModalOverlayActive()) return true;
+  if (typeof document === 'undefined') return false;
+  // `data-aerotab-context-menu` marks zones that *allow* app context menus (TabBar, Sidebar,
+  // terminal host) — not open menus. Only block on explicit open-menu markers.
+  if (document.querySelector('[data-aerotab-tab-list]')) return true;
+  if (document.querySelector('[data-aerotab-menu-open]')) return true;
+  return false;
+}
+
 export function shouldFocusTerminal(): boolean {
   return !isModalOverlayActive();
 }

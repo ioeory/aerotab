@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import {
     X, Folder, FileText, RefreshCw, ChevronRight, Home, ArrowUp,
     Upload, Download, Trash2, FolderPlus, Pencil, PanelRightClose, FolderUp,
@@ -11,6 +11,9 @@
   import { appConfirm, appPrompt } from '../lib/confirm.svelte';
   import type { LocalEntry, SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
   import SftpLocalPane from './SftpLocalPane.svelte';
+  import SftpTransferQueue from './SftpTransferQueue.svelte';
+  import { profileEndpointLabel } from '../lib/profileMeta';
+  import { startVerticalPanelResize } from '../lib/panelResize';
   import { sftpSessionRegistry, type RegisteredSftpSession } from '../lib/sftpSessionRegistry.svelte';
   import { portal } from '../lib/portal';
   import type { LocalUploadTransferRequest, RemoteCrossTransferRequest } from '../lib/sftpTransferTypes';
@@ -39,8 +42,13 @@
     source?: SftpSource;
     mode?: 'modal' | 'dock';
     registryId?: string;
-    /** Reuse the active SSH terminal connection instead of dialing again. */
+    /** Reserved for future terminal session reuse; currently always opens a dedicated SFTP connection. */
     terminalSessionId?: string | null;
+    dockWidthPx?: number;
+    transferPanelHeightPx?: number;
+    onTransferPanelHeightChange?: (heightPx: number) => void;
+    onActiveTransferCountChange?: (count: number) => void;
+    onOpenTransferCenter?: () => void;
     onClose: () => void;
     onCollapse?: () => void;
     onPopOut?: (sudo: boolean) => void;
@@ -57,6 +65,11 @@
     mode = 'modal',
     registryId: registryIdProp,
     terminalSessionId = null,
+    dockWidthPx = 400,
+    transferPanelHeightPx = 200,
+    onTransferPanelHeightChange,
+    onActiveTransferCountChange,
+    onOpenTransferCenter,
     onClose,
     onCollapse,
     onPopOut,
@@ -126,6 +139,39 @@
   let lastSelectedRemoteName = $state<string | null>(null);
   let renamingName = $state<string | null>(null);
   let renameDraft = $state('');
+  let localPaneCollapsed = $state(false);
+  let downloadBannerDismissed = $state(false);
+
+  const activeTransferCount = $derived(
+    transfers.filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'paused').length,
+  );
+  const transferQueueItems = $derived(
+    transfers.map((task) => ({
+      id: task.id,
+      name: task.name,
+      status: task.status,
+      percent: transferPercent(task),
+      summary: transferSummary(task),
+      kindLabel: task.kind,
+    })),
+  );
+  const showLocalPaneEffective = $derived(showLocalPane && localCwd && !localPaneCollapsed);
+
+  let reportedTransferCount = -1;
+
+  $effect(() => {
+    const count = activeTransferCount;
+    if (count === reportedTransferCount) return;
+    reportedTransferCount = count;
+    const report = untrack(() => onActiveTransferCountChange);
+    report?.(count);
+  });
+
+  $effect(() => {
+    if (mode === 'dock' && dockWidthPx < 420) {
+      localPaneCollapsed = true;
+    }
+  });
 
   let selectedTransferIds = $state<Set<string>>(new Set());
   let transferUiFlushScheduled = false;
@@ -767,9 +813,12 @@
   }
 
   function resumeTransfer(id: string) {
-    const status = transfers.find((transfer) => transfer.id === id)?.status;
-    if (status !== 'paused') return;
-    updateTransfer(id, { status: 'queued', message: undefined });
+    const task = transfers.find((transfer) => transfer.id === id);
+    if (task?.status !== 'paused') return;
+    updateTransfer(id, {
+      status: task.startedAt ? 'running' : 'queued',
+      message: undefined,
+    });
     void processTransfers();
   }
 
@@ -889,7 +938,8 @@
       return;
     }
     const key = sftpConnectKey();
-    if (!key || key === appliedConnectKey || connectInFlight) return;
+    if (!key || key === appliedConnectKey) return;
+    if (untrack(() => connectInFlight)) return;
     const seq = ++connectSeq;
     connectInFlight = true;
     void (async () => {
@@ -1240,6 +1290,10 @@
   function removeSelectedTransfers() {
     const remove = selectedTransferIds;
     for (const id of remove) {
+      const task = transfers.find((t) => t.id === id);
+      if (task && (task.status === 'queued' || task.status === 'running' || task.status === 'paused')) {
+        cancelTransfer(id);
+      }
       uploadFiles.delete(id);
       downloadEntries.delete(id);
     }
@@ -1643,21 +1697,32 @@
       ? 'panel w-full max-w-[min(1200px,96vw)] h-full max-h-[720px] flex flex-col overflow-hidden'
       : 'h-full w-full flex flex-col overflow-hidden bg-[var(--color-panel)]'}
   >
-    <header class="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">
-      <div class="text-[var(--color-accent)] font-semibold text-[13px]">SFTP</div>
-      <div class="text-[12px] text-[var(--color-fg-muted)]">·</div>
-      <div class="text-[12px] text-[var(--color-fg)] truncate">{target?.name ?? i18n.t('sftp.sshSession')}</div>
-      <div class="text-[11px] text-[var(--color-fg-muted)] truncate">
-        ({target?.ssh.user}@{target?.ssh.host}:{target?.ssh.port})
-      </div>
-      <button
-        type="button"
-        class="px-2 py-0.5 rounded text-[10.5px] border {sudoMode ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
-        onclick={toggleSudoMode}
-        title={i18n.t('sftp.toggleSudo')}
-        aria-pressed={sudoMode}
-      >sudo</button>
-      <div class="ml-auto flex items-center gap-1">
+    <header class="flex flex-col gap-0.5 px-4 py-2 border-b border-[var(--color-border-soft)]">
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="text-[var(--color-accent)] font-semibold text-[13px] shrink-0">SFTP</div>
+        <div class="min-w-0 flex-1">
+          <div class="text-[12px] text-[var(--color-fg)] truncate">{target?.name ?? i18n.t('sftp.sshSession')}</div>
+          {#if target}
+            <div class="text-[10.5px] font-mono text-[var(--color-fg-muted)] truncate">{profileEndpointLabel({ name: target.name, kind: 'ssh', ssh: target.ssh } as StoredProfile)}</div>
+          {/if}
+        </div>
+        {#if mode === 'dock' && showLocalPane}
+          <button
+            type="button"
+            class="px-2 py-0.5 rounded text-[10.5px] border {localPaneCollapsed ? 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)]' : 'border-[var(--color-accent)] text-[var(--color-accent)]'}"
+            onclick={() => { localPaneCollapsed = !localPaneCollapsed; }}
+          >
+            {i18n.t('sftp.toggleLocalPane')}
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="px-2 py-0.5 rounded text-[10.5px] border {sudoMode ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
+          onclick={toggleSudoMode}
+          title={i18n.t('sftp.toggleSudo')}
+          aria-pressed={sudoMode}
+        >sudo</button>
+        <div class="ml-auto flex items-center gap-1 shrink-0">
         {#if onPopOut}
           <button
             type="button"
@@ -1689,6 +1754,10 @@
           <X size={14} />
         </button>
       </div>
+      </div>
+      {#if mode === 'dock'}
+        <div class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('sftp.independentConnection')}</div>
+      {/if}
     </header>
 
     <div class="flex items-center gap-1 px-3 py-1.5 border-b border-[var(--color-border-soft)] text-[12px]">
@@ -1731,8 +1800,9 @@
       </div>
     {/if}
 
+    <div class="flex-1 min-h-0 flex flex-col">
     <div class="flex-1 min-h-0 flex">
-      {#if showLocalPane && localCwd}
+      {#if showLocalPaneEffective}
         <div class="w-[42%] min-w-[200px] max-w-[50%] flex flex-col min-h-0">
           <SftpLocalPane
             cwd={localCwd}
@@ -1789,7 +1859,7 @@
                 {#each entries as e (e.name)}
                   <tr
                     data-remote-row=""
-                    class="hover:bg-[var(--color-panel-2)] group {selectedRemoteNames.has(e.name) ? 'bg-[var(--color-accent-soft)]' : ''} {focusedRemoteName === e.name ? 'outline outline-1 outline-[var(--color-accent)] outline-offset-[-1px]' : ''}"
+                    class="hover:bg-[var(--color-panel-2)] group {selectedRemoteNames.has(e.name) ? 'bg-[var(--color-accent-soft)] selected-row' : ''} {focusedRemoteName === e.name ? 'outline outline-1 outline-[var(--color-accent)] outline-offset-[-1px] selected-row' : ''}"
                     class:focused={focusedRemoteName === e.name}
                     draggable={!loading && (e.kind === 'File' || e.kind === 'Dir')}
                     role="option"
@@ -1848,7 +1918,7 @@
                       {#if e.kind === 'File'}
                         <button
                           type="button"
-                          class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                          class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [.group.selected-row_&]:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
                           onclick={(ev) => { ev.stopPropagation(); void openTextEditor(e); }}
                           title={i18n.t('sftp.editFile')}
                           aria-label={i18n.t('sftp.editFile')}
@@ -1859,7 +1929,7 @@
                       {#if e.kind === 'File' || e.kind === 'Dir'}
                         <button
                           type="button"
-                          class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                          class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [.group.selected-row_&]:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
                           onclick={(ev) => { ev.stopPropagation(); downloadEntry(e); }}
                           title={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
                           aria-label={e.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('common.download')}
@@ -1869,7 +1939,7 @@
                       {/if}
                       <button
                         type="button"
-                        class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
+                        class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [.group.selected-row_&]:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
                         onclick={(ev) => { ev.stopPropagation(); startInlineRename(e); }}
                         title={i18n.t('common.rename')}
                         aria-label={i18n.t('common.rename')}
@@ -1878,7 +1948,7 @@
                       </button>
                       <button
                         type="button"
-                        class="opacity-0 group-hover:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
+                        class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [.group.selected-row_&]:opacity-100 p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
                         onclick={(ev) => { ev.stopPropagation(); void removeEntry(e); }}
                         title={i18n.t('common.delete')}
                         aria-label={i18n.t('common.delete')}
@@ -1894,6 +1964,18 @@
         </div>
       </div>
     </div>
+
+    {#if !defaultDownloadDir && !downloadBannerDismissed && showLocalPane}
+      <div class="mx-3 mb-1 px-3 py-2 rounded border border-[var(--color-border-soft)] bg-[var(--color-panel-2)] text-[11px] flex items-center gap-2">
+        <span class="min-w-0 flex-1">{i18n.t('sftp.downloadDirBanner')}</span>
+        <button type="button" class="btn-secondary text-[11px] px-2 py-0.5 shrink-0" onclick={() => { void chooseDownloadDir(); }}>
+          {i18n.t('sftp.pickDownloadDir')}
+        </button>
+        <button type="button" class="btn-ghost p-1 shrink-0" aria-label={i18n.t('common.close')} onclick={() => { downloadBannerDismissed = true; }}>
+          <X size={12} />
+        </button>
+      </div>
+    {/if}
 
     <div class="border-t border-[var(--color-border-soft)] px-3 py-1.5 text-[11px] text-[var(--color-fg-muted)]
                 flex items-center gap-2 min-h-[28px]">
@@ -1916,108 +1998,40 @@
     </div>
 
     {#if transfers.length > 0}
-      <div class="border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] max-h-[180px] overflow-y-auto">
-        <div class="sticky top-0 z-10 flex flex-wrap items-center gap-2 px-3 py-1.5 bg-[var(--color-panel)] border-b border-[var(--color-border-soft)]">
-          <div class="text-[11px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">{i18n.t('sftp.transfers')}</div>
-          <div class="text-[11px] text-[var(--color-fg-muted)]">{transfers.length}</div>
-          <button type="button" class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-                  onclick={selectAllTransfers}>{i18n.t('sftp.transferSelectAll')}</button>
-          <button type="button" class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-                  onclick={invertTransferSelection}>{i18n.t('sftp.transferInvert')}</button>
-          {#if selectedTransferIds.size > 0}
-            <button type="button" class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-                    onclick={clearTransferSelection}>{i18n.t('sftp.transferClearSelection')}</button>
-            <button type="button" class="text-[11px] text-[var(--color-danger)] hover:underline"
-                    onclick={removeSelectedTransfers}>{i18n.t('sftp.transferRemoveSelected')}</button>
-          {/if}
-          <button
-            type="button"
-            class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-            onclick={cancelActiveTransfers}
-          >{i18n.t('sftp.cancelAll')}</button>
-          <button
-            type="button"
-            class="ml-auto text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-            onclick={clearFinishedTransfers}
-          >{i18n.t('common.clearFinished')}</button>
-          <button
-            type="button"
-            class="text-[11px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
-            onclick={clearAllTransfers}
-          >{i18n.t('sftp.transferClearAll')}</button>
-        </div>
-        <div class="divide-y divide-[var(--color-border-soft)]">
-          {#each transfers as task (task.id)}
-            {@const pct = transferPercent(task)}
-            <div class="px-3 py-2 text-[11.5px] {selectedTransferIds.has(task.id) ? 'bg-[var(--color-panel-2)]' : ''}">
-              <div class="flex items-center gap-2 min-w-0">
-                <input
-                  type="checkbox"
-                  class="shrink-0"
-                  checked={selectedTransferIds.has(task.id)}
-                  onchange={() => toggleTransferSelection(task.id)}
-                  aria-label={task.name}
-                />
-                {#if task.status === 'queued'}
-                  <Clock3 size={13} class="text-[var(--color-fg-muted)] shrink-0" />
-                {:else if task.status === 'paused'}
-                  <Clock3 size={13} class="text-[var(--color-warning)] shrink-0" />
-                {:else if task.status === 'running'}
-                  <Loader2 size={13} class="text-[var(--color-accent)] shrink-0 animate-spin" />
-                {:else if task.status === 'done'}
-                  <CheckCircle2 size={13} class="text-[var(--color-success)] shrink-0" />
-                {:else}
-                  <CircleX size={13} class="text-[var(--color-danger)] shrink-0" />
-                {/if}
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2 min-w-0">
-                    <span class="uppercase text-[9.5px] text-[var(--color-fg-muted)] shrink-0">{task.kind}</span>
-                    <span class="truncate text-[var(--color-fg)]">{task.name}</span>
-                    <span class="ml-auto text-[10.5px] text-[var(--color-fg-muted)] shrink-0">{pct}%</span>
-                  </div>
-                  <div class="mt-1 h-1 rounded bg-[var(--color-panel-2)] overflow-hidden">
-                    <div class="h-full bg-[var(--color-accent)]" style="width: {pct}%"></div>
-                  </div>
-                  <div class="mt-1 truncate text-[10.5px] text-[var(--color-fg-muted)]">{transferSummary(task)}</div>
-                </div>
-                {#if task.status === 'queued' || task.status === 'running' || task.status === 'paused'}
-                  {#if task.status === 'paused'}
-                    <button
-                      type="button"
-                      class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
-                      title={i18n.t('sftp.resumeTransfer')}
-                      aria-label={i18n.t('sftp.resumeTransfer')}
-                      onclick={() => resumeTransfer(task.id)}
-                    >
-                      <RefreshCw size={12} />
-                    </button>
-                  {:else}
-                    <button
-                      type="button"
-                      class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-warning)]"
-                      title={i18n.t('sftp.pauseTransfer')}
-                      aria-label={i18n.t('sftp.pauseTransfer')}
-                      onclick={() => pauseTransfer(task.id)}
-                    >
-                      <Clock3 size={12} />
-                    </button>
-                  {/if}
-                  <button
-                    type="button"
-                    class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]"
-                    title={i18n.t('sftp.cancelTransfer')}
-                    aria-label={i18n.t('sftp.cancelTransfer')}
-                    onclick={() => cancelTransfer(task.id)}
-                  >
-                    <X size={12} />
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      </div>
+      <button
+        type="button"
+        aria-label={i18n.t('sftp.resizeTransferPanel')}
+        class="h-[3px] shrink-0 cursor-row-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0 w-full"
+        onpointerdown={(ev) => {
+          startVerticalPanelResize(ev, {
+            startHeightPx: transferPanelHeightPx,
+            minPx: 120,
+            maxPx: 360,
+            onHeight: (h) => onTransferPanelHeightChange?.(h),
+          });
+        }}
+      ></button>
+      <SftpTransferQueue
+        variant="compact"
+        queueView="active"
+        tasks={transferQueueItems}
+        selectedIds={selectedTransferIds}
+        maxHeight="{transferPanelHeightPx}px"
+        onSelectAll={selectAllTransfers}
+        onInvertSelection={invertTransferSelection}
+        onClearSelection={clearTransferSelection}
+        onRemoveSelected={removeSelectedTransfers}
+        onCancelAll={cancelActiveTransfers}
+        onClearFinished={clearFinishedTransfers}
+        onClearAll={clearAllTransfers}
+        onToggleSelect={toggleTransferSelection}
+        onPause={pauseTransfer}
+        onResume={resumeTransfer}
+        onCancel={cancelTransfer}
+        onOpenTransferCenter={onOpenTransferCenter}
+      />
     {/if}
+    </div>
   </div>
 </div>
 
@@ -2026,6 +2040,7 @@
   <div use:portal class="contents">
     <div
       role="presentation"
+      data-aerotab-menu-open=""
       class="fixed inset-0 z-[58]"
       onmousedown={closeRemoteMenu}
       oncontextmenu={(e) => {
@@ -2037,6 +2052,7 @@
       bind:this={remoteMenuEl}
       role="menu"
       tabindex="-1"
+      data-aerotab-menu-open=""
       class="panel fixed z-[59] min-w-[200px] py-1 text-[12.5px]"
       style="left: {remoteMenuX}px; top: {remoteMenuY}px;"
       onmousedown={(e) => e.stopPropagation()}

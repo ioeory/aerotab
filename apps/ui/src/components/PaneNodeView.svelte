@@ -136,7 +136,7 @@
     role="group"
     tabindex="-1"
     style="display: {hiddenByMaximize ? 'none' : 'block'};"
-    class="relative h-full w-full min-w-0 min-h-0 bg-[var(--color-bg)] {focused ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
+    class="relative group h-full w-full min-w-0 min-h-0 bg-[var(--color-bg)] {focused ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
     data-pane-drop-tab={tab.id}
     data-pane-drop-pane={node.pane.id}
     onpointerdown={() => focusPane(node.pane.id)}
@@ -146,7 +146,10 @@
         bind:this={dragHandle}
         class="pane-drag-handle absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[10px]
                bg-[var(--color-panel)]/80 backdrop-blur border border-[var(--color-border-soft)]
-               cursor-grab active:cursor-grabbing select-none touch-none"
+               cursor-grab active:cursor-grabbing select-none touch-none
+               opacity-0 pointer-events-none transition-opacity
+               group-hover:opacity-100 group-hover:pointer-events-auto
+               group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
         title={i18n.t('pane.movePane')}
         aria-label={i18n.t('pane.movePane')}
         onpointerdown={(e) => {
@@ -182,7 +185,10 @@
         type="button"
         title={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
         aria-label={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
-        class="btn-ghost absolute top-1 right-7 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)]"
+        class="btn-ghost absolute top-1 right-7 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)]
+               opacity-0 pointer-events-none transition-opacity
+               group-hover:opacity-100 group-hover:pointer-events-auto
+               group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
         onclick={(e) => toggleMaximize(node.pane.id, e)}
         onpointerdown={(e) => e.stopPropagation()}
       >
@@ -192,7 +198,10 @@
         type="button"
         title={i18n.t('pane.closePaneShortcut')}
         aria-label={i18n.t('pane.closePane')}
-        class="btn-ghost absolute top-1 right-1 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)] hover:!text-[var(--color-danger)]"
+        class="btn-ghost absolute top-1 right-1 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)] hover:!text-[var(--color-danger)]
+               opacity-0 pointer-events-none transition-opacity
+               group-hover:opacity-100 group-hover:pointer-events-auto
+               group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
         onclick={(e) => closePane(node.pane.id, e)}
         onpointerdown={(e) => e.stopPropagation()}
       >

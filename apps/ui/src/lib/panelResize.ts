@@ -26,3 +26,30 @@ export function startHorizontalPanelResize(
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
 }
+
+/** Pointer-drag vertical resize (height grows when dragging up). */
+export function startVerticalPanelResize(
+  ev: PointerEvent,
+  opts: {
+    startHeightPx: number;
+    minPx: number;
+    maxPx: number;
+    onHeight: (heightPx: number) => void;
+    onEnd?: () => void;
+  },
+): void {
+  ev.preventDefault();
+  const startY = ev.clientY;
+  const { startHeightPx, minPx, maxPx, onHeight, onEnd } = opts;
+  const onMove = (move: PointerEvent) => {
+    const delta = startY - move.clientY;
+    onHeight(Math.max(minPx, Math.min(maxPx, startHeightPx + delta)));
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    onEnd?.();
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}

@@ -217,3 +217,10 @@ export class HotkeyManager {
 }
 
 export const hotkeys = new HotkeyManager();
+
+/** Primary binding label for command palette / menus. */
+export function hotkeyLabel(actionId: string): string | undefined {
+  const custom = hotkeys.getBindings(actionId);
+  if (custom[0]) return custom[0];
+  return ACTIONS.find((a) => a.id === actionId)?.defaultBindings[0];
+}

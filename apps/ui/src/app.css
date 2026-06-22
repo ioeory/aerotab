@@ -30,6 +30,12 @@
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "Menlo", monospace;
 }
 
+:root {
+  --z-modal: 50;
+  --z-menu: 120;
+  --z-tooltip: 130;
+}
+
 /* Window-section live-applied tokens. Defaults match a maximised opaque
  * window with the standard UI scale. WindowSection writes new values via
  * `lib/windowSettings.ts`. */

@@ -1,8 +1,5 @@
 <script lang="ts">
-  import {
-    X, ArrowLeftRight, RefreshCw, Clock3, Loader2, CheckCircle2, CircleX,
-    Pause, RotateCw, Trash2, History, ListChecks,
-  } from '@lucide/svelte';
+  import { X, ArrowLeftRight, RefreshCw, Pause, ListChecks } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode, tauriInvoke } from '../lib/rpc';
   import type { LocalEntry, SftpEntry, SshProfileSpec, StoredProfile } from '../lib/types';
@@ -17,9 +14,11 @@
     readSftpDragData,
     SFTP_DRAG_REMOTE,
   } from '../lib/sftpLocal';
-  import { onMount } from 'svelte';
-  import { tabs } from '../lib/tabs.svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { tabs, type TransferBootstrap } from '../lib/tabs.svelte';
+  import { transferTabBridge } from '../lib/transferTabBridge.svelte';
   import EndpointSelector from './EndpointSelector.svelte';
+  import SftpTransferQueue, { type TransferQueueItem } from './SftpTransferQueue.svelte';
 
   interface TransferTarget {
     name: string;
@@ -29,6 +28,8 @@
   interface Props {
     rpc: RpcClient;
     tabId?: string;
+    transferBootstrap?: TransferBootstrap;
+    onOpenSftpDock?: () => void;
     onError: (msg: string) => void;
   }
 
@@ -85,6 +86,8 @@
   let {
     rpc,
     tabId = '',
+    transferBootstrap,
+    onOpenSftpDock,
     onError,
   }: Props = $props();
 
@@ -110,6 +113,7 @@
   let selectedTaskIds = $state<Set<string>>(new Set());
   let tasksHydrated = $state(false);
   let progressTick = $state(0);
+  let queueView = $state<'active' | 'history'>('active');
 
   const STALE_PROGRESS_MS = TRANSFER_STALL_MS;
 
@@ -132,6 +136,7 @@
   const effectiveLeftTarget = $derived(leftTarget);
   const activeTasks = $derived(tasks.filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'paused'));
   const historyTasks = $derived(tasks.filter((t) => t.status === 'done' || t.status === 'error' || t.status === 'canceled'));
+  const pausedTasksCount = $derived(tasks.filter((t) => t.status === 'paused').length);
   const aggregate = $derived.by(() => {
     const running = activeTasks;
     const total = running.reduce((sum, t) => sum + Math.max(0, t.size), 0);
@@ -532,6 +537,17 @@
     const history = new Set(historyTasks.map((t) => t.id));
     tasks = tasks.filter((task) => !history.has(task.id));
     selectedTaskIds = new Set([...selectedTaskIds].filter((id) => !history.has(id)));
+  }
+
+  function clearFinishedTasks() {
+    tasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'canceled');
+    selectedTaskIds = new Set([...selectedTaskIds].filter((id) => tasks.some((task) => task.id === id)));
+  }
+
+  function resumeAllPaused() {
+    for (const task of tasks) {
+      if (task.status === 'paused') resumeTask(task.id);
+    }
   }
 
   function clearAllTasks() {
@@ -1099,30 +1115,55 @@
     return task.message ?? i18n.t('sftp.transferFailed');
   }
 
-  function statusIcon(task: TransferTask) {
-    if (task.status === 'queued') return Clock3;
-    if (task.status === 'paused') return Clock3;
-    if (task.status === 'running') return Loader2;
-    if (task.status === 'done') return CheckCircle2;
-    return CircleX;
+  function taskToQueueItem(task: TransferTask, view: 'active' | 'history'): TransferQueueItem {
+    void progressTick;
+    const pct = percent(task);
+    const baseSummary = summary(task);
+    return {
+      id: task.id,
+      name: task.name,
+      status: task.status,
+      percent: pct,
+      summary: view === 'history'
+        ? `${baseSummary} · ${i18n.t('transfer.attempts', { count: task.attempts })}`
+        : baseSummary,
+      directionLabel: view === 'active' ? directionLabel(task) : task.status,
+      modeLabel: view === 'active' ? taskModeLabel(task) : undefined,
+      routeLabel: `${task.sourceLabel} → ${task.destLabel}`,
+    };
   }
 
-  function statusClass(task: TransferTask): string {
-    if (task.status === 'running') return 'text-[var(--color-accent)] animate-spin';
-    if (task.status === 'paused') return 'text-[var(--color-warning)]';
-    if (task.status === 'done') return 'text-[var(--color-success)]';
-    if (task.status === 'error' || task.status === 'canceled') return 'text-[var(--color-danger)]';
-    return 'text-[var(--color-fg-muted)]';
-  }
+  const activeQueueItems = $derived(activeTasks.map((task) => taskToQueueItem(task, 'active')));
+  const historyQueueItems = $derived(historyTasks.map((task) => taskToQueueItem(task, 'history')));
+  const visibleQueueItems = $derived(queueView === 'active' ? activeQueueItems : historyQueueItems);
 
   onMount(() => {
     restorePersistedTasks();
     tasksHydrated = true;
     void refreshProfiles();
+    if (tabId) {
+      transferTabBridge.register(tabId, {
+        enqueueRemote: enqueueRemoteTransfer,
+        enqueueLocal: enqueueLocalUpload,
+      });
+    }
     const tick = window.setInterval(() => {
       if (activeTasks.some((t) => t.status === 'running')) progressTick += 1;
     }, 5000);
     return () => window.clearInterval(tick);
+  });
+
+  onDestroy(() => {
+    if (tabId) transferTabBridge.unregister(tabId);
+  });
+
+  $effect(() => {
+    const bootstrap = transferBootstrap;
+    if (!bootstrap || !tabId) return;
+    if (bootstrap.leftId) leftId = bootstrap.leftId;
+    const nextRight = bootstrap.rightId ?? bootstrap.rightProfileId;
+    if (nextRight) rightId = nextRight;
+    tabs.clearTransferBootstrap(tabId);
   });
 
   $effect(() => {
@@ -1164,7 +1205,7 @@
       </div>
     </header>
 
-    <div class="transfer-window-bar grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_minmax(132px,180px)] gap-2 items-end px-4 py-2 border-b border-[var(--color-border-soft)]">
+    <div class="transfer-window-bar grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-2 items-end px-4 py-2 border-b border-[var(--color-border-soft)]">
       <label class="min-w-0">
         <span class="block text-[10.5px] text-[var(--color-fg-muted)] mb-1">{i18n.t('transfer.leftServer')}</span>
         <EndpointSelector
@@ -1188,7 +1229,11 @@
           onChange={(v) => { rightId = v; }}
         />
       </label>
-      <label class="min-w-0">
+    </div>
+
+    <details class="transfer-window-bar px-4 py-1.5 border-b border-[var(--color-border-soft)] text-[12px]">
+      <summary class="cursor-pointer select-none text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]">{i18n.t('transfer.advanced')}</summary>
+      <label class="mt-2 block max-w-[220px]">
         <span class="block text-[10.5px] text-[var(--color-fg-muted)] mb-1">{i18n.t('transfer.mode')}</span>
         <select class="input py-1 text-[12px]" bind:value={transferMode}>
           <option value="auto">{i18n.t('transfer.modeAuto')}</option>
@@ -1196,7 +1241,7 @@
           <option value="relay">{i18n.t('transfer.modeRelay')}</option>
         </select>
       </label>
-    </div>
+    </details>
 
     <div class="transfer-workspace flex-1 min-h-0 grid grid-cols-2 divide-x divide-[var(--color-border-soft)]">
       <div class="transfer-pane min-w-0 min-h-0">
@@ -1271,83 +1316,77 @@
       <div class="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border-soft)] text-[11px]">
         <ListChecks size={13} class="text-[var(--color-accent)]" />
         <span class="uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">{i18n.t('transfer.queue')}</span>
-        <span class="text-[var(--color-fg-muted)]">{activeTasks.length}</span>
-        {#if aggregate.count > 0}
+        <div class="inline-flex rounded border border-[var(--color-border-soft)] overflow-hidden text-[10.5px]">
+          <button
+            type="button"
+            class="px-2 py-0.5 {queueView === 'active' ? 'bg-[var(--color-accent)] text-white' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
+            aria-pressed={queueView === 'active'}
+            onclick={() => { queueView = 'active'; }}
+          >
+            {i18n.t('transfer.queueActive')} ({activeTasks.length})
+          </button>
+          <button
+            type="button"
+            class="px-2 py-0.5 {queueView === 'history' ? 'bg-[var(--color-accent)] text-white' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
+            aria-pressed={queueView === 'history'}
+            onclick={() => { queueView = 'history'; }}
+          >
+            {i18n.t('transfer.history')} ({historyTasks.length})
+          </button>
+        </div>
+        {#if queueView === 'active' && aggregate.count > 0}
           <span class="text-[var(--color-fg-muted)]">{formatSize(aggregate.done)} / {formatSize(aggregate.total)} · {aggregate.percent}%</span>
         {/if}
-        <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={cancelActiveTasks}>{i18n.t('sftp.cancelAll')}</button>
-        <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={retryFailedTasks}>{i18n.t('transfer.retryFailed')}</button>
-        {#if selectedTaskIds.size > 0}
-          <button type="button" class="text-[var(--color-danger)] hover:underline" onclick={removeSelectedTasks}>{i18n.t('sftp.transferRemoveSelected')}</button>
-        {/if}
-        <button type="button" class="ml-auto text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={clearHistory}>{i18n.t('transfer.clearHistory')}</button>
-        <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={clearAllTasks}>{i18n.t('sftp.transferClearAll')}</button>
-      </div>
-      <div class="flex-1 min-h-0 overflow-y-auto divide-y divide-[var(--color-border-soft)]">
-        {#if tasks.length === 0}
-          <div class="h-full grid place-items-center text-[12px] text-[var(--color-fg-muted)]">{i18n.t('transfer.queueEmpty')}</div>
-        {:else}
-          {#each activeTasks as task (task.id)}
-            {@const Icon = statusIcon(task)}
-            {@const pct = percent(task)}
-            <div class="px-3 py-2 text-[11.5px] {selectedTaskIds.has(task.id) ? 'bg-[var(--color-panel-2)]' : ''}">
-              <div class="flex items-center gap-2 min-w-0">
-                <input type="checkbox" class="shrink-0" checked={selectedTaskIds.has(task.id)} onchange={() => toggleTaskSelection(task.id)} aria-label={task.name} />
-                <Icon size={13} class={`shrink-0 ${statusClass(task)}`} />
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2 min-w-0">
-                    <span class="uppercase text-[9.5px] text-[var(--color-fg-muted)] shrink-0">{directionLabel(task)}</span>
-                    <span class="uppercase text-[9.5px] text-[var(--color-accent)] shrink-0">{taskModeLabel(task)}</span>
-                    <span class="truncate text-[var(--color-fg)]">{task.name}</span>
-                    <span class="text-[10.5px] text-[var(--color-fg-muted)] truncate">{task.sourceLabel} → {task.destLabel}</span>
-                    <span class="ml-auto text-[10.5px] text-[var(--color-fg-muted)] shrink-0">{pct}%</span>
-                  </div>
-                  <div class="mt-1 h-1 rounded bg-[var(--color-panel-2)] overflow-hidden">
-                    <div class="h-full bg-[var(--color-accent)]" style="width: {pct}%"></div>
-                  </div>
-                  <div class="mt-1 truncate text-[10.5px] text-[var(--color-fg-muted)]">{summary(task)}</div>
-                </div>
-                {#if task.status === 'paused'}
-                  <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]" title={i18n.t('sftp.resumeTransfer')} aria-label={i18n.t('sftp.resumeTransfer')} onclick={() => resumeTask(task.id)}><RefreshCw size={12} /></button>
-                {:else}
-                  <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-warning)]" title={i18n.t('sftp.pauseTransfer')} aria-label={i18n.t('sftp.pauseTransfer')} onclick={() => pauseTask(task.id)}><Pause size={12} /></button>
-                {/if}
-                <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]" title={i18n.t('sftp.cancelTransfer')} aria-label={i18n.t('sftp.cancelTransfer')} onclick={() => cancelTask(task.id)}><X size={12} /></button>
-              </div>
-            </div>
-          {/each}
-          {#if historyTasks.length > 0}
-            <div class="sticky top-0 z-10 flex items-center gap-2 px-3 py-1 bg-[var(--color-panel)] text-[11px] text-[var(--color-fg-muted)]">
-              <History size={12} />
-              <span class="uppercase tracking-[0.12em]">{i18n.t('transfer.history')}</span>
-              <span>{historyTasks.length}</span>
-            </div>
-            {#each historyTasks as task (task.id)}
-              {@const Icon = statusIcon(task)}
-              {@const pct = percent(task)}
-              <div class="px-3 py-2 text-[11.5px] opacity-90 {selectedTaskIds.has(task.id) ? 'bg-[var(--color-panel-2)]' : ''}">
-                <div class="flex items-center gap-2 min-w-0">
-                  <input type="checkbox" class="shrink-0" checked={selectedTaskIds.has(task.id)} onchange={() => toggleTaskSelection(task.id)} aria-label={task.name} />
-                  <Icon size={13} class={`shrink-0 ${statusClass(task)}`} />
-                  <div class="min-w-0 flex-1">
-                    <div class="flex items-center gap-2 min-w-0">
-                      <span class="uppercase text-[9.5px] text-[var(--color-fg-muted)] shrink-0">{task.status}</span>
-                      <span class="truncate text-[var(--color-fg)]">{task.name}</span>
-                      <span class="text-[10.5px] text-[var(--color-fg-muted)] truncate">{task.sourceLabel} → {task.destLabel}</span>
-                      <span class="ml-auto text-[10.5px] text-[var(--color-fg-muted)] shrink-0">{pct}%</span>
-                    </div>
-                    <div class="mt-1 truncate text-[10.5px] text-[var(--color-fg-muted)]">{summary(task)} · {i18n.t('transfer.attempts', { count: task.attempts })}</div>
-                  </div>
-                  {#if task.status === 'error' || task.status === 'canceled'}
-                    <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]" title={i18n.t('transfer.retry')} aria-label={i18n.t('transfer.retry')} onclick={() => retryTask(task.id)}><RotateCw size={12} /></button>
-                  {/if}
-                  <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]" title={i18n.t('common.delete')} aria-label={i18n.t('common.delete')} onclick={() => { selectedTaskIds = new Set([task.id]); removeSelectedTasks(); }}><Trash2 size={12} /></button>
-                </div>
-              </div>
-            {/each}
+        {#if queueView === 'active'}
+          <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={cancelActiveTasks}>{i18n.t('sftp.cancelAll')}</button>
+          <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={clearFinishedTasks}>{i18n.t('transfer.clearCompleted')}</button>
+          <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={retryFailedTasks}>{i18n.t('transfer.retryFailed')}</button>
+          {#if selectedTaskIds.size > 0}
+            <button type="button" class="text-[var(--color-danger)] hover:underline" onclick={removeSelectedTasks}>{i18n.t('sftp.transferRemoveSelected')}</button>
           {/if}
+          <button type="button" class="ml-auto text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={clearAllTasks}>{i18n.t('sftp.transferClearAll')}</button>
+        {:else}
+          <button type="button" class="text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={retryFailedTasks}>{i18n.t('transfer.retryFailed')}</button>
+          <button type="button" class="ml-auto text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" onclick={clearHistory}>{i18n.t('transfer.clearHistory')}</button>
         {/if}
       </div>
+
+      {#if pausedTasksCount > 0}
+        <div class="flex items-center gap-2 px-3 py-1.5 bg-[var(--color-warning)]/10 border-b border-[var(--color-border-soft)] text-[11px]">
+          <Pause size={12} class="text-[var(--color-warning)] shrink-0" />
+          <span class="text-[var(--color-fg-muted)]">{i18n.t('transfer.pausedBanner', { count: pausedTasksCount })}</span>
+          <button type="button" class="ml-auto text-[var(--color-accent)] hover:underline" onclick={resumeAllPaused}>{i18n.t('transfer.resumeAll')}</button>
+        </div>
+      {/if}
+
+      {#if tasks.length === 0}
+        <div class="flex-1 min-h-0 grid place-items-center px-4 py-6 text-center">
+          <div class="max-w-sm space-y-3">
+            <p class="text-[12px] text-[var(--color-fg-muted)]">{i18n.t('transfer.queueEmptyHint')}</p>
+            {#if onOpenSftpDock}
+              <button type="button" class="btn-secondary text-[12px]" onclick={onOpenSftpDock}>
+                {i18n.t('transfer.useCurrentSshDock')}
+              </button>
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class="flex-1 min-h-0 flex flex-col">
+          <SftpTransferQueue
+            variant="full"
+            {queueView}
+            tasks={visibleQueueItems}
+            selectedIds={selectedTaskIds}
+            showToolbar={false}
+            onToggleSelect={toggleTaskSelection}
+            onPause={pauseTask}
+            onResume={resumeTask}
+            onCancel={cancelTask}
+            onRetry={retryTask}
+            onDelete={(id) => { selectedTaskIds = new Set([id]); removeSelectedTasks(); }}
+          />
+        </div>
+      {/if}
     </section>
   </div>
 </div>
@@ -1377,6 +1416,13 @@
 
   .transfer-queue {
     background: var(--color-surface-raised);
+  }
+
+  :global(.transfer-queue .sftp-transfer-queue) {
+    border-top: 0;
+    background: transparent;
+    flex: 1;
+    min-height: 0;
   }
 
   :global(.transfer-window-shell .panel),

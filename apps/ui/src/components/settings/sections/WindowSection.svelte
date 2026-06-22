@@ -144,7 +144,7 @@
     <input type="checkbox" bind:checked={focusFollowsMouse} onchange={markDirty} />
   </label>
   <label class="row">
-    <span class="row-label">{i18n.t('window.confirmCloseTabs')}</span>
+    <span class="row-label">{i18n.t('window.confirmCloseMultiplePanes')}</span>
     <input type="checkbox" bind:checked={confirmCloseWithMultipleTabs} onchange={markDirty} />
   </label>
 

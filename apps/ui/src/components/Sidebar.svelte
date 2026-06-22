@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X, RefreshCw, ArrowLeftRight,
+    Plus, Terminal as TerminalIcon, Server, Usb, Settings as SettingsIcon, Search, X, RefreshCw, ArrowLeftRight, ChevronDown,
   } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { SessionMeta, StoredProfile } from '../lib/types';
@@ -61,6 +61,8 @@
   } from '../lib/profileSelection';
   import type { ProfileHealthResult } from '../lib/types';
   import { onMount, onDestroy, tick } from 'svelte';
+  import { sidebarFocus } from '../lib/sidebarFocus.svelte';
+  import { clearSidebarProfileHandlers, registerSidebarProfileHandlers } from '../lib/sidebarProfileBridge';
   import logoUrl from '../assets/logo.png';
 
   interface Props {
@@ -341,11 +343,13 @@
     document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
     document.addEventListener('aerotab:settings-changed', onHotkeysChanged);
     document.addEventListener('aerotab:settings-synced', onHotkeysChanged);
+    registerSidebarProfileHandlers(profileShortcutHandlers);
   });
   onDestroy(() => {
     document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
     document.removeEventListener('aerotab:settings-changed', onHotkeysChanged);
     document.removeEventListener('aerotab:settings-synced', onHotkeysChanged);
+    clearSidebarProfileHandlers();
   });
 
   async function openLocal() {
@@ -518,6 +522,7 @@
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectionAnchorId = $state<string | null>(null);
   let bulkBusy = $state(false);
+  let bulkMenuOpen = $state(false);
   let healthRunning = $state(false);
   let profileHealth = $state<Record<string, ProfileHealthResult>>({});
   let inlineEditProfileId = $state<string | null>(null);
@@ -584,6 +589,7 @@
 
   function focusProfile(p: StoredProfile) {
     focusedProfileId = p.id;
+    sidebarFocus.setFocused(p.id);
   }
 
   function clearProfileSelection() {
@@ -1102,7 +1108,10 @@
     if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete'), position: lastMenuPosition ?? undefined }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
-      if (focusedProfileId === p.id) focusedProfileId = null;
+      if (focusedProfileId === p.id) {
+        focusedProfileId = null;
+        sidebarFocus.setFocused(null);
+      }
       notifyProfilesChanged();
       await refresh();
     } catch (e) {
@@ -1325,7 +1334,7 @@
     </div>
     <div class="help px-1 text-[10px] leading-snug">{i18n.t('sidebar.groupPathHint')}</div>
     {#if hasProfileSelection}
-      <div class="flex flex-wrap items-center gap-1 px-1 py-1 border border-[var(--color-border-soft)] rounded-md bg-[var(--color-panel-2)]">
+      <div class="relative flex flex-wrap items-center gap-1 px-1 py-1 border border-[var(--color-border-soft)] rounded-md bg-[var(--color-panel-2)]">
         <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profiles.selectedCount', { count: selectedProfileIds.size })}</span>
         <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
                 onclick={() => { selectedProfileIds = selectAllProfiles(filteredProfiles); }}>
@@ -1339,37 +1348,79 @@
                 onclick={clearProfileSelection}>
           {i18n.t('profiles.clearSelection')}
         </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
-                onclick={() => { void bulkOpenSelected('new-same'); }}>
-          {i18n.t('profiles.bulkConnectSameNewTab')}
+        <button
+          type="button"
+          class="btn-secondary text-[10px] py-0.5 px-1.5 inline-flex items-center gap-0.5"
+          disabled={bulkBusy}
+          aria-expanded={bulkMenuOpen}
+          onclick={(ev) => { ev.stopPropagation(); bulkMenuOpen = !bulkMenuOpen; }}
+        >
+          {i18n.t('sidebar.bulkActions')}
+          <ChevronDown size={10} class={bulkMenuOpen ? 'rotate-180' : ''} />
         </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
-                onclick={() => { void bulkOpenSelected('new-each'); }}>
-          {i18n.t('profiles.bulkConnectEachNewTab')}
-        </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
-                onclick={() => { void bulkOpenSelected('active'); }}>
-          {i18n.t('profiles.bulkConnect')}
-        </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy || healthRunning}
-                onclick={() => { void bulkHealthCheckSelected(); }}>
-          {healthRunning ? i18n.t('profiles.healthChecking') : i18n.t('profiles.bulkHealthCheck')}
-        </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
-                onclick={() => { void bulkMoveSelected(); }}>
-          {i18n.t('profiles.bulkMoveToGroup')}
-        </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5 text-[var(--color-danger)]" disabled={bulkBusy}
-                onclick={() => { void bulkDeleteSelected(); }}>
-          {i18n.t('profiles.bulkDelete')}
-        </button>
+        {#if bulkMenuOpen}
+          <div
+            role="presentation"
+            data-aerotab-menu-open=""
+            class="fixed inset-0 z-[calc(var(--z-menu)-1)]"
+            onclick={() => { bulkMenuOpen = false; }}
+          ></div>
+          <div
+            data-aerotab-context-menu=""
+            data-aerotab-menu-open=""
+            class="panel absolute left-1 right-1 top-full mt-0.5 z-[var(--z-menu)] py-1 text-[11px] shadow-lg"
+            role="menu"
+            onclick={(ev) => ev.stopPropagation()}
+          >
+            <button type="button" class="ctx-item w-full text-left" role="menuitem" disabled={bulkBusy}
+                    onclick={() => { bulkMenuOpen = false; void bulkOpenSelected('new-same'); }}>
+              {i18n.t('profiles.bulkConnectSameNewTab')}
+            </button>
+            <button type="button" class="ctx-item w-full text-left" role="menuitem" disabled={bulkBusy}
+                    onclick={() => { bulkMenuOpen = false; void bulkOpenSelected('new-each'); }}>
+              {i18n.t('profiles.bulkConnectEachNewTab')}
+            </button>
+            <button type="button" class="ctx-item w-full text-left" role="menuitem" disabled={bulkBusy}
+                    onclick={() => { bulkMenuOpen = false; void bulkOpenSelected('active'); }}>
+              {i18n.t('profiles.bulkConnect')}
+            </button>
+            <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+            <button type="button" class="ctx-item w-full text-left" role="menuitem" disabled={bulkBusy || healthRunning}
+                    onclick={() => { bulkMenuOpen = false; void bulkHealthCheckSelected(); }}>
+              {healthRunning ? i18n.t('profiles.healthChecking') : i18n.t('profiles.bulkHealthCheck')}
+            </button>
+            <button type="button" class="ctx-item w-full text-left" role="menuitem" disabled={bulkBusy}
+                    onclick={() => { bulkMenuOpen = false; void bulkMoveSelected(); }}>
+              {i18n.t('profiles.bulkMoveToGroup')}
+            </button>
+            <button type="button" class="ctx-item w-full text-left text-[var(--color-danger)]" role="menuitem" disabled={bulkBusy}
+                    onclick={() => { bulkMenuOpen = false; void bulkDeleteSelected(); }}>
+              {i18n.t('profiles.bulkDelete')}
+            </button>
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
   <div role="presentation" class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" ondragover={onRootDragOver} ondrop={onRootDrop}>
     {#if !hasVisibleProfiles}
-      <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)] italic">
-        {profileQuery.trim() ? i18n.t('sidebar.noSearchResults') : i18n.t('sidebar.noProfiles')}
+      <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)]">
+        {#if profileQuery.trim()}
+          <p class="italic mb-2">{i18n.t('sidebar.noSearchResults')}</p>
+          <div class="flex flex-wrap items-center gap-1.5 not-italic">
+            <button type="button" class="btn-secondary text-[10px] py-0.5 px-2" onclick={clearProfileSearch}>
+              {i18n.t('sidebar.clearSearch')}
+            </button>
+            <button type="button" class="btn-secondary text-[10px] py-0.5 px-2" onclick={() => openProfileModal()}>
+              {i18n.t('sidebar.newProfileEmpty')}
+            </button>
+          </div>
+        {:else}
+          <p class="italic mb-2">{i18n.t('sidebar.noProfiles')}</p>
+          <button type="button" class="btn-secondary text-[10px] py-0.5 px-2 not-italic" onclick={() => openProfileModal()}>
+            {i18n.t('sidebar.newProfileEmpty')}
+          </button>
+        {/if}
       </div>
     {:else}
       <SidebarProfileTree
@@ -1425,6 +1476,7 @@
   <div use:portal class="contents">
   <div
     role="presentation"
+    data-aerotab-menu-open=""
     class="fixed inset-0 z-[55]"
     onclick={closeMenu}
     oncontextmenu={(e) => {
@@ -1437,8 +1489,9 @@
     role="menu"
     tabindex="-1"
     data-aerotab-context-menu=""
-    class="panel context-menu-scroll fixed z-[56] min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
-    style="left: {menuX}px; top: {menuY}px;"
+    data-aerotab-menu-open=""
+    class="panel context-menu-scroll fixed min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
+    style="left: {menuX}px; top: {menuY}px; z-index: var(--z-menu);"
     onkeydown={onContextMenuKeydown}
     onscroll={realignActiveSubmenu}
     onclick={(e) => e.stopPropagation()}

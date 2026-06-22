@@ -34,6 +34,12 @@ interface PaneRect {
   h: number;
 }
 
+export interface TransferBootstrap {
+  leftId?: string;
+  rightId?: string;
+  rightProfileId?: string;
+}
+
 export interface Tab {
   id: string;
   kind: 'terminal' | 'transfer';
@@ -50,6 +56,8 @@ export interface Tab {
   customTitle?: string | null;
   /** Per-pane activity flags: 'output' since last focus or 'bell' if BEL seen. */
   activity: Record<string, 'output' | 'bell' | undefined>;
+  /** One-shot endpoint bootstrap for transfer tabs. */
+  transferBootstrap?: TransferBootstrap;
 }
 
 function leaf(session: SessionMeta): PaneLeaf {
@@ -306,7 +314,7 @@ class TabStore {
   }
 
   /** Open a new file-transfer tab. */
-  addTransferTab(title: string): Tab {
+  addTransferTab(title: string, bootstrap?: TransferBootstrap): Tab {
     const tab: Tab = {
       id: uuidv4(),
       kind: 'transfer',
@@ -317,11 +325,26 @@ class TabStore {
       title,
       customTitle: null,
       activity: {},
+      transferBootstrap: bootstrap,
     };
     this.tabs.push(tab);
     this.activeId = tab.id;
     this.bump();
     return tab;
+  }
+
+  clearTransferBootstrap(tabId: string) {
+    const tab = this.tabs.find((t) => t.id === tabId);
+    if (!tab?.transferBootstrap) return;
+    tab.transferBootstrap = undefined;
+    this.bump();
+  }
+
+  setTransferBootstrap(tabId: string, bootstrap: TransferBootstrap) {
+    const tab = this.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    tab.transferBootstrap = bootstrap;
+    this.bump();
   }
 
   /** Open a new tab from a prebuilt pane tree, used by session workspace restore. */

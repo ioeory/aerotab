@@ -70,10 +70,17 @@ export function handleProfileSidebarShortcut(
     if (when && !when(p)) continue;
     const actionId = PROFILE_SIDEBAR_ACTION_IDS[key];
     if (!hotkeys.matchesAction(ev, actionId)) continue;
-    const run = HANDLER_BY_KEY[key];
-    if (key === 'sftp' && !handlers.onOpenSftp) continue;
-    run(handlers, p);
+    runProfileSidebarAction(key, handlers, p);
     return true;
   }
   return false;
+}
+
+export function runProfileSidebarAction(
+  key: ProfileSidebarActionKey,
+  handlers: ProfileSidebarShortcutHandlers,
+  p: StoredProfile,
+): void {
+  if (key === 'sftp' && !handlers.onOpenSftp) return;
+  HANDLER_BY_KEY[key](handlers, p);
 }

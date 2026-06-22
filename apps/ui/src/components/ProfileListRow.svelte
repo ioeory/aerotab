@@ -242,6 +242,9 @@
           {/if}
         </div>
         <div class="profile-list-row-endpoint truncate">{profileEndpointLabel(p)}</div>
+        {#if variant === 'sidebar' && focused}
+          <div class="profile-list-row-connect-hint truncate">{i18n.t('sidebar.profileConnectHint')}</div>
+        {/if}
         {#if variant === 'sidebar' && p.note}
           <div class="profile-list-row-note truncate">{p.note}</div>
         {/if}
@@ -372,6 +375,11 @@
   .profile-list-row-endpoint {
     font-size: 10px;
     color: var(--color-fg-muted);
+  }
+  .profile-list-row-connect-hint {
+    font-size: 9.5px;
+    color: var(--color-accent);
+    opacity: 0.75;
   }
   .profile-list-row--settings .profile-list-row-endpoint {
     font-size: 11px;

@@ -1355,6 +1355,7 @@
   <div use:portal class="contents">
     <div
       role="presentation"
+      data-aerotab-menu-open=""
       class="fixed inset-0 z-40"
       onclick={() => (menuOpen = false)}
       oncontextmenu={(e) => { e.preventDefault(); menuOpen = false; }}
@@ -1364,6 +1365,7 @@
       role="menu"
       tabindex="-1"
       data-aerotab-context-menu=""
+      data-aerotab-menu-open=""
       class="panel fixed z-[41] min-w-[200px] py-1 text-[12.5px] text-[var(--color-fg)]"
       style="left: {menuX}px; top: {menuY}px;"
       onkeydown={(e) => e.stopPropagation()}
