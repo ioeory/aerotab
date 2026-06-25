@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { X, FolderOpen, ChevronLeft, Loader2 } from '@lucide/svelte';
+  import { X, FolderOpen, ChevronLeft, Loader2, Search } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { tauriInvoke } from '../lib/rpc';
   import { i18n } from '../lib/i18n.svelte';
@@ -15,6 +15,7 @@
     buildImportPreviewTree,
     collectFolderPaths,
     collectCandidatesInFolder,
+    countMatchingImportCandidates,
     flattenVisibleImportRows,
     importableCandidates,
     invertImportSelection,
@@ -27,9 +28,13 @@
   import {
     applyBatchAuthToCandidates,
     buildImportApplyItems,
+    hasBatchAuthChanges,
     matchAuthFromExistingProfiles,
+    remarkImportDuplicates,
+    validateBatchAuthConfig,
     type ImportBatchAuthConfig,
   } from '../lib/importAuth';
+  import { appConfirm } from '../lib/confirm.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -54,6 +59,8 @@
   let collapsedGroups = $state<Set<string>>(new Set());
   let browseBusy = $state(false);
   let existingProfiles = $state<StoredProfile[]>([]);
+  let batchAuthPanel = $state<{ getConfig(): ImportBatchAuthConfig } | undefined>();
+  let previewQuery = $state('');
 
   $effect(() => {
     if (!open) {
@@ -69,6 +76,7 @@
       collapsedGroups = new Set();
       browseBusy = false;
       existingProfiles = [];
+      previewQuery = '';
     }
   });
 
@@ -236,14 +244,34 @@
           previewTree,
           collapsedGroups,
           previewTree.candidates.length > 0 && previewTree.folders.length > 0,
+          previewQuery,
         )
       : [],
   );
 
+  let previewMatchCount = $derived(
+    preview ? countMatchingImportCandidates(preview.candidates, previewQuery) : 0,
+  );
+
+  function syncPreviewDuplicateMarks() {
+    if (!preview) return;
+    remarkImportDuplicates(preview.candidates, existingProfiles);
+    preview = {
+      ...preview,
+      candidates: [...preview.candidates],
+      stats: {
+        total: preview.candidates.length,
+        ready: preview.candidates.filter((c) => c.status === 'ready').length,
+        duplicate: preview.candidates.filter((c) => c.status === 'duplicate').length,
+        error: preview.candidates.filter((c) => c.status === 'error').length,
+      },
+    };
+  }
+
   function handleBatchAuth(config: ImportBatchAuthConfig) {
     if (!preview) return;
     const count = applyBatchAuthToCandidates(preview.candidates, selectedIds, config);
-    preview = { ...preview, candidates: [...preview.candidates] };
+    syncPreviewDuplicateMarks();
     onSummary?.(i18n.t('import.batchAuth.applied', { count }));
   }
 
@@ -254,15 +282,52 @@
       selectedIds,
       existingProfiles,
     );
-    preview = { ...preview, candidates: [...preview.candidates] };
+    syncPreviewDuplicateMarks();
     onSummary?.(i18n.t('import.batchAuth.matchResult', { matched, unmatched }));
   }
 
   async function applyImport() {
     if (!preview || selectedIds.size === 0) return;
+
+    const duplicateTargets = new Map<string, string>();
+    for (const sourceId of selectedIds) {
+      const row = preview.candidates.find((c) => c.sourceId === sourceId);
+      if (row?.duplicateOf) duplicateTargets.set(sourceId, row.duplicateOf);
+    }
+
+    const duplicateCount = duplicateTargets.size;
+    let overwriteDuplicates = false;
+    if (duplicateCount > 0) {
+      overwriteDuplicates = await appConfirm(
+        i18n.t('import.duplicateConfirmMessage', { count: duplicateCount }),
+        {
+          title: i18n.t('import.duplicateConfirmTitle'),
+          confirmLabel: i18n.t('import.duplicateConfirmOverwrite'),
+          cancelLabel: i18n.t('import.duplicateConfirmSkip'),
+        },
+      );
+    }
+
+    const batchConfig = batchAuthPanel?.getConfig();
+    if (batchConfig) {
+      const validationKey = validateBatchAuthConfig(batchConfig);
+      if (validationKey) {
+        onError(i18n.t(validationKey));
+        return;
+      }
+      if (hasBatchAuthChanges(batchConfig)) {
+        applyBatchAuthToCandidates(preview.candidates, selectedIds, batchConfig);
+      }
+    }
+
     applying = true;
     try {
-      const items = buildImportApplyItems(preview.candidates, selectedIds);
+      const items = buildImportApplyItems(
+        preview.candidates,
+        selectedIds,
+        overwriteDuplicates,
+        duplicateTargets,
+      );
       const r = await rpc.call<{ created: number; skipped: number; updated: number; errors: string[] }>(
         'profile.importApply',
         { source, path: preview.path ?? selectedPath ?? undefined, items },
@@ -401,7 +466,26 @@
               {i18n.t('import.collapseAll')}
             </button>
           </div>
+          <div class="relative mb-3">
+            <Search size={12} class="absolute left-2 top-1/2 -translate-y-1/2 opacity-60 pointer-events-none" />
+            <input
+              type="search"
+              bind:value={previewQuery}
+              placeholder={i18n.t('import.searchPlaceholder')}
+              class="input pl-7 text-[12px]"
+              aria-label={i18n.t('import.searchPlaceholder')}
+            />
+            {#if previewQuery.trim()}
+              <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">
+                {i18n.t('import.searchFiltered', {
+                  shown: previewMatchCount,
+                  total: preview.stats.total,
+                })}
+              </p>
+            {/if}
+          </div>
           <ImportAuthBatchPanel
+            bind:this={batchAuthPanel}
             {rpc}
             selectedCount={selectedIds.size}
             disabled={applying}
@@ -422,15 +506,23 @@
                 </tr>
               </thead>
               <tbody>
-                <ImportPreviewTable
-                  rows={previewRows}
-                  collapsed={collapsedGroups}
-                  {selectedIds}
-                  onToggleFolder={toggleFolder}
-                  onToggleRow={toggleRow}
-                  onToggleGroup={toggleGroup}
-                  statusLabel={statusLabel}
-                />
+                {#if previewQuery.trim() && previewMatchCount === 0}
+                  <tr>
+                    <td colspan="5" class="px-3 py-6 text-center text-[12px] text-[var(--color-fg-muted)]">
+                      {i18n.t('import.searchNoResults', { query: previewQuery.trim() })}
+                    </td>
+                  </tr>
+                {:else}
+                  <ImportPreviewTable
+                    rows={previewRows}
+                    collapsed={collapsedGroups}
+                    {selectedIds}
+                    onToggleFolder={toggleFolder}
+                    onToggleRow={toggleRow}
+                    onToggleGroup={toggleGroup}
+                    statusLabel={statusLabel}
+                  />
+                {/if}
               </tbody>
             </table>
           </div>

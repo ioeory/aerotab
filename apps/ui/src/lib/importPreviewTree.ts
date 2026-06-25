@@ -77,6 +77,60 @@ export function importableCandidates(candidates: ImportCandidate[]): ImportCandi
   return candidates.filter((c) => c.status === 'ready' || c.status === 'duplicate');
 }
 
+function importCandidateText(candidate: ImportCandidate): string {
+  const parts = [
+    candidate.name,
+    candidate.group ?? '',
+    candidate.kind,
+    candidate.note ?? '',
+    candidate.status,
+    candidate.errorMessage ?? '',
+    ...candidate.tags,
+  ];
+  if (candidate.profile?.kind === 'ssh') {
+    const ssh = candidate.profile.ssh;
+    parts.push(ssh.host, ssh.user, String(ssh.port));
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+/** Filter import preview rows by free-text query (name, host, user, group, tags, status). */
+export function matchesImportCandidateQuery(candidate: ImportCandidate, query: string): boolean {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return true;
+  const haystack = importCandidateText(candidate);
+  return tokens.every((token) => {
+    if (token.startsWith('#')) {
+      const needle = token.slice(1);
+      return candidate.tags.some((tag) => tag.toLowerCase().includes(needle));
+    }
+    if (token === 'duplicate' || token === '重复') {
+      return candidate.status === 'duplicate';
+    }
+    if (token === 'ready' || token === '可导入') {
+      return candidate.status === 'ready';
+    }
+    if (token === 'error' || token === '错误') {
+      return candidate.status === 'error';
+    }
+    return haystack.includes(token);
+  });
+}
+
+export function countMatchingImportCandidates(
+  candidates: ImportCandidate[],
+  query: string,
+): number {
+  const q = query.trim();
+  if (!q) return candidates.length;
+  return candidates.filter((c) => matchesImportCandidateQuery(c, q)).length;
+}
+
+function folderHasMatchingCandidate(folder: ImportPreviewFolder, query: string): boolean {
+  if (folder.candidates.some((c) => matchesImportCandidateQuery(c, query))) return true;
+  return folder.folders.some((child) => folderHasMatchingCandidate(child, query));
+}
+
 export function invertImportSelection(
   selected: Set<string>,
   candidates: ImportCandidate[],
@@ -99,8 +153,11 @@ function appendFolderContents(
   depth: number,
   collapsed: ReadonlySet<string>,
   rows: ImportPreviewRow[],
+  query = '',
 ): void {
+  const filtering = query.trim().length > 0;
   for (const candidate of folder.candidates) {
+    if (filtering && !matchesImportCandidateQuery(candidate, query)) continue;
     rows.push({
       kind: 'candidate',
       candidate,
@@ -109,9 +166,11 @@ function appendFolderContents(
     });
   }
   for (const child of folder.folders) {
+    if (filtering && !folderHasMatchingCandidate(child, query)) continue;
     rows.push({ kind: 'group', folder: child, depth, key: `g:${child.path}` });
-    if (!collapsed.has(child.path)) {
-      appendFolderContents(child, depth + 1, collapsed, rows);
+    const expanded = filtering || !collapsed.has(child.path);
+    if (expanded) {
+      appendFolderContents(child, depth + 1, collapsed, rows, query);
     }
   }
 }
@@ -121,19 +180,24 @@ export function flattenVisibleImportRows(
   root: ImportPreviewFolder,
   collapsed: ReadonlySet<string>,
   showUngroupedLabel: boolean,
+  query = '',
 ): ImportPreviewRow[] {
   const rows: ImportPreviewRow[] = [];
+  const filtering = query.trim().length > 0;
+  const ungrouped = filtering
+    ? root.candidates.filter((c) => matchesImportCandidateQuery(c, query))
+    : root.candidates;
 
-  if (root.candidates.length > 0) {
-    if (showUngroupedLabel) {
+  if (ungrouped.length > 0) {
+    if (showUngroupedLabel && !filtering) {
       rows.push({
         kind: 'ungrouped-header',
-        count: root.candidates.length,
+        count: ungrouped.length,
         depth: 0,
         key: 'ungrouped',
       });
     }
-    for (const candidate of root.candidates) {
+    for (const candidate of ungrouped) {
       rows.push({
         kind: 'candidate',
         candidate,
@@ -144,9 +208,11 @@ export function flattenVisibleImportRows(
   }
 
   for (const child of root.folders) {
+    if (filtering && !folderHasMatchingCandidate(child, query)) continue;
     rows.push({ kind: 'group', folder: child, depth: 0, key: `g:${child.path}` });
-    if (!collapsed.has(child.path)) {
-      appendFolderContents(child, 1, collapsed, rows);
+    const expanded = filtering || !collapsed.has(child.path);
+    if (expanded) {
+      appendFolderContents(child, 1, collapsed, rows, query);
     }
   }
 

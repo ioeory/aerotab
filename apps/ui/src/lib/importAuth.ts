@@ -98,22 +98,93 @@ export function matchAuthFromExistingProfiles(
 export interface ImportApplyItemPayload {
   sourceId: string;
   overwrite: boolean;
+  duplicateOf?: string;
+  profile?: StoredProfile;
   user?: string;
   auth?: SshAuth;
+}
+
+export function countSelectedImportDuplicates(
+  candidates: ImportCandidate[],
+  selectedIds: Set<string>,
+): number {
+  let count = 0;
+  for (const sourceId of selectedIds) {
+    const row = candidates.find((c) => c.sourceId === sourceId);
+    if (row?.duplicateOf) count += 1;
+  }
+  return count;
+}
+
+/** True when batch panel has user/auth changes to apply on import. */
+export function hasBatchAuthChanges(config: ImportBatchAuthConfig): boolean {
+  if (config.userOverride.trim()) return true;
+  return config.mode !== 'keep';
+}
+
+export function validateBatchAuthConfig(config: ImportBatchAuthConfig): string | null {
+  if (!hasBatchAuthChanges(config)) return null;
+  if (config.mode === 'password' && !config.password.trim()) {
+    return 'import.batchAuth.passwordRequired';
+  }
+  if (config.mode === 'key' && !config.keyPath.trim()) {
+    return 'import.batchAuth.keyPathRequired';
+  }
+  if (config.mode === 'vault' && !config.vaultEntryId.trim()) {
+    return 'import.batchAuth.vaultEntryRequired';
+  }
+  return null;
+}
+
+/** Recompute duplicate status from current candidate endpoints vs stored profiles. */
+export function remarkImportDuplicates(
+  candidates: ImportCandidate[],
+  existing: StoredProfile[],
+): void {
+  const byEndpoint = new Map<string, string>();
+  for (const p of existing) {
+    if (p.kind !== 'ssh') continue;
+    byEndpoint.set(sshEndpointKey(p.ssh), p.id);
+  }
+  for (const c of candidates) {
+    if (c.status === 'error' || !c.profile) continue;
+    if (c.profile.kind !== 'ssh') {
+      if (c.status === 'duplicate') {
+        c.status = 'ready';
+        c.duplicateOf = null;
+      }
+      continue;
+    }
+    const hit = byEndpoint.get(sshEndpointKey(c.profile.ssh));
+    if (hit) {
+      c.status = 'duplicate';
+      c.duplicateOf = hit;
+    } else {
+      c.status = 'ready';
+      c.duplicateOf = null;
+    }
+  }
 }
 
 export function buildImportApplyItems(
   candidates: ImportCandidate[],
   selectedIds: Set<string>,
+  overwriteDuplicates = false,
+  duplicateTargets?: ReadonlyMap<string, string>,
 ): ImportApplyItemPayload[] {
   const items: ImportApplyItemPayload[] = [];
   for (const sourceId of selectedIds) {
     const row = candidates.find((c) => c.sourceId === sourceId);
     if (!row) continue;
+    const duplicateOf = duplicateTargets?.get(sourceId) ?? row.duplicateOf ?? undefined;
     const item: ImportApplyItemPayload = {
       sourceId,
-      overwrite: row.status === 'duplicate',
+      overwrite: overwriteDuplicates && Boolean(duplicateOf),
+      duplicateOf,
     };
+    if (row.profile) {
+      item.profile = structuredClone(row.profile);
+    }
     if (row.profile?.kind === 'ssh') {
       item.user = row.profile.ssh.user;
       item.auth = row.profile.ssh.auth;

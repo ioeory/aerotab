@@ -106,7 +106,8 @@ pub fn mark_duplicates(candidates: &mut [ImportCandidate], existing: &[Profile])
         let Some(profile) = c.profile.as_ref() else {
             continue;
         };
-        if c.status != ImportCandidateStatus::Ready {
+        if c.status != ImportCandidateStatus::Ready && c.status != ImportCandidateStatus::Duplicate
+        {
             continue;
         }
         let Some(key) = endpoint_key(profile) else {
@@ -115,8 +116,19 @@ pub fn mark_duplicates(candidates: &mut [ImportCandidate], existing: &[Profile])
         if let Some(id) = seen.get(&key) {
             c.status = ImportCandidateStatus::Duplicate;
             c.duplicate_of = Some(*id);
+        } else if c.status == ImportCandidateStatus::Duplicate {
+            c.status = ImportCandidateStatus::Ready;
+            c.duplicate_of = None;
         }
     }
+}
+
+/// Find a stored profile id matching the same endpoint as `profile`.
+pub fn existing_id_for_endpoint(existing: &[Profile], profile: &Profile) -> Option<Uuid> {
+    let key = endpoint_key(profile)?;
+    existing
+        .iter()
+        .find_map(|p| endpoint_key(p).filter(|k| k == &key).map(|_| p.id))
 }
 
 pub fn preview_stats(candidates: &[ImportCandidate]) -> ImportPreviewStats {
@@ -135,5 +147,46 @@ pub fn preview_stats(candidates: &[ImportCandidate]) -> ImportPreviewStats {
         ready,
         duplicate,
         error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::{Profile, ProfileKind};
+    use crate::ssh::{AuthMethod, SshProfile};
+
+    fn ssh(user: &str, host: &str) -> Profile {
+        Profile {
+            schema_version: 1,
+            id: Uuid::new_v4(),
+            name: host.into(),
+            group: None,
+            tags: vec![],
+            note: None,
+            icon: None,
+            favorite: false,
+            spec: ProfileKind::Ssh {
+                ssh: SshProfile {
+                    host: host.into(),
+                    port: 22,
+                    user: user.into(),
+                    auth: AuthMethod::Agent,
+                    jump_via: vec![],
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn existing_id_for_endpoint_matches_case_insensitive() {
+        let id = Uuid::new_v4();
+        let mut existing = ssh("Root", "HOST.example");
+        existing.id = id;
+        let probe = ssh("root", "host.example");
+        assert_eq!(
+            existing_id_for_endpoint(std::slice::from_ref(&existing), &probe),
+            Some(id)
+        );
     }
 }

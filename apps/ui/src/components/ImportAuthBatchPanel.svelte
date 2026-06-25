@@ -93,6 +93,20 @@
     });
   }
 
+  function getConfig(): ImportBatchAuthConfig {
+    return {
+      userOverride,
+      mode,
+      password,
+      keyPath,
+      keyPassphrase,
+      vaultEntryId,
+      vaultPassphraseEntryId,
+    };
+  }
+
+  export { getConfig };
+
   const canApply = $derived(
     selectedCount > 0
       && !disabled

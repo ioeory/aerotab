@@ -22,6 +22,7 @@
 - **Remote desktop** — RDP / VNC profiles with optional SSH tunnel
 - **X11 forwarding** — per-session (Unix), enabled in Settings → SSH
 - **Host stats** — CPU/memory/disk in the status area (separate exec channel)
+- **Connection import** — Settings → Profiles → **Import connections…** (or command palette). Sources: WindTerm, Termius, OpenSSH config, CSV, PuTTY `.reg`, MobaXterm, Xshell, SecureCRT, Tabby/AeroTab export. Preview step supports **search**, grouped folders (expand/collapse), select all/invert, **batch auth** (username, password, key, agent, Vault — applied on import), match auth from existing profiles, and **overwrite** confirmation for duplicates.
 
 ## Quick start
 

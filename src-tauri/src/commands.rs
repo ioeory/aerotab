@@ -1001,9 +1001,10 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
 fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
     use crate::import::{
-        apply_ssh_import_overrides, import_detect, load_import_preview, mark_duplicates,
-        ImportApplyResult, ImportCandidateStatus, ImportPreviewResult,
+        apply_ssh_import_overrides, existing_id_for_endpoint, import_detect, load_import_preview,
+        mark_duplicates, ImportApplyResult, ImportCandidateStatus, ImportPreviewResult,
     };
+    use crate::profile::Profile;
     use crate::ssh::AuthMethod;
 
     #[derive(Debug, Deserialize)]
@@ -1028,6 +1029,10 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
         user: Option<String>,
         #[serde(default)]
         auth: Option<AuthMethod>,
+        #[serde(default)]
+        duplicate_of: Option<Uuid>,
+        #[serde(default)]
+        profile: Option<Profile>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -1094,7 +1099,8 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         skipped += 1;
                         continue;
                     };
-                    let Some(mut profile) = c.profile.clone() else {
+                    let Some(mut profile) = item.profile.clone().or_else(|| c.profile.clone())
+                    else {
                         skipped += 1;
                         continue;
                     };
@@ -1103,22 +1109,33 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         item.user.as_deref(),
                         item.auth.as_ref(),
                     );
-                    match c.status {
-                        ImportCandidateStatus::Error => {
-                            skipped += 1;
-                        }
-                        ImportCandidateStatus::Duplicate if !item.overwrite => {
-                            skipped += 1;
-                        }
-                        ImportCandidateStatus::Duplicate if item.overwrite => {
-                            if let Some(id) = c.duplicate_of {
-                                profile.id = id;
-                            }
+                    if item.overwrite {
+                        let target_id = item
+                            .duplicate_of
+                            .or(c.duplicate_of)
+                            .or_else(|| existing_id_for_endpoint(&existing, &profile));
+                        if let Some(id) = target_id {
+                            profile.id = id;
                             if let Err(e) = store.upsert(profile).await {
                                 errors.push(format!("{}: {e}", c.name));
                             } else {
                                 updated += 1;
                             }
+                        } else {
+                            errors.push(format!(
+                                "{}: no existing profile matched for overwrite",
+                                c.name
+                            ));
+                            skipped += 1;
+                        }
+                        continue;
+                    }
+                    match c.status {
+                        ImportCandidateStatus::Error => {
+                            skipped += 1;
+                        }
+                        ImportCandidateStatus::Duplicate => {
+                            skipped += 1;
                         }
                         ImportCandidateStatus::Ready => {
                             if let Err(e) = store.upsert(profile).await {
@@ -1126,9 +1143,6 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
                             } else {
                                 created += 1;
                             }
-                        }
-                        ImportCandidateStatus::Duplicate => {
-                            skipped += 1;
                         }
                     }
                 }
@@ -3944,12 +3958,18 @@ mod tests {
             source_id: String,
             #[serde(default)]
             overwrite: bool,
+            #[serde(default)]
+            duplicate_of: Option<uuid::Uuid>,
         }
 
-        let item: ImportApplyItem =
-            serde_json::from_value(json!({"sourceId": "windterm-uuid-1", "overwrite": true}))
-                .unwrap();
+        let item: ImportApplyItem = serde_json::from_value(json!({
+            "sourceId": "windterm-uuid-1",
+            "overwrite": true,
+            "duplicateOf": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .unwrap();
         assert_eq!(item.source_id, "windterm-uuid-1");
         assert!(item.overwrite);
+        assert!(item.duplicate_of.is_some());
     }
 }

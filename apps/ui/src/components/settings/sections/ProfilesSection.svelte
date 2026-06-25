@@ -60,6 +60,7 @@
   let loading = $state(true);
   let loadError = $state('');
   let loadGen = 0;
+  let profilesChangedTimer: ReturnType<typeof setTimeout> | null = null;
   let healthRunning = $state(false);
   let visualStatus = $state('');
   let visualImportInput: HTMLInputElement | null = null;
@@ -77,9 +78,10 @@
     open: (existing?: StoredProfile, options?: { group?: string }) => void;
   } | null = $state(null);
 
-  async function load() {
+  async function load(refresh = false) {
     const gen = ++loadGen;
-    loading = true;
+    const showLoading = !refresh && saved.length === 0;
+    if (showLoading) loading = true;
     loadError = '';
     const failsafe = setTimeout(() => {
       if (gen === loadGen && loading) {
@@ -94,13 +96,14 @@
         'profile.list',
       ).catch((e) => {
         const msg = (e as Error).message;
-        loadError = msg;
-        onError(`profiles: ${msg}`);
+        if (gen === loadGen) {
+          loadError = msg;
+          onError(`profiles: ${msg}`);
+        }
         return [] as StoredProfile[];
       });
       if (gen !== loadGen) return;
       saved = listResult;
-      loading = false;
 
       void withRpcTimeout(
         rpc.call<{ sshConfig: SshConfigEntry[] }>('profile.discover'),
@@ -119,7 +122,6 @@
       if (gen === loadGen) {
         loadError = (e as Error).message;
         saved = [];
-        loading = false;
       }
     } finally {
       clearTimeout(failsafe);
@@ -127,7 +129,13 @@
     }
   }
 
-  const onProfilesChanged = () => { void load(); };
+  const onProfilesChanged = () => {
+    if (profilesChangedTimer) clearTimeout(profilesChangedTimer);
+    profilesChangedTimer = setTimeout(() => {
+      profilesChangedTimer = null;
+      void load(true);
+    }, 80);
+  };
 
   const grouped = $derived(() => {
     const groups = new Map<string, StoredProfile[]>();
@@ -417,6 +425,7 @@
     void load();
   });
   onDestroy(() => {
+    if (profilesChangedTimer) clearTimeout(profilesChangedTimer);
     document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
   });
 </script>
