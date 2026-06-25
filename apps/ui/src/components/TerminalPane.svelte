@@ -73,6 +73,10 @@
     type TrzszTerminalOutput,
   } from '../lib/trzszBridge';
   import {
+    installWindowsTerminalCaretFix,
+    refreshCursorBlinkIfFocused,
+  } from '../lib/terminalInputWindows';
+  import {
     installMacTextareaInputGuard,
     shouldSuppressMacSpuriousInput,
     trackMacBackspaceKeydown,
@@ -693,6 +697,7 @@
 
     if (target === 'canvas') {
       await loadCanvas();
+      refreshCursorBlinkIfFocused(term);
       return;
     }
 
@@ -713,6 +718,7 @@
       console.warn('webgl renderer failed; falling back to canvas:', err);
       await loadCanvas();
     }
+    refreshCursorBlinkIfFocused(term);
   }
 
   onMount(async () => {
@@ -756,9 +762,14 @@
     await applyRenderer(cfg.renderer);
     scheduleSafeFit();
 
+    const activeTerm = term;
+    windowsCaretFix = installWindowsTerminalCaretFix(activeTerm.textarea);
+    const textarea = activeTerm.textarea;
+    const onTextareaFocus = () => refreshCursorBlinkIfFocused(activeTerm);
+    textarea?.addEventListener('focus', onTextareaFocus);
+
     // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
     // macOS WKWebView: after Backspace, filter stray space only — xterm must encode keys (vim/zsh).
-    const activeTerm = term;
     activeTerm.attachCustomKeyEventHandler((ev) => {
       if (ev.type === 'keydown') trackMacBackspaceKeydown(ev);
       if (ev.type !== 'keydown') return true;
@@ -822,6 +833,7 @@
     documentHidden = document.hidden;
     document.addEventListener('visibilitychange', onVis);
     cleanupSearchListener = () => {
+      textarea?.removeEventListener('focus', onTextareaFocus);
       document.removeEventListener('aerotab:search', searchListener);
       document.removeEventListener('aerotab:settings-changed', settingsListener);
       document.removeEventListener('aerotab:terminal-copy', copyListener);
@@ -893,6 +905,7 @@
   let cleanupHost: (() => void) | null = null;
   let cleanupSearchListener: (() => void) | null = null;
   let macTextareaGuard: (() => void) | null = null;
+  let windowsCaretFix: (() => void) | null = null;
   let lastSessionId: string | null = null;
 
   $effect(() => {
@@ -973,6 +986,7 @@
     await configureTransferFilter(cfg.experimentalTransferDetection);
     await applyRenderer(cfg.renderer);
     applyLigatures(cfg.ligatures);
+    refreshCursorBlinkIfFocused(term);
     // Force a full redraw so canvas/webgl renderers invalidate their glyph
     // atlas and pick up the new palette / font metrics. xterm only repaints
     // changed cells otherwise, which leaves stale colors on screen.
@@ -997,6 +1011,8 @@
     cleanupSearchListener = null;
     macTextareaGuard?.();
     macTextareaGuard = null;
+    windowsCaretFix?.();
+    windowsCaretFix = null;
     cancelPolling();
     clearTransferNotice();
     transferFilter = null;

@@ -138,6 +138,18 @@ button { font-family: inherit; }
   line-height: inherit;
 }
 
+/* xterm syncs .xterm-helper-textarea to the cell cursor for IME/input. WebView2
+ * on Windows can still paint a blinking native text caret there (looks like a
+ * flickering I-beam/mouse cursor) while the rendered block cursor stays solid. */
+.xterm .xterm-helper-textarea {
+  caret-color: transparent !important;
+  color: transparent !important;
+  background-color: transparent !important;
+}
+.xterm .xterm-helper-textarea:focus {
+  outline: none !important;
+}
+
 body[data-translucent="true"] .xterm,
 body[data-translucent="true"] .xterm .xterm-helpers,
 body[data-translucent="true"] .xterm .xterm-screen,
