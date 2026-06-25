@@ -95,11 +95,27 @@ pub fn endpoint_key(profile: &Profile) -> Option<String> {
     }
 }
 
+fn host_port_key(profile: &Profile) -> Option<String> {
+    use crate::profile::ProfileKind;
+    match &profile.spec {
+        ProfileKind::Ssh { ssh } => Some(format!("{}:{}", ssh.host.to_ascii_lowercase(), ssh.port)),
+        ProfileKind::Rdp { rdp } => Some(format!("{}:{}", rdp.host.to_ascii_lowercase(), rdp.port)),
+        ProfileKind::Vnc { spec } => {
+            Some(format!("{}:{}", spec.host.to_ascii_lowercase(), spec.port))
+        }
+    }
+}
+
 pub fn mark_duplicates(candidates: &mut [ImportCandidate], existing: &[Profile]) {
     let mut seen: std::collections::HashMap<String, Uuid> = std::collections::HashMap::new();
+    let mut seen_host_port: std::collections::HashMap<String, Uuid> =
+        std::collections::HashMap::new();
     for p in existing {
         if let Some(k) = endpoint_key(p) {
             seen.entry(k).or_insert(p.id);
+        }
+        if let Some(k) = host_port_key(p) {
+            seen_host_port.entry(k).or_insert(p.id);
         }
     }
     for c in candidates.iter_mut() {
@@ -110,12 +126,12 @@ pub fn mark_duplicates(candidates: &mut [ImportCandidate], existing: &[Profile])
         {
             continue;
         }
-        let Some(key) = endpoint_key(profile) else {
-            continue;
-        };
-        if let Some(id) = seen.get(&key) {
+        let hit = endpoint_key(profile)
+            .and_then(|key| seen.get(&key).copied())
+            .or_else(|| host_port_key(profile).and_then(|key| seen_host_port.get(&key).copied()));
+        if let Some(id) = hit {
             c.status = ImportCandidateStatus::Duplicate;
-            c.duplicate_of = Some(*id);
+            c.duplicate_of = Some(id);
         } else if c.status == ImportCandidateStatus::Duplicate {
             c.status = ImportCandidateStatus::Ready;
             c.duplicate_of = None;
@@ -126,9 +142,16 @@ pub fn mark_duplicates(candidates: &mut [ImportCandidate], existing: &[Profile])
 /// Find a stored profile id matching the same endpoint as `profile`.
 pub fn existing_id_for_endpoint(existing: &[Profile], profile: &Profile) -> Option<Uuid> {
     let key = endpoint_key(profile)?;
-    existing
+    if let Some(id) = existing
         .iter()
         .find_map(|p| endpoint_key(p).filter(|k| k == &key).map(|_| p.id))
+    {
+        return Some(id);
+    }
+    let hp = host_port_key(profile)?;
+    existing
+        .iter()
+        .find_map(|p| host_port_key(p).filter(|k| k == &hp).map(|_| p.id))
 }
 
 pub fn preview_stats(candidates: &[ImportCandidate]) -> ImportPreviewStats {
@@ -184,6 +207,18 @@ mod tests {
         let mut existing = ssh("Root", "HOST.example");
         existing.id = id;
         let probe = ssh("root", "host.example");
+        assert_eq!(
+            existing_id_for_endpoint(std::slice::from_ref(&existing), &probe),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn existing_id_for_endpoint_falls_back_to_host_port() {
+        let id = Uuid::new_v4();
+        let mut existing = ssh("root", "10.0.0.5");
+        existing.id = id;
+        let probe = ssh("devops", "10.0.0.5");
         assert_eq!(
             existing_id_for_endpoint(std::slice::from_ref(&existing), &probe),
             Some(id)

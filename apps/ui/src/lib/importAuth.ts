@@ -17,6 +17,10 @@ export function sshEndpointKey(ssh: SshProfileSpec): string {
   return `ssh:${ssh.user.toLowerCase()}@${ssh.host.toLowerCase()}:${ssh.port}`;
 }
 
+export function sshHostPortKey(ssh: SshProfileSpec): string {
+  return `${ssh.host.toLowerCase()}:${ssh.port}`;
+}
+
 export function buildBatchAuth(config: ImportBatchAuthConfig): SshAuth | null {
   switch (config.mode) {
     case 'keep':
@@ -142,9 +146,11 @@ export function remarkImportDuplicates(
   existing: StoredProfile[],
 ): void {
   const byEndpoint = new Map<string, string>();
+  const byHostPort = new Map<string, string>();
   for (const p of existing) {
     if (p.kind !== 'ssh') continue;
     byEndpoint.set(sshEndpointKey(p.ssh), p.id);
+    byHostPort.set(sshHostPortKey(p.ssh), p.id);
   }
   for (const c of candidates) {
     if (c.status === 'error' || !c.profile) continue;
@@ -155,15 +161,42 @@ export function remarkImportDuplicates(
       }
       continue;
     }
-    const hit = byEndpoint.get(sshEndpointKey(c.profile.ssh));
+    const hit =
+      byEndpoint.get(sshEndpointKey(c.profile.ssh))
+      ?? byHostPort.get(sshHostPortKey(c.profile.ssh));
     if (hit) {
       c.status = 'duplicate';
       c.duplicateOf = hit;
-    } else {
+    } else if (c.status === 'duplicate') {
       c.status = 'ready';
       c.duplicateOf = null;
     }
   }
+}
+
+export function buildDuplicateTargets(
+  candidates: ImportCandidate[],
+  selectedIds: Set<string>,
+  existing: StoredProfile[],
+): Map<string, string> {
+  const byEndpoint = new Map<string, string>();
+  const byHostPort = new Map<string, string>();
+  for (const p of existing) {
+    if (p.kind !== 'ssh') continue;
+    byEndpoint.set(sshEndpointKey(p.ssh), p.id);
+    byHostPort.set(sshHostPortKey(p.ssh), p.id);
+  }
+  const targets = new Map<string, string>();
+  for (const sourceId of selectedIds) {
+    const row = candidates.find((c) => c.sourceId === sourceId);
+    if (!row?.profile || row.profile.kind !== 'ssh') continue;
+    const id =
+      row.duplicateOf
+      ?? byEndpoint.get(sshEndpointKey(row.profile.ssh))
+      ?? byHostPort.get(sshHostPortKey(row.profile.ssh));
+    if (id) targets.set(sourceId, id);
+  }
+  return targets;
 }
 
 export function buildImportApplyItems(

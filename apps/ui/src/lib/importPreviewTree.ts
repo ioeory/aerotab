@@ -126,6 +126,38 @@ export function countMatchingImportCandidates(
   return candidates.filter((c) => matchesImportCandidateQuery(c, q)).length;
 }
 
+export function filteredImportableCandidates(
+  candidates: ImportCandidate[],
+  query: string,
+): ImportCandidate[] {
+  const q = query.trim();
+  const importable = importableCandidates(candidates);
+  if (!q) return importable;
+  return importable.filter((c) => matchesImportCandidateQuery(c, q));
+}
+
+export function countSelectedInQuery(
+  candidates: ImportCandidate[],
+  selected: Set<string>,
+  query: string,
+): number {
+  const q = query.trim();
+  if (!q) return selected.size;
+  let count = 0;
+  for (const sourceId of selected) {
+    const row = candidates.find((c) => c.sourceId === sourceId);
+    if (row && matchesImportCandidateQuery(row, q)) count += 1;
+  }
+  return count;
+}
+
+export function selectFilteredImportableIds(
+  candidates: ImportCandidate[],
+  query: string,
+): Set<string> {
+  return new Set(filteredImportableCandidates(candidates, query).map((c) => c.sourceId));
+}
+
 function folderHasMatchingCandidate(folder: ImportPreviewFolder, query: string): boolean {
   if (folder.candidates.some((c) => matchesImportCandidateQuery(c, query))) return true;
   return folder.folders.some((child) => folderHasMatchingCandidate(child, query));

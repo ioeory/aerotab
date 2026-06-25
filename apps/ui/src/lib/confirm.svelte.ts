@@ -58,6 +58,13 @@ class ConfirmUi {
 
   confirm(message: string, options: ConfirmOptions = {}): Promise<boolean> {
     return new Promise((resolve) => {
+      const prev = this.pending;
+      if (prev) {
+        this.settled = true;
+        this.pending = null;
+        if (prev.kind === 'confirm') prev.resolve(false);
+        else prev.resolve(null);
+      }
       this.settled = false;
       this.pending = {
         kind: 'confirm',
@@ -75,6 +82,13 @@ class ConfirmUi {
   prompt(message: string, options: PromptOptions = {}): Promise<string | null> {
     this.promptValue = options.defaultValue ?? '';
     return new Promise((resolve) => {
+      const prev = this.pending;
+      if (prev) {
+        this.settled = true;
+        this.pending = null;
+        if (prev.kind === 'confirm') prev.resolve(false);
+        else prev.resolve(null);
+      }
       this.settled = false;
       this.pending = {
         kind: 'prompt',

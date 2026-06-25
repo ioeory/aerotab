@@ -16,6 +16,9 @@
     collectFolderPaths,
     collectCandidatesInFolder,
     countMatchingImportCandidates,
+    filteredImportableCandidates,
+    countSelectedInQuery,
+    selectFilteredImportableIds,
     flattenVisibleImportRows,
     importableCandidates,
     invertImportSelection,
@@ -27,6 +30,7 @@
   import type { StoredProfile } from '../lib/types';
   import {
     applyBatchAuthToCandidates,
+    buildDuplicateTargets,
     buildImportApplyItems,
     hasBatchAuthChanges,
     matchAuthFromExistingProfiles,
@@ -34,7 +38,6 @@
     validateBatchAuthConfig,
     type ImportBatchAuthConfig,
   } from '../lib/importAuth';
-  import { appConfirm } from '../lib/confirm.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -61,6 +64,8 @@
   let existingProfiles = $state<StoredProfile[]>([]);
   let batchAuthPanel = $state<{ getConfig(): ImportBatchAuthConfig } | undefined>();
   let previewQuery = $state('');
+  let showDuplicateConfirm = $state(false);
+  let pendingDuplicateCount = $state(0);
 
   $effect(() => {
     if (!open) {
@@ -77,6 +82,8 @@
       browseBusy = false;
       existingProfiles = [];
       previewQuery = '';
+      showDuplicateConfirm = false;
+      pendingDuplicateCount = 0;
     }
   });
 
@@ -253,6 +260,19 @@
     preview ? countMatchingImportCandidates(preview.candidates, previewQuery) : 0,
   );
 
+  let filteredImportableCount = $derived(
+    preview ? filteredImportableCandidates(preview.candidates, previewQuery).length : 0,
+  );
+
+  let selectedVisibleCount = $derived(
+    preview ? countSelectedInQuery(preview.candidates, selectedIds, previewQuery) : 0,
+  );
+
+  function selectFilteredImportable() {
+    if (!preview || !previewQuery.trim()) return;
+    selectedIds = selectFilteredImportableIds(preview.candidates, previewQuery);
+  }
+
   function syncPreviewDuplicateMarks() {
     if (!preview) return;
     remarkImportDuplicates(preview.candidates, existingProfiles);
@@ -286,27 +306,23 @@
     onSummary?.(i18n.t('import.batchAuth.matchResult', { matched, unmatched }));
   }
 
-  async function applyImport() {
+  async function applyImport(overwriteChoice?: boolean) {
     if (!preview || selectedIds.size === 0) return;
 
-    const duplicateTargets = new Map<string, string>();
-    for (const sourceId of selectedIds) {
-      const row = preview.candidates.find((c) => c.sourceId === sourceId);
-      if (row?.duplicateOf) duplicateTargets.set(sourceId, row.duplicateOf);
+    const duplicateTargets = buildDuplicateTargets(
+      preview.candidates,
+      selectedIds,
+      existingProfiles,
+    );
+    const duplicateCount = duplicateTargets.size;
+
+    if (duplicateCount > 0 && overwriteChoice === undefined) {
+      pendingDuplicateCount = duplicateCount;
+      showDuplicateConfirm = true;
+      return;
     }
 
-    const duplicateCount = duplicateTargets.size;
-    let overwriteDuplicates = false;
-    if (duplicateCount > 0) {
-      overwriteDuplicates = await appConfirm(
-        i18n.t('import.duplicateConfirmMessage', { count: duplicateCount }),
-        {
-          title: i18n.t('import.duplicateConfirmTitle'),
-          confirmLabel: i18n.t('import.duplicateConfirmOverwrite'),
-          cancelLabel: i18n.t('import.duplicateConfirmSkip'),
-        },
-      );
-    }
+    showDuplicateConfirm = false;
 
     const batchConfig = batchAuthPanel?.getConfig();
     if (batchConfig) {
@@ -319,6 +335,8 @@
         applyBatchAuthToCandidates(preview.candidates, selectedIds, batchConfig);
       }
     }
+
+    const overwriteDuplicates = overwriteChoice ?? false;
 
     applying = true;
     try {
@@ -356,6 +374,10 @@
     } finally {
       applying = false;
     }
+  }
+
+  function cancelDuplicateConfirm() {
+    showDuplicateConfirm = false;
   }
 </script>
 
@@ -451,7 +473,7 @@
             <span>{i18n.t('import.statsTotal', { count: preview.stats.total })}</span>
             <span class="text-[var(--color-success)]">{i18n.t('import.statsReady', { count: preview.stats.ready })}</span>
             <span>{i18n.t('import.statsDuplicate', { count: preview.stats.duplicate })}</span>
-            <span class="text-[var(--color-danger)]">{i18n.t('import.statsError', { count: preview.stats.error })}</span>
+            <span class="text-[var(--color-danger)]">{i18n.t('import.statsError', { count: preview.stats['error'] })}</span>
             <span class="w-px h-3 bg-[var(--color-border-soft)]" aria-hidden="true"></span>
             <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={toggleAllImportable}>
               {i18n.t('profiles.selectAll')}
@@ -476,12 +498,31 @@
               aria-label={i18n.t('import.searchPlaceholder')}
             />
             {#if previewQuery.trim()}
-              <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-1">
-                {i18n.t('import.searchFiltered', {
-                  shown: previewMatchCount,
-                  total: preview.stats.total,
-                })}
-              </p>
+              <div class="flex flex-wrap items-center gap-2 mt-1">
+                <p class="text-[10.5px] text-[var(--color-fg-muted)]">
+                  {i18n.t('import.searchFiltered', {
+                    shown: previewMatchCount,
+                    total: preview.stats.total,
+                  })}
+                </p>
+                {#if filteredImportableCount > 0}
+                  <button
+                    type="button"
+                    class="btn-ghost text-[10.5px] px-2 py-0.5"
+                    onclick={selectFilteredImportable}
+                  >
+                    {i18n.t('import.selectFiltered', { count: filteredImportableCount })}
+                  </button>
+                {/if}
+              </div>
+              {#if selectedIds.size > 0 && selectedVisibleCount < selectedIds.size}
+                <p class="text-[10.5px] text-[var(--color-warning,#d4a017)] mt-1">
+                  {i18n.t('import.searchSelectionMismatch', {
+                    selected: selectedIds.size,
+                    visible: selectedVisibleCount,
+                  })}
+                </p>
+              {/if}
             {/if}
           </div>
           <ImportAuthBatchPanel
@@ -527,6 +568,43 @@
             </table>
           </div>
           <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-2">{i18n.t('import.duplicateHint')}</p>
+          {#if showDuplicateConfirm}
+            <div
+              class="mt-3 rounded border border-[var(--color-accent)]/40 bg-[var(--color-panel-2)] px-3 py-2.5"
+              role="region"
+              aria-labelledby="import-dup-confirm-title"
+            >
+              <p id="import-dup-confirm-title" class="text-[12px] text-[var(--color-fg)] mb-2">
+                {i18n.t('import.duplicateConfirmMessage', { count: pendingDuplicateCount })}
+              </p>
+              <div class="flex justify-end gap-2">
+                <button
+                  type="button"
+                  class="btn-secondary text-[12px] px-3 py-1.5"
+                  disabled={applying}
+                  onclick={cancelDuplicateConfirm}
+                >
+                  {i18n.t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  class="btn-secondary text-[12px] px-3 py-1.5"
+                  disabled={applying}
+                  onclick={() => { void applyImport(false); }}
+                >
+                  {i18n.t('import.duplicateConfirmSkip')}
+                </button>
+                <button
+                  type="button"
+                  class="btn-primary text-[12px] px-3 py-1.5"
+                  disabled={applying}
+                  onclick={() => { void applyImport(true); }}
+                >
+                  {i18n.t('import.duplicateConfirmOverwrite')}
+                </button>
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
 
