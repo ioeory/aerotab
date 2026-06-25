@@ -109,6 +109,42 @@ pub fn apply_ssh_import_overrides(
     }
 }
 
+/// When overwriting, merge import metadata onto the stored profile and force user/auth.
+pub fn merge_import_overwrite(
+    existing: Option<Profile>,
+    import: &Profile,
+    user: Option<&str>,
+    auth: Option<&AuthMethod>,
+) -> Profile {
+    let mut out = existing.unwrap_or_else(|| import.clone());
+    out.name = import.name.clone();
+    out.group = import.group.clone();
+    out.tags = import.tags.clone();
+    out.note = import.note.clone();
+    if let (ProfileKind::Ssh { ssh: src }, ProfileKind::Ssh { ssh: dst }) =
+        (&import.spec, &mut out.spec)
+    {
+        dst.host = src.host.clone();
+        dst.port = src.port;
+    }
+    apply_ssh_import_overrides(&mut out, user, auth);
+    if auth.is_none() || user.is_none() || user.is_some_and(|u| u.trim().is_empty()) {
+        if let (ProfileKind::Ssh { ssh: src }, ProfileKind::Ssh { ssh: dst }) =
+            (&import.spec, &mut out.spec)
+        {
+            if user.is_none() || user.is_some_and(|u| u.trim().is_empty()) {
+                if !src.user.is_empty() {
+                    dst.user = src.user.clone();
+                }
+            }
+            if auth.is_none() {
+                dst.auth = src.auth.clone();
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod apply_tests {
     use super::*;
@@ -151,6 +187,57 @@ mod apply_tests {
         if let ProfileKind::Ssh { ssh } = &p.spec {
             assert_eq!(ssh.user, "deploy");
             assert!(matches!(ssh.auth, AuthMethod::Password { .. }));
+        } else {
+            panic!("expected ssh");
+        }
+    }
+
+    #[test]
+    fn merge_import_overwrite_applies_vault_auth() {
+        let existing_id = Uuid::new_v4();
+        let existing = Profile {
+            schema_version: 1,
+            id: existing_id,
+            name: "Old".into(),
+            group: None,
+            tags: vec![],
+            note: None,
+            icon: None,
+            favorite: true,
+            spec: ProfileKind::Ssh {
+                ssh: SshProfile {
+                    host: "10.0.0.1".into(),
+                    port: 22,
+                    user: "root".into(),
+                    auth: AuthMethod::PublicKey {
+                        key_path: "/old/key".into(),
+                        passphrase: None,
+                    },
+                    jump_via: vec![],
+                },
+            },
+        };
+        let import = ssh_profile(
+            "devops",
+            AuthMethod::VaultRef {
+                entry_id: "vault-key".into(),
+                passphrase_entry_id: None,
+            },
+        );
+        let merged = merge_import_overwrite(
+            Some(existing),
+            &import,
+            Some("devops"),
+            Some(&AuthMethod::VaultRef {
+                entry_id: "vault-key".into(),
+                passphrase_entry_id: None,
+            }),
+        );
+        assert_eq!(merged.id, existing_id);
+        assert!(merged.favorite);
+        if let ProfileKind::Ssh { ssh } = &merged.spec {
+            assert_eq!(ssh.user, "devops");
+            assert!(matches!(ssh.auth, AuthMethod::VaultRef { .. }));
         } else {
             panic!("expected ssh");
         }

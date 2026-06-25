@@ -1002,7 +1002,8 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
 fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
     use crate::import::{
         apply_ssh_import_overrides, existing_id_for_endpoint, import_detect, load_import_preview,
-        mark_duplicates, ImportApplyResult, ImportCandidateStatus, ImportPreviewResult,
+        mark_duplicates, merge_import_overwrite, ImportApplyResult, ImportCandidateStatus,
+        ImportPreviewResult,
     };
     use crate::profile::Profile;
     use crate::ssh::AuthMethod;
@@ -1115,8 +1116,15 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
                             .or(c.duplicate_of)
                             .or_else(|| existing_id_for_endpoint(&existing, &profile));
                         if let Some(id) = target_id {
-                            profile.id = id;
-                            if let Err(e) = store.upsert(profile).await {
+                            let existing_profile = store.get(id).await.ok().flatten();
+                            let mut merged = merge_import_overwrite(
+                                existing_profile,
+                                &profile,
+                                item.user.as_deref(),
+                                item.auth.as_ref(),
+                            );
+                            merged.id = id;
+                            if let Err(e) = store.upsert(merged).await {
                                 errors.push(format!("{}: {e}", c.name));
                             } else {
                                 updated += 1;
@@ -3971,5 +3979,58 @@ mod tests {
         assert_eq!(item.source_id, "windterm-uuid-1");
         assert!(item.overwrite);
         assert!(item.duplicate_of.is_some());
+    }
+
+    #[test]
+    fn import_apply_item_deserializes_vault_auth_and_profile() {
+        use crate::profile::Profile;
+        use crate::ssh::AuthMethod;
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ImportApplyItem {
+            source_id: String,
+            #[serde(default)]
+            overwrite: bool,
+            #[serde(default)]
+            user: Option<String>,
+            #[serde(default)]
+            auth: Option<AuthMethod>,
+            #[serde(default)]
+            duplicate_of: Option<uuid::Uuid>,
+            #[serde(default)]
+            profile: Option<Profile>,
+        }
+
+        let item: ImportApplyItem = serde_json::from_value(json!({
+            "sourceId": "uuid-passbolt",
+            "overwrite": true,
+            "duplicateOf": "550e8400-e29b-41d4-a716-446655440000",
+            "user": "devops",
+            "auth": { "VaultRef": { "entry_id": "doocom-devops-privkey" } },
+            "profile": {
+                "schemaVersion": 1,
+                "id": "11111111-1111-1111-1111-111111111111",
+                "name": "Doocom-Passbolt",
+                "group": "Doocom",
+                "tags": [],
+                "favorite": false,
+                "kind": "ssh",
+                "ssh": {
+                    "host": "10.0.0.8",
+                    "port": 22,
+                    "user": "devops",
+                    "auth": { "VaultRef": { "entry_id": "doocom-devops-privkey" } },
+                    "jump_via": []
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(item.source_id, "uuid-passbolt");
+        assert!(item.overwrite);
+        assert!(item.duplicate_of.is_some());
+        assert_eq!(item.user.as_deref(), Some("devops"));
+        assert!(matches!(item.auth, Some(AuthMethod::VaultRef { .. })));
+        assert!(item.profile.is_some());
     }
 }

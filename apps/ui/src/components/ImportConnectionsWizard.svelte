@@ -309,6 +309,18 @@
   async function applyImport(overwriteChoice?: boolean) {
     if (!preview || selectedIds.size === 0) return;
 
+    const batchConfig = batchAuthPanel?.getConfig();
+    if (batchConfig) {
+      const validationKey = validateBatchAuthConfig(batchConfig);
+      if (validationKey) {
+        onError(i18n.t(validationKey));
+        return;
+      }
+      if (hasBatchAuthChanges(batchConfig)) {
+        applyBatchAuthToCandidates(preview.candidates, selectedIds, batchConfig);
+      }
+    }
+
     const duplicateTargets = buildDuplicateTargets(
       preview.candidates,
       selectedIds,
@@ -323,19 +335,6 @@
     }
 
     showDuplicateConfirm = false;
-
-    const batchConfig = batchAuthPanel?.getConfig();
-    if (batchConfig) {
-      const validationKey = validateBatchAuthConfig(batchConfig);
-      if (validationKey) {
-        onError(i18n.t(validationKey));
-        return;
-      }
-      if (hasBatchAuthChanges(batchConfig)) {
-        applyBatchAuthToCandidates(preview.candidates, selectedIds, batchConfig);
-      }
-    }
-
     const overwriteDuplicates = overwriteChoice ?? false;
 
     applying = true;

@@ -210,9 +210,12 @@ export function buildImportApplyItems(
     const row = candidates.find((c) => c.sourceId === sourceId);
     if (!row) continue;
     const duplicateOf = duplicateTargets?.get(sourceId) ?? row.duplicateOf ?? undefined;
+    const shouldOverwrite =
+      overwriteDuplicates
+      && (Boolean(duplicateOf) || row.status === 'duplicate');
     const item: ImportApplyItemPayload = {
       sourceId,
-      overwrite: overwriteDuplicates && Boolean(duplicateOf),
+      overwrite: shouldOverwrite,
       duplicateOf,
     };
     if (row.profile) {
