@@ -202,6 +202,10 @@ export function buildDuplicateTargets(
   return targets;
 }
 
+function cloneStoredProfile(profile: StoredProfile): StoredProfile {
+  return JSON.parse(JSON.stringify(profile)) as StoredProfile;
+}
+
 export function buildImportApplyItems(
   candidates: ImportCandidate[],
   selectedIds: Set<string>,
@@ -219,11 +223,11 @@ export function buildImportApplyItems(
       duplicateOf,
     };
     if (row.profile) {
-      item.profile = structuredClone(row.profile);
+      item.profile = cloneStoredProfile(row.profile);
     }
     if (row.profile?.kind === 'ssh') {
       item.user = row.profile.ssh.user;
-      item.auth = row.profile.ssh.auth;
+      item.auth = cloneAuth(row.profile.ssh.auth);
     }
     items.push(item);
   }
