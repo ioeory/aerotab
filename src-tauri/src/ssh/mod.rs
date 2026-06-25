@@ -491,12 +491,8 @@ where
             key_path,
             passphrase,
         } => {
-            let key = load_secret_key(key_path, passphrase.as_deref())
-                .map_err(|e| SshError::Connect(format!("load key: {e}")))?;
-            handle
-                .authenticate_publickey(&profile.user, Arc::new(key))
-                .await
-                .map_err(SshError::from)?
+            authenticate_public_key_with_fallback(handle, profile, key_path, passphrase.as_deref())
+                .await?
         }
         AuthMethod::Agent => match authenticate_agent_generic(handle, profile).await {
             Ok(authed) => authed,
@@ -517,6 +513,60 @@ where
     } else {
         Ok(())
     }
+}
+
+async fn authenticate_public_key_with_fallback<H>(
+    handle: &mut client::Handle<H>,
+    profile: &SshProfile,
+    key_path: &std::path::Path,
+    passphrase: Option<&str>,
+) -> Result<bool, SshError>
+where
+    H: client::Handler,
+    H::Error: From<russh::Error>,
+{
+    if key_path.is_file() {
+        match load_secret_key(key_path, passphrase) {
+            Ok(key) => {
+                match handle
+                    .authenticate_publickey(&profile.user, Arc::new(key))
+                    .await
+                    .map_err(SshError::from)
+                {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            "configured key {} failed: {e}; trying fallbacks",
+                            key_path.display()
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "load configured key {}: {e}; trying fallbacks",
+                    key_path.display()
+                );
+            }
+        }
+    } else {
+        tracing::debug!(
+            "configured key missing: {}; trying default keys and ssh-agent",
+            key_path.display()
+        );
+    }
+
+    match authenticate_default_public_keys(handle, &profile.user).await {
+        Ok(true) => return Ok(true),
+        Ok(false) => {}
+        Err(SshError::Agent(e)) => {
+            tracing::debug!("default keys failed: {e}; trying ssh-agent");
+        }
+        Err(e) => return Err(e),
+    }
+
+    authenticate_agent_generic(handle, profile).await
 }
 
 async fn authenticate_default_public_keys<H>(

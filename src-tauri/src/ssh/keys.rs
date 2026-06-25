@@ -82,16 +82,30 @@ pub fn expand_identity_path(raw: &str) -> PathBuf {
     path
 }
 
-pub fn identity_path_if_file(raw: &str) -> Option<PathBuf> {
-    let path = expand_identity_path(raw);
-    if raw.trim().is_empty() {
-        None
-    } else if path.is_file() {
-        Some(path)
-    } else {
-        // Keep configured path even when missing locally (health check / user fix).
-        Some(path)
+/// Map `/home/<user>/...` from another machine (e.g. WindTerm on Linux/WSL) to this user's home.
+pub fn remap_unix_home_identity(raw: &str) -> Option<PathBuf> {
+    let rest = raw.trim().strip_prefix("/home/")?;
+    let after_user = rest.split_once('/')?.1;
+    let home = ssh_home_dir()?;
+    let candidate = home.join(after_user);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Resolve a configured identity path only when the private key file exists locally.
+pub fn resolve_existing_identity_file(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+    let expanded = expand_identity_path(trimmed);
+    if expanded.is_file() {
+        return Some(expanded);
+    }
+    remap_unix_home_identity(trimmed)
+}
+
+pub fn identity_path_if_file(raw: &str) -> Option<PathBuf> {
+    resolve_existing_identity_file(raw)
 }
 
 #[cfg(test)]

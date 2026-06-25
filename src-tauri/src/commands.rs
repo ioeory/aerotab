@@ -1001,9 +1001,10 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
 fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
     use crate::import::{
-        import_detect, load_import_preview, mark_duplicates, ImportApplyResult,
-        ImportCandidateStatus, ImportPreviewResult,
+        apply_ssh_import_overrides, import_detect, load_import_preview, mark_duplicates,
+        ImportApplyResult, ImportCandidateStatus, ImportPreviewResult,
     };
+    use crate::ssh::AuthMethod;
 
     #[derive(Debug, Deserialize)]
     struct ImportSourceParams {
@@ -1023,6 +1024,10 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
         source_id: String,
         #[serde(default)]
         overwrite: bool,
+        #[serde(default)]
+        user: Option<String>,
+        #[serde(default)]
+        auth: Option<AuthMethod>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -1093,6 +1098,11 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         skipped += 1;
                         continue;
                     };
+                    apply_ssh_import_overrides(
+                        &mut profile,
+                        item.user.as_deref(),
+                        item.auth.as_ref(),
+                    );
                     match c.status {
                         ImportCandidateStatus::Error => {
                             skipped += 1;

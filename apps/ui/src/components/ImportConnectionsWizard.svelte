@@ -21,7 +21,15 @@
     type ImportPreviewFolder,
   } from '../lib/importPreviewTree';
   import ImportPreviewTable from './ImportPreviewTable.svelte';
+  import ImportAuthBatchPanel from './ImportAuthBatchPanel.svelte';
   import { notifyProfilesChanged } from '../lib/profileEvents';
+  import type { StoredProfile } from '../lib/types';
+  import {
+    applyBatchAuthToCandidates,
+    buildImportApplyItems,
+    matchAuthFromExistingProfiles,
+    type ImportBatchAuthConfig,
+  } from '../lib/importAuth';
 
   interface Props {
     rpc: RpcClient;
@@ -45,6 +53,7 @@
   let previewTree = $state<ImportPreviewFolder | null>(null);
   let collapsedGroups = $state<Set<string>>(new Set());
   let browseBusy = $state(false);
+  let existingProfiles = $state<StoredProfile[]>([]);
 
   $effect(() => {
     if (!open) {
@@ -59,6 +68,7 @@
       previewTree = null;
       collapsedGroups = new Set();
       browseBusy = false;
+      existingProfiles = [];
     }
   });
 
@@ -153,6 +163,11 @@
       previewTree = buildImportPreviewTree(r.candidates);
       collapsedGroups = new Set(collectFolderPaths(previewTree));
       selectedIds = defaultSelected(r.candidates);
+      try {
+        existingProfiles = await rpc.call<StoredProfile[]>('profile.list');
+      } catch {
+        existingProfiles = [];
+      }
       step = 'preview';
     } catch (e) {
       onError(`import preview: ${(e as Error).message}`);
@@ -225,14 +240,29 @@
       : [],
   );
 
+  function handleBatchAuth(config: ImportBatchAuthConfig) {
+    if (!preview) return;
+    const count = applyBatchAuthToCandidates(preview.candidates, selectedIds, config);
+    preview = { ...preview, candidates: [...preview.candidates] };
+    onSummary?.(i18n.t('import.batchAuth.applied', { count }));
+  }
+
+  function handleMatchExisting() {
+    if (!preview) return;
+    const { matched, unmatched } = matchAuthFromExistingProfiles(
+      preview.candidates,
+      selectedIds,
+      existingProfiles,
+    );
+    preview = { ...preview, candidates: [...preview.candidates] };
+    onSummary?.(i18n.t('import.batchAuth.matchResult', { matched, unmatched }));
+  }
+
   async function applyImport() {
     if (!preview || selectedIds.size === 0) return;
     applying = true;
     try {
-      const items = [...selectedIds].map((sourceId) => {
-        const row = preview!.candidates.find((c) => c.sourceId === sourceId);
-        return { sourceId, overwrite: row?.status === 'duplicate' };
-      });
+      const items = buildImportApplyItems(preview.candidates, selectedIds);
       const r = await rpc.call<{ created: number; skipped: number; updated: number; errors: string[] }>(
         'profile.importApply',
         { source, path: preview.path ?? selectedPath ?? undefined, items },
@@ -371,6 +401,15 @@
               {i18n.t('import.collapseAll')}
             </button>
           </div>
+          <ImportAuthBatchPanel
+            {rpc}
+            selectedCount={selectedIds.size}
+            disabled={applying}
+            onApply={handleBatchAuth}
+            onMatchExisting={handleMatchExisting}
+            {onError}
+            {onSummary}
+          />
           <div class="border border-[var(--color-border-soft)] rounded overflow-hidden max-h-[min(480px,50vh)] overflow-y-auto">
             <table class="w-full text-[11.5px]">
               <thead class="bg-[var(--color-panel-2)] text-[var(--color-fg-muted)] sticky top-0 z-[1]">

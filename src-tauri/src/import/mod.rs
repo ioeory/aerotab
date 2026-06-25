@@ -12,6 +12,7 @@ mod types;
 mod windterm;
 mod xshell;
 
+pub use common::apply_ssh_import_overrides;
 pub use csv_import::{detect_csv_paths, preview_csv, read_csv_file};
 pub use mobaxterm::{detect_mobaxterm_paths, preview_mobaxterm, read_mobaxterm_file};
 pub use openssh::{detect_openssh_paths, preview_openssh, read_openssh_file};

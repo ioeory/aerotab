@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::profile::{Profile, ProfileKind};
+use crate::ssh::AuthMethod;
 
 use super::types::{ImportCandidate, ImportCandidateStatus};
 
@@ -88,5 +89,70 @@ pub fn error_candidate(
         error_message: Some(message),
         duplicate_of: None,
         profile: None,
+    }
+}
+
+/// Merge optional SSH user/auth from the import wizard onto a parsed profile.
+pub fn apply_ssh_import_overrides(
+    profile: &mut Profile,
+    user: Option<&str>,
+    auth: Option<&AuthMethod>,
+) {
+    let ProfileKind::Ssh { ssh } = &mut profile.spec else {
+        return;
+    };
+    if let Some(u) = user.map(str::trim).filter(|s| !s.is_empty()) {
+        ssh.user = u.to_string();
+    }
+    if let Some(a) = auth {
+        ssh.auth = a.clone();
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+    use crate::profile::ProfileKind;
+    use crate::ssh::{AuthMethod, SshProfile};
+    use uuid::Uuid;
+
+    fn ssh_profile(user: &str, auth: AuthMethod) -> Profile {
+        Profile {
+            schema_version: 1,
+            id: Uuid::new_v4(),
+            name: "t".into(),
+            group: None,
+            tags: vec![],
+            note: None,
+            icon: None,
+            favorite: false,
+            spec: ProfileKind::Ssh {
+                ssh: SshProfile {
+                    host: "1.2.3.4".into(),
+                    port: 22,
+                    user: user.into(),
+                    auth,
+                    jump_via: vec![],
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn apply_ssh_import_overrides_user_and_password() {
+        let mut p = ssh_profile("root", AuthMethod::Agent);
+        apply_ssh_import_overrides(
+            &mut p,
+            Some("deploy"),
+            Some(&AuthMethod::Password {
+                secret: "secret".into(),
+            }),
+        );
+        if let ProfileKind::Ssh { ssh } = &p.spec {
+            assert_eq!(ssh.user, "deploy");
+            assert!(matches!(ssh.auth, AuthMethod::Password { .. }));
+        } else {
+            panic!("expected ssh");
+        }
     }
 }

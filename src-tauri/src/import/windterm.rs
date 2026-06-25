@@ -4,7 +4,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::profile::{Profile, ProfileKind, RemoteDesktopSpec};
-use crate::ssh::keys::{expand_identity_path, first_existing_ssh_key};
+use crate::ssh::keys::{
+    expand_identity_path, first_existing_ssh_key, resolve_existing_identity_file,
+};
 use crate::ssh::{AuthMethod, SshProfile};
 
 use super::types::{
@@ -387,37 +389,78 @@ fn auth_from_windterm(
     map: &serde_json::Map<String, Value>,
     warnings: &mut Vec<String>,
 ) -> AuthMethod {
-    if let Some(path) = identity_from_map(map) {
+    let (configured, missing) = identity_from_map(map);
+    if let Some(path) = configured {
         return AuthMethod::PublicKey {
             key_path: path,
             passphrase: None,
         };
     }
-    if let Some(key) = first_existing_ssh_key() {
+    let had_missing = missing.is_some();
+    if let Some(missing) = missing {
         warnings.push(format!(
-            "no identity file in WindTerm session; using default key {}",
-            key.display()
+            "WindTerm identity file not found ({missing}); using local default key or ssh-agent"
         ));
+    }
+    if let Some(key) = first_existing_ssh_key() {
+        if !had_missing {
+            warnings.push(format!(
+                "no identity file in WindTerm session; using default key {}",
+                key.display()
+            ));
+        }
         return AuthMethod::PublicKey {
             key_path: key,
             passphrase: None,
         };
     }
     warnings.push(
-        "no identity file or default ~/.ssh key; will try ssh-agent at connect (start OpenSSH Authentication Agent on Windows)".into(),
+        "no usable private key; will try ssh-agent at connect (start OpenSSH Authentication Agent on Windows)".into(),
     );
     AuthMethod::Agent
 }
 
-fn identity_from_map(map: &serde_json::Map<String, Value>) -> Option<std::path::PathBuf> {
+/// First existing identity file from WindTerm fields; `missing` describes the last configured path tried.
+fn identity_from_map(
+    map: &serde_json::Map<String, Value>,
+) -> (Option<std::path::PathBuf>, Option<String>) {
+    let mut missing: Option<String> = None;
     for key in windterm_identity_keys() {
-        if let Some(path) = str_field(map, key) {
-            if !path.is_empty() {
-                return Some(expand_identity_path(&path));
+        if let Some(raw) = str_field(map, key) {
+            if raw.is_empty() {
+                continue;
             }
+            if let Some(path) = resolve_existing_identity_file(&raw) {
+                return (Some(path), None);
+            }
+            let expanded = expand_identity_path(&raw);
+            missing = Some(format!("{key}={raw} -> {}", expanded.display()));
         }
     }
-    None
+    for (key, value) in map {
+        if windterm_identity_keys().contains(&key.as_str()) {
+            continue;
+        }
+        let Some(raw) = value.as_str() else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let lower = key.to_ascii_lowercase();
+        if !["identity", "privatekey"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        {
+            continue;
+        }
+        if let Some(path) = resolve_existing_identity_file(raw) {
+            return (Some(path), None);
+        }
+        let expanded = expand_identity_path(raw);
+        missing = Some(format!("{key}={raw} -> {}", expanded.display()));
+    }
+    (None, missing)
 }
 
 fn str_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
@@ -496,7 +539,14 @@ mod tests {
             assert_eq!(ssh.host, "10.0.0.5");
             assert_eq!(ssh.port, 2222);
             assert_eq!(ssh.user, "alice");
-            assert!(matches!(ssh.auth, AuthMethod::PublicKey { .. }));
+            if resolve_existing_identity_file("/home/alice/.ssh/id_ed25519").is_some() {
+                assert!(matches!(ssh.auth, AuthMethod::PublicKey { .. }));
+            } else {
+                assert!(matches!(
+                    ssh.auth,
+                    AuthMethod::PublicKey { .. } | AuthMethod::Agent
+                ));
+            }
         } else {
             panic!("expected ssh");
         }
@@ -529,6 +579,13 @@ mod tests {
 
     #[test]
     fn maps_identity_file_path_windows_field() {
+        let Some(home) = crate::ssh::keys::ssh_home_dir() else {
+            return;
+        };
+        let key = home.join(".ssh/id_ed25519");
+        if !key.is_file() {
+            return;
+        }
         let text = r#"[{
             "session.label": "nginx",
             "session.protocol": "SSH",
@@ -541,7 +598,33 @@ mod tests {
         if let ProfileKind::Ssh { ssh } = &p.spec {
             assert!(matches!(ssh.auth, AuthMethod::PublicKey { .. }));
             if let AuthMethod::PublicKey { key_path, .. } = &ssh.auth {
-                assert!(key_path.to_string_lossy().contains("id_ed25519"));
+                assert_eq!(key_path, &key);
+            }
+        } else {
+            panic!("expected ssh");
+        }
+    }
+
+    #[test]
+    fn missing_windterm_identity_never_stores_bad_path() {
+        let text = r#"[{
+            "session.label": "jenkins",
+            "session.protocol": "SSH",
+            "session.target": "root@47.239.178.0",
+            "session.uuid": "j1",
+            "ssh.identityFilePath.windows": "D:\\missing\\old-key.pem"
+        }]"#;
+        let preview = preview_windterm(text, None).unwrap();
+        let c = &preview.candidates[0];
+        assert!(c.warnings.iter().any(|w| w.contains("not found")));
+        let p = c.profile.as_ref().unwrap();
+        if let ProfileKind::Ssh { ssh } = &p.spec {
+            match &ssh.auth {
+                AuthMethod::PublicKey { key_path, .. } => {
+                    assert!(key_path.is_file(), "import must not keep missing key path");
+                }
+                AuthMethod::Agent => {}
+                other => panic!("unexpected auth {other:?}"),
             }
         } else {
             panic!("expected ssh");
@@ -567,5 +650,29 @@ mod tests {
         } else {
             panic!("expected ssh");
         }
+    }
+
+    #[test]
+    fn remap_unix_home_identity_maps_existing_file() {
+        let Some(home) = crate::ssh::keys::ssh_home_dir() else {
+            return;
+        };
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".into());
+        let key = home.join(".ssh/id_ed25519");
+        if !key.is_file() {
+            return;
+        }
+        let mapped = format!("/home/{user}/.ssh/id_ed25519");
+        assert_eq!(
+            crate::ssh::keys::remap_unix_home_identity(&mapped),
+            Some(key)
+        );
+    }
+
+    #[test]
+    fn resolve_existing_identity_file_skips_missing_paths() {
+        assert!(resolve_existing_identity_file("/nonexistent/windterm/key.pem").is_none());
     }
 }
