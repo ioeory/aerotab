@@ -996,6 +996,139 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
             }
         });
     }
+    register_profile_import(dispatcher, state.clone());
+}
+
+fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    use crate::import::{
+        import_detect, load_import_preview, mark_duplicates, ImportApplyResult,
+        ImportCandidateStatus, ImportPreviewResult,
+    };
+
+    #[derive(Debug, Deserialize)]
+    struct ImportSourceParams {
+        source: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ImportPreviewParams {
+        source: String,
+        #[serde(default)]
+        path: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ImportApplyItem {
+        source_id: String,
+        #[serde(default)]
+        overwrite: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ImportApplyParams {
+        source: String,
+        #[serde(default)]
+        path: Option<String>,
+        items: Vec<ImportApplyItem>,
+    }
+
+    fn load_preview(source: &str, path: Option<&str>) -> Result<ImportPreviewResult, RpcError> {
+        load_import_preview(source, path).map_err(invalid_params)
+    }
+
+    {
+        dispatcher.register("profile.importDetect", move |params| async move {
+            let p: ImportSourceParams =
+                serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+            let result = import_detect(&p.source).map_err(invalid_params)?;
+            serde_json::to_value(result).map_err(|e| internal(e.to_string()))
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("profile.importPreview", move |params| {
+            let st = st.clone();
+            async move {
+                let p: ImportPreviewParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let mut preview = load_preview(&p.source, p.path.as_deref())?;
+                if let Ok(store) = require_profiles(&st).await {
+                    if let Ok(existing) = store.list().await {
+                        mark_duplicates(&mut preview.candidates, &existing);
+                        preview.stats = crate::import::preview_stats(&preview.candidates);
+                    }
+                }
+                serde_json::to_value(preview).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("profile.importApply", move |params| {
+            let st = st.clone();
+            async move {
+                let p: ImportApplyParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let store = require_profiles(&st).await?;
+                let mut preview = load_preview(&p.source, p.path.as_deref())?;
+                let existing = store.list().await.map_err(|e| internal(e.to_string()))?;
+                mark_duplicates(&mut preview.candidates, &existing);
+                let by_id: std::collections::HashMap<String, _> = preview
+                    .candidates
+                    .into_iter()
+                    .map(|c| (c.source_id.clone(), c))
+                    .collect();
+                let mut created = 0usize;
+                let mut skipped = 0usize;
+                let mut updated = 0usize;
+                let mut errors = Vec::new();
+                for item in p.items {
+                    let Some(c) = by_id.get(&item.source_id) else {
+                        skipped += 1;
+                        continue;
+                    };
+                    let Some(mut profile) = c.profile.clone() else {
+                        skipped += 1;
+                        continue;
+                    };
+                    match c.status {
+                        ImportCandidateStatus::Error => {
+                            skipped += 1;
+                        }
+                        ImportCandidateStatus::Duplicate if !item.overwrite => {
+                            skipped += 1;
+                        }
+                        ImportCandidateStatus::Duplicate if item.overwrite => {
+                            if let Some(id) = c.duplicate_of {
+                                profile.id = id;
+                            }
+                            if let Err(e) = store.upsert(profile).await {
+                                errors.push(format!("{}: {e}", c.name));
+                            } else {
+                                updated += 1;
+                            }
+                        }
+                        ImportCandidateStatus::Ready => {
+                            if let Err(e) = store.upsert(profile).await {
+                                errors.push(format!("{}: {e}", c.name));
+                            } else {
+                                created += 1;
+                            }
+                        }
+                        ImportCandidateStatus::Duplicate => {
+                            skipped += 1;
+                        }
+                    }
+                }
+                Ok(json!(ImportApplyResult {
+                    created,
+                    skipped,
+                    updated,
+                    errors,
+                }))
+            }
+        });
+    }
 }
 
 // --- ssh.knownHosts.* -----------------------------------------------------

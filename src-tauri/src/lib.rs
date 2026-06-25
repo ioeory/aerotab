@@ -13,6 +13,7 @@
 pub mod commands;
 pub mod core;
 pub mod error;
+pub mod import;
 pub mod ipc;
 pub mod migrate;
 pub mod native_terminal;

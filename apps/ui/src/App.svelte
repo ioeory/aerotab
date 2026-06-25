@@ -11,6 +11,7 @@
   import SftpBrowser from './components/SftpBrowser.svelte';
   import FileTransferWindow from './components/FileTransferWindow.svelte';
   import BatchCommandModal from './components/BatchCommandModal.svelte';
+  import ImportConnectionsWizard from './components/ImportConnectionsWizard.svelte';
   import SettingsLayout from './components/settings/SettingsLayout.svelte';
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
@@ -44,6 +45,7 @@
   import { profileVisualsStore } from './lib/profileVisualsStore.svelte';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
+  import { IMPORT_CONNECTIONS_OPEN } from './lib/importConnections';
   import { profileEndpointLabel } from './lib/profileMeta';
   import { startHorizontalPanelResize } from './lib/panelResize';
   import {
@@ -71,7 +73,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.13-ui-20260607';
+  const buildId = '0.2.14-ui-20260607';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -121,6 +123,7 @@
   let settingsRev = $state(0);
   let paletteOpen = $state(false);
   let batchCommandOpen = $state(false);
+  let importWizardOpen = $state(false);
   let pickerOpen = $state(false);
   let savedProfiles = $state<StoredProfile[]>([]);
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
@@ -1464,6 +1467,13 @@
       { id: 'diagnostics-export', title: i18n.t('application.exportDiagnostics'), subtitle: i18n.t('application.diagnostics'), run: () => exportDiagnosticsFromPalette() },
       { id: 'toggle-sidebar', title: sidebarVisible ? i18n.t('action.hideSidebar') : i18n.t('action.showSidebar'), shortcut: sk('toggle-sidebar'), run: () => { void setSidebarVisible(!sidebarVisible); } },
       { id: 'new-profile', title: i18n.t('action.newSshProfile'), run: () => profileModal?.open() },
+      {
+        id: 'import-connections',
+        title: i18n.t('action.importConnections'),
+        subtitle: i18n.t('settings.nav.profiles'),
+        keywords: ['import', 'windterm', 'putty', 'mobaxterm', 'xshell', 'securecrt', 'tabby', 'csv', 'ssh'],
+        run: () => { importWizardOpen = true; },
+      },
       { id: 'new-serial', title: i18n.t('action.newSerialConnection'), run: () => serialModal?.open() },
     ];
     for (const workspace of sessionWorkspaces) {
@@ -1671,6 +1681,8 @@
     document.addEventListener('aerotab:settings-changed', onAppSettingsChanged);
     document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
     document.addEventListener('aerotab:session-replaced', onSessionReplaced);
+    const onImportConnectionsOpen = () => { importWizardOpen = true; };
+    document.addEventListener(IMPORT_CONNECTIONS_OPEN, onImportConnectionsOpen);
     installPaneDragGlobalHandlers();
     let winResizeTimer: ReturnType<typeof setTimeout> | null = null;
     const onWindowResize = () => {
@@ -1696,6 +1708,7 @@
       if (winResizeTimer) clearTimeout(winResizeTimer);
       document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
       document.removeEventListener('aerotab:session-replaced', onSessionReplaced);
+      document.removeEventListener(IMPORT_CONNECTIONS_OPEN, onImportConnectionsOpen);
       unsubPaneDrop();
     };
   });
@@ -2009,6 +2022,17 @@
   onUnlocked={() => { setStatus(i18n.t('sync.vaultUnlocked')); }}
 />
 <SerialModal {rpc} bind:this={serialModal} {onError} />
+<ImportConnectionsWizard
+  {rpc}
+  open={importWizardOpen}
+  onClose={() => { importWizardOpen = false; }}
+  {onError}
+  onSummary={(msg) => {
+    setStatus(msg);
+    void refreshProfileList();
+    void sidebar?.refresh();
+  }}
+/>
 <AppConfirmDialog />
 {#if settingsOpen}
   <SettingsLayout

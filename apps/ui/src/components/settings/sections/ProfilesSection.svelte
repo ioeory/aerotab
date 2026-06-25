@@ -29,6 +29,7 @@
     toggleProfileInSelection,
   } from '../../../lib/profileSelection';
   import { notifyProfilesChanged, PROFILES_CHANGED } from '../../../lib/profileEvents';
+  import { requestImportConnections } from '../../../lib/importConnections';
   import { healthIssueDetailText, summarizeHealthResults } from '../../../lib/profileHealthUi';
   import { withRpcTimeout } from '../../../lib/rpcTimeout';
   import { focusProfileInTabs } from '../../../lib/focusProfileSession';
@@ -424,6 +425,10 @@
   <div class="flex items-center justify-between gap-2">
     <h2 class="!mb-0">{i18n.t('profiles.title')}</h2>
     <div class="flex items-center gap-2">
+      <button type="button" class="btn-secondary flex items-center gap-1.5"
+              onclick={() => { requestImportConnections(); }}>
+        <Plug size={12} /> {i18n.t('profiles.importConnections')}
+      </button>
       <button type="button" class="btn-secondary flex items-center gap-1.5"
               onclick={() => { void runHealthCheck(); }} disabled={healthRunning || saved.length === 0}>
         <Activity size={12} /> {healthRunning ? i18n.t('profiles.healthChecking') : i18n.t('profiles.healthCheck')}
