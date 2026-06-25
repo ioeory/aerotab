@@ -126,22 +126,10 @@ pub fn merge_import_overwrite(
     {
         dst.host = src.host.clone();
         dst.port = src.port;
+        dst.user = src.user.clone();
+        dst.auth = src.auth.clone();
     }
     apply_ssh_import_overrides(&mut out, user, auth);
-    if auth.is_none() || user.is_none() || user.is_some_and(|u| u.trim().is_empty()) {
-        if let (ProfileKind::Ssh { ssh: src }, ProfileKind::Ssh { ssh: dst }) =
-            (&import.spec, &mut out.spec)
-        {
-            if user.is_none() || user.is_some_and(|u| u.trim().is_empty()) {
-                if !src.user.is_empty() {
-                    dst.user = src.user.clone();
-                }
-            }
-            if auth.is_none() {
-                dst.auth = src.auth.clone();
-            }
-        }
-    }
     out
 }
 

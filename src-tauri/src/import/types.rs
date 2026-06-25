@@ -154,6 +154,14 @@ pub fn existing_id_for_endpoint(existing: &[Profile], profile: &Profile) -> Opti
         .find_map(|p| host_port_key(p).filter(|k| k == &hp).map(|_| p.id))
 }
 
+/// Find a stored profile id by exact name (case-insensitive).
+pub fn existing_id_for_name(existing: &[Profile], name: &str) -> Option<Uuid> {
+    existing
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .map(|p| p.id)
+}
+
 pub fn preview_stats(candidates: &[ImportCandidate]) -> ImportPreviewStats {
     let mut ready = 0;
     let mut duplicate = 0;
@@ -221,6 +229,18 @@ mod tests {
         let probe = ssh("devops", "10.0.0.5");
         assert_eq!(
             existing_id_for_endpoint(std::slice::from_ref(&existing), &probe),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn existing_id_for_name_matches_case_insensitive() {
+        let id = Uuid::new_v4();
+        let mut existing = ssh("root", "10.0.0.1");
+        existing.id = id;
+        existing.name = "Doocom-Passbolt".into();
+        assert_eq!(
+            existing_id_for_name(std::slice::from_ref(&existing), "doocom-passbolt"),
             Some(id)
         );
     }

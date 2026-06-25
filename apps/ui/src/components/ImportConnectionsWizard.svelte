@@ -66,6 +66,7 @@
   let previewQuery = $state('');
   let showDuplicateConfirm = $state(false);
   let pendingDuplicateCount = $state(0);
+  let applyError = $state<string | null>(null);
 
   $effect(() => {
     if (!open) {
@@ -84,6 +85,7 @@
       previewQuery = '';
       showDuplicateConfirm = false;
       pendingDuplicateCount = 0;
+      applyError = null;
     }
   });
 
@@ -321,12 +323,24 @@
       }
     }
 
+    try {
+      existingProfiles = await rpc.call<StoredProfile[]>('profile.list');
+    } catch {
+      /* keep preview snapshot */
+    }
+
     const duplicateTargets = buildDuplicateTargets(
       preview.candidates,
       selectedIds,
       existingProfiles,
     );
-    const duplicateCount = duplicateTargets.size;
+    let duplicateCount = duplicateTargets.size;
+    if (duplicateCount === 0) {
+      for (const sourceId of selectedIds) {
+        const row = preview.candidates.find((c) => c.sourceId === sourceId);
+        if (row?.status === 'duplicate') duplicateCount += 1;
+      }
+    }
 
     if (duplicateCount > 0 && overwriteChoice === undefined) {
       pendingDuplicateCount = duplicateCount;
@@ -338,6 +352,7 @@
     const overwriteDuplicates = overwriteChoice ?? false;
 
     applying = true;
+    applyError = null;
     try {
       const items = buildImportApplyItems(
         preview.candidates,
@@ -356,11 +371,12 @@
         updated: r.updated,
       });
       if (r.created === 0 && r.updated === 0) {
-        onError(
+        const detail =
           r.errors.length > 0
             ? `${msg} ${r.errors.join('; ')}`
-            : i18n.t('import.applyNothing', { skipped: r.skipped }),
-        );
+            : i18n.t('import.applyNothing', { skipped: r.skipped });
+        applyError = detail;
+        onError(detail);
         return;
       }
       onSummary?.(msg);
@@ -369,7 +385,8 @@
       }
       onClose();
     } catch (e) {
-      onError(`import apply: ${(e as Error).message}`);
+      applyError = `import apply: ${(e as Error).message}`;
+      onError(applyError);
     } finally {
       applying = false;
     }
@@ -607,7 +624,11 @@
         {/if}
       </div>
 
-      <footer class="flex justify-end gap-2 px-4 py-3 border-t border-[var(--color-border-soft)]">
+      <footer class="flex flex-col gap-2 px-4 py-3 border-t border-[var(--color-border-soft)]">
+        {#if applyError}
+          <p class="text-[11.5px] text-[var(--color-danger)] whitespace-pre-wrap">{applyError}</p>
+        {/if}
+        <div class="flex justify-end gap-2">
         <button type="button" class="btn-secondary text-[12px] px-3 py-1.5" onclick={onClose}>
           {i18n.t('common.cancel')}
         </button>
@@ -633,6 +654,7 @@
             {i18n.t('import.apply', { count: selectedIds.size })}
           </button>
         {/if}
+        </div>
       </footer>
     </div>
   </div>

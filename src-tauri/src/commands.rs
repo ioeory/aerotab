@@ -1001,9 +1001,8 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
 fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
     use crate::import::{
-        apply_ssh_import_overrides, existing_id_for_endpoint, import_detect, load_import_preview,
-        mark_duplicates, merge_import_overwrite, ImportApplyResult, ImportCandidateStatus,
-        ImportPreviewResult,
+        apply_import_items, import_detect, load_import_preview, mark_duplicates,
+        ImportApplyItemInput, ImportPreviewResult,
     };
     use crate::profile::Profile;
     use crate::ssh::AuthMethod;
@@ -1091,75 +1090,20 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     .into_iter()
                     .map(|c| (c.source_id.clone(), c))
                     .collect();
-                let mut created = 0usize;
-                let mut skipped = 0usize;
-                let mut updated = 0usize;
-                let mut errors = Vec::new();
-                for item in p.items {
-                    let Some(c) = by_id.get(&item.source_id) else {
-                        skipped += 1;
-                        continue;
-                    };
-                    let Some(mut profile) = item.profile.clone().or_else(|| c.profile.clone())
-                    else {
-                        skipped += 1;
-                        continue;
-                    };
-                    apply_ssh_import_overrides(
-                        &mut profile,
-                        item.user.as_deref(),
-                        item.auth.as_ref(),
-                    );
-                    if item.overwrite {
-                        let target_id = item
-                            .duplicate_of
-                            .or(c.duplicate_of)
-                            .or_else(|| existing_id_for_endpoint(&existing, &profile));
-                        if let Some(id) = target_id {
-                            let existing_profile = store.get(id).await.ok().flatten();
-                            let mut merged = merge_import_overwrite(
-                                existing_profile,
-                                &profile,
-                                item.user.as_deref(),
-                                item.auth.as_ref(),
-                            );
-                            merged.id = id;
-                            if let Err(e) = store.upsert(merged).await {
-                                errors.push(format!("{}: {e}", c.name));
-                            } else {
-                                updated += 1;
-                            }
-                        } else {
-                            errors.push(format!(
-                                "{}: no existing profile matched for overwrite",
-                                c.name
-                            ));
-                            skipped += 1;
-                        }
-                        continue;
-                    }
-                    match c.status {
-                        ImportCandidateStatus::Error => {
-                            skipped += 1;
-                        }
-                        ImportCandidateStatus::Duplicate => {
-                            skipped += 1;
-                        }
-                        ImportCandidateStatus::Ready => {
-                            if let Err(e) = store.upsert(profile).await {
-                                errors.push(format!("{}: {e}", c.name));
-                            } else {
-                                created += 1;
-                            }
-                        }
-                    }
-                }
-                Ok(json!(ImportApplyResult {
-                    created,
-                    skipped,
-                    updated,
-                    errors,
-                }))
+                let inputs: Vec<ImportApplyItemInput> = p
+                    .items
+                    .into_iter()
+                    .map(|item| ImportApplyItemInput {
+                        source_id: item.source_id,
+                        overwrite: item.overwrite,
+                        user: item.user,
+                        auth: item.auth,
+                        duplicate_of: item.duplicate_of,
+                        profile: item.profile,
+                    })
+                    .collect();
+                let result = apply_import_items(&store, &existing, &by_id, inputs).await;
+                Ok(json!(result))
             }
         });
     }

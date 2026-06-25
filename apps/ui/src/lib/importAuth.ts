@@ -181,10 +181,12 @@ export function buildDuplicateTargets(
 ): Map<string, string> {
   const byEndpoint = new Map<string, string>();
   const byHostPort = new Map<string, string>();
+  const byName = new Map<string, string>();
   for (const p of existing) {
     if (p.kind !== 'ssh') continue;
     byEndpoint.set(sshEndpointKey(p.ssh), p.id);
     byHostPort.set(sshHostPortKey(p.ssh), p.id);
+    byName.set(p.name.toLowerCase(), p.id);
   }
   const targets = new Map<string, string>();
   for (const sourceId of selectedIds) {
@@ -193,7 +195,8 @@ export function buildDuplicateTargets(
     const id =
       row.duplicateOf
       ?? byEndpoint.get(sshEndpointKey(row.profile.ssh))
-      ?? byHostPort.get(sshHostPortKey(row.profile.ssh));
+      ?? byHostPort.get(sshHostPortKey(row.profile.ssh))
+      ?? byName.get(row.name.toLowerCase());
     if (id) targets.set(sourceId, id);
   }
   return targets;
@@ -210,12 +213,9 @@ export function buildImportApplyItems(
     const row = candidates.find((c) => c.sourceId === sourceId);
     if (!row) continue;
     const duplicateOf = duplicateTargets?.get(sourceId) ?? row.duplicateOf ?? undefined;
-    const shouldOverwrite =
-      overwriteDuplicates
-      && (Boolean(duplicateOf) || row.status === 'duplicate');
     const item: ImportApplyItemPayload = {
       sourceId,
-      overwrite: shouldOverwrite,
+      overwrite: overwriteDuplicates,
       duplicateOf,
     };
     if (row.profile) {

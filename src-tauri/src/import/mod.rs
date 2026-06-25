@@ -1,5 +1,6 @@
 //! Connection profile importers (WindTerm, OpenSSH config, CSV, …).
 
+mod apply;
 mod common;
 mod csv_import;
 mod mobaxterm;
@@ -12,6 +13,8 @@ mod types;
 mod windterm;
 mod xshell;
 
+pub use apply::apply_import_items;
+pub use apply::ImportApplyItemInput;
 pub use common::apply_ssh_import_overrides;
 pub use common::merge_import_overwrite;
 pub use csv_import::{detect_csv_paths, preview_csv, read_csv_file};
@@ -22,9 +25,9 @@ pub use securecrt::{detect_securecrt_paths, preview_securecrt, read_securecrt_fi
 pub use tabby::{detect_tabby_paths, preview_tabby, read_tabby_file};
 pub use termius::{detect_termius_paths, preview_termius, read_termius_file};
 pub use types::{
-    endpoint_key, existing_id_for_endpoint, mark_duplicates, preview_stats, ImportApplyResult,
-    ImportCandidate, ImportCandidateStatus, ImportDetectPath, ImportDetectResult,
-    ImportPreviewResult, ImportPreviewStats,
+    endpoint_key, existing_id_for_endpoint, existing_id_for_name, mark_duplicates, preview_stats,
+    ImportApplyResult, ImportCandidate, ImportCandidateStatus, ImportDetectPath,
+    ImportDetectResult, ImportPreviewResult, ImportPreviewStats,
 };
 pub use windterm::{detect_windterm_paths, preview_windterm, read_windterm_file};
 pub use xshell::{detect_xshell_paths, preview_xshell_at};
