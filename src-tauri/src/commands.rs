@@ -1018,6 +1018,7 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
 
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct ImportApplyItem {
         source_id: String,
         #[serde(default)]
@@ -1025,6 +1026,7 @@ fn register_profile_import(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
 
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct ImportApplyParams {
         source: String,
         #[serde(default)]
@@ -3920,5 +3922,24 @@ mod tests {
         // Close.
         let r = d.dispatch(req("session.close", json!({"id": id}))).await;
         assert!(r.error.is_none());
+    }
+
+    #[test]
+    fn import_apply_item_accepts_camel_case_source_id() {
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ImportApplyItem {
+            source_id: String,
+            #[serde(default)]
+            overwrite: bool,
+        }
+
+        let item: ImportApplyItem =
+            serde_json::from_value(json!({"sourceId": "windterm-uuid-1", "overwrite": true}))
+                .unwrap();
+        assert_eq!(item.source_id, "windterm-uuid-1");
+        assert!(item.overwrite);
     }
 }

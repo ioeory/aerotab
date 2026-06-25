@@ -1634,6 +1634,7 @@
     ) as Record<string, ProfileSidebarActionKey>;
     for (const actionId of Object.values(PROFILE_SIDEBAR_ACTION_IDS)) {
       hotkeys.registerHandler(actionId, () => {
+        if (!sidebarFocus.isListFocused()) return;
         const profileId = sidebarFocus.focusedProfileId;
         if (!profileId) return;
         const profile = savedProfiles.find((p) => p.id === profileId);
@@ -1668,6 +1669,14 @@
       hotkeys.dispatch(e);
     };
     window.addEventListener('keydown', kbdHandler, true);
+    const onFocusIn = (ev: FocusEvent) => {
+      const target = ev.target;
+      if (!(target instanceof Element)) return;
+      if (!target.closest('[data-aerotab-sidebar-profiles]')) {
+        sidebarFocus.clearFocused();
+      }
+    };
+    document.addEventListener('focusin', onFocusIn, true);
     const onSessionReplaced = (ev: Event) => {
       const detail = (ev as CustomEvent<{ oldId: string; session: SessionMeta }>).detail;
       if (!detail?.oldId || !detail.session) return;
@@ -1706,6 +1715,7 @@
     return () => {
       window.removeEventListener('resize', onWindowResize);
       if (winResizeTimer) clearTimeout(winResizeTimer);
+      document.removeEventListener('focusin', onFocusIn, true);
       document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
       document.removeEventListener('aerotab:session-replaced', onSessionReplaced);
       document.removeEventListener(IMPORT_CONNECTIONS_OPEN, onImportConnectionsOpen);

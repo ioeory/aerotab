@@ -4,6 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::profile::{Profile, ProfileKind, RemoteDesktopSpec};
+use crate::ssh::keys::{expand_identity_path, first_existing_ssh_key};
 use crate::ssh::{AuthMethod, SshProfile};
 
 use super::types::{
@@ -165,8 +166,10 @@ fn map_windterm_object(obj: &Value) -> Option<ImportCandidate> {
     let (user, host) = parse_target(&target);
 
     let mut warnings = Vec::new();
-    if str_field(map, "ssh.password").is_some() || str_field(map, "session.password").is_some() {
-        warnings.push("password not imported; using ssh-agent".into());
+    if windterm_has_saved_login(map) {
+        warnings.push(
+            "WindTerm saved login (password/key) is encrypted and not imported; configure auth in AeroTab if needed".into(),
+        );
     }
 
     let tags = vec![IMPORT_TAG.to_string()];
@@ -180,7 +183,7 @@ fn map_windterm_object(obj: &Value) -> Option<ImportCandidate> {
                     Some("missing session.target host".into()),
                 )
             } else {
-                let auth = identity_from_map(map).unwrap_or(AuthMethod::Agent);
+                let auth = auth_from_windterm(map, &mut warnings);
                 let ssh = SshProfile {
                     host: host.clone(),
                     port: if port == 0 { 22 } else { port },
@@ -304,19 +307,113 @@ fn build_profile(
     }
 }
 
-fn identity_from_map(map: &serde_json::Map<String, Value>) -> Option<AuthMethod> {
+fn windterm_identity_keys() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &[
+            "ssh.identityFilePath.windows",
+            "ssh.identityFilePath",
+            "ssh.identityFile",
+            "ssh.identity.file",
+            "session.identityFilePath",
+            "session.identityfilePath",
+            "session.identityFile",
+            "ssh.privateKey",
+            "ssh.identityFilePath.linux",
+            "ssh.identityFilePath.macos",
+        ]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            "ssh.identityFilePath.macos",
+            "ssh.identityFilePath",
+            "ssh.identityFile",
+            "ssh.identity.file",
+            "session.identityFilePath",
+            "session.identityfilePath",
+            "session.identityFile",
+            "ssh.privateKey",
+            "ssh.identityFilePath.windows",
+            "ssh.identityFilePath.linux",
+        ]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &[
+            "ssh.identityFilePath.linux",
+            "ssh.identityFilePath",
+            "ssh.identityFile",
+            "ssh.identity.file",
+            "session.identityFilePath",
+            "session.identityfilePath",
+            "session.identityFile",
+            "ssh.privateKey",
+            "ssh.identityFilePath.windows",
+            "ssh.identityFilePath.macos",
+        ]
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        &[
+            "ssh.identityFilePath",
+            "ssh.identityFile",
+            "ssh.identity.file",
+            "session.identityFilePath",
+            "session.identityfilePath",
+            "session.identityFile",
+            "ssh.privateKey",
+        ]
+    }
+}
+
+fn windterm_has_saved_login(map: &serde_json::Map<String, Value>) -> bool {
     for key in [
-        "ssh.identityFile",
-        "ssh.identity.file",
-        "session.identityFile",
-        "ssh.privateKey",
+        "session.autoLogin",
+        "ssh.password",
+        "session.password",
+        "ssh.passphrase",
     ] {
+        if let Some(v) = map.get(key) {
+            if v.as_str().is_some_and(|s| !s.is_empty()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn auth_from_windterm(
+    map: &serde_json::Map<String, Value>,
+    warnings: &mut Vec<String>,
+) -> AuthMethod {
+    if let Some(path) = identity_from_map(map) {
+        return AuthMethod::PublicKey {
+            key_path: path,
+            passphrase: None,
+        };
+    }
+    if let Some(key) = first_existing_ssh_key() {
+        warnings.push(format!(
+            "no identity file in WindTerm session; using default key {}",
+            key.display()
+        ));
+        return AuthMethod::PublicKey {
+            key_path: key,
+            passphrase: None,
+        };
+    }
+    warnings.push(
+        "no identity file or default ~/.ssh key; will try ssh-agent at connect (start OpenSSH Authentication Agent on Windows)".into(),
+    );
+    AuthMethod::Agent
+}
+
+fn identity_from_map(map: &serde_json::Map<String, Value>) -> Option<std::path::PathBuf> {
+    for key in windterm_identity_keys() {
         if let Some(path) = str_field(map, key) {
             if !path.is_empty() {
-                return Some(AuthMethod::PublicKey {
-                    key_path: PathBuf::from(path),
-                    passphrase: None,
-                });
+                return Some(expand_identity_path(&path));
             }
         }
     }
@@ -349,7 +446,7 @@ fn parse_target(target: &str) -> (String, String) {
 }
 
 fn normalize_group(g: String) -> String {
-    g.trim().trim_start_matches('/').replace('\\', "/")
+    g.trim().trim_start_matches('/').replace(['\\', '>'], "/")
 }
 
 #[cfg(test)]
@@ -399,6 +496,7 @@ mod tests {
             assert_eq!(ssh.host, "10.0.0.5");
             assert_eq!(ssh.port, 2222);
             assert_eq!(ssh.user, "alice");
+            assert!(matches!(ssh.auth, AuthMethod::PublicKey { .. }));
         } else {
             panic!("expected ssh");
         }
@@ -411,5 +509,63 @@ mod tests {
 {"session.label":"b","session.protocol":"SSH","session.target":"u@2.2.2.2","session.uuid":"u2"}"#;
         let preview = preview_windterm(text, None).unwrap();
         assert_eq!(preview.candidates.len(), 2);
+    }
+
+    #[test]
+    fn normalizes_gt_group_separator() {
+        let text = r#"[{
+            "session.group": "Doocom>Local-Dev",
+            "session.label": "vm-1",
+            "session.protocol": "SSH",
+            "session.target": "u@1.2.3.4",
+            "session.uuid": "g1"
+        }]"#;
+        let preview = preview_windterm(text, None).unwrap();
+        assert_eq!(
+            preview.candidates[0].group.as_deref(),
+            Some("Doocom/Local-Dev")
+        );
+    }
+
+    #[test]
+    fn maps_identity_file_path_windows_field() {
+        let text = r#"[{
+            "session.label": "nginx",
+            "session.protocol": "SSH",
+            "session.target": "root@192.168.1.106",
+            "session.uuid": "w1",
+            "ssh.identityFilePath.windows": "%USERPROFILE%\\.ssh\\id_ed25519"
+        }]"#;
+        let preview = preview_windterm(text, None).unwrap();
+        let p = preview.candidates[0].profile.as_ref().unwrap();
+        if let ProfileKind::Ssh { ssh } = &p.spec {
+            assert!(matches!(ssh.auth, AuthMethod::PublicKey { .. }));
+            if let AuthMethod::PublicKey { key_path, .. } = &ssh.auth {
+                assert!(key_path.to_string_lossy().contains("id_ed25519"));
+            }
+        } else {
+            panic!("expected ssh");
+        }
+    }
+
+    #[test]
+    fn without_identity_uses_default_key_or_agent() {
+        let text = r#"[{
+            "session.label": "plain",
+            "session.protocol": "SSH",
+            "session.target": "root@10.0.0.1",
+            "session.uuid": "w2"
+        }]"#;
+        let preview = preview_windterm(text, None).unwrap();
+        let p = preview.candidates[0].profile.as_ref().unwrap();
+        if let ProfileKind::Ssh { ssh } = &p.spec {
+            if first_existing_ssh_key().is_some() {
+                assert!(matches!(ssh.auth, AuthMethod::PublicKey { .. }));
+            } else {
+                assert!(matches!(ssh.auth, AuthMethod::Agent));
+            }
+        } else {
+            panic!("expected ssh");
+        }
     }
 }

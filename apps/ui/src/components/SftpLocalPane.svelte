@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     Folder,
     FileText,
@@ -21,6 +22,7 @@
     setSftpDragData,
     type LocalDragPayload,
   } from '../lib/sftpLocal';
+  import { portal } from '../lib/portal';
 
   interface Props {
     cwd: string;
@@ -57,6 +59,7 @@
   let lastSelectedName = $state<string | null>(null);
   let menuEntry = $state<LocalEntry | null>(null);
   let menuOpen = $state(false);
+  let menuEl = $state<HTMLDivElement | null>(null);
   let menuX = $state(0);
   let menuY = $state(0);
   let lastActionPosition = $state<{ x: number; y: number } | null>(null);
@@ -165,7 +168,28 @@
     return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(rect.height / 2, 280)) };
   }
 
-  function openMenu(entry: LocalEntry, ev: MouseEvent) {
+  function clampMenuToViewport(x: number, y: number, el: HTMLDivElement | null): { x: number; y: number } {
+    if (!el) return { x, y };
+    const pad = 8;
+    const maxX = Math.max(pad, window.innerWidth - el.offsetWidth - pad);
+    const maxY = Math.max(pad, window.innerHeight - el.offsetHeight - pad);
+    return {
+      x: Math.min(Math.max(pad, x), maxX),
+      y: Math.min(Math.max(pad, y), maxY),
+    };
+  }
+
+  async function placeMenuAt(clientX: number, clientY: number) {
+    menuX = clientX;
+    menuY = clientY;
+    await tick();
+    const clamped = clampMenuToViewport(menuX, menuY, menuEl);
+    menuX = clamped.x;
+    menuY = clamped.y;
+    lastActionPosition = { x: menuX, y: menuY };
+  }
+
+  async function openMenu(entry: LocalEntry, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
     focusPane();
@@ -175,9 +199,19 @@
     lastSelectedName = entry.name;
     menuEntry = entry;
     menuOpen = true;
-    menuX = Math.min(ev.clientX, window.innerWidth - 190);
-    menuY = Math.min(ev.clientY, window.innerHeight - 170);
-    lastActionPosition = { x: menuX, y: menuY };
+    await placeMenuAt(ev.clientX, ev.clientY);
+  }
+
+  async function openPaneMenu(ev: MouseEvent) {
+    ev.preventDefault();
+    focusPane();
+    rememberActionPosition(ev);
+    menuEntry = null;
+    focusedName = null;
+    lastSelectedName = null;
+    selectedNames = new Set();
+    menuOpen = true;
+    await placeMenuAt(ev.clientX, ev.clientY);
   }
 
   async function renameEntry(entry = entries.find((candidate) => candidate.name === focusedName)) {
@@ -300,18 +334,7 @@
     onDropRemote(e);
     onDropFiles(e);
   }}
-  oncontextmenu={(e) => {
-    e.preventDefault();
-    focusPane();
-    rememberActionPosition(e);
-    menuEntry = null;
-    focusedName = null;
-    lastSelectedName = null;
-    selectedNames = new Set();
-    menuOpen = true;
-    menuX = Math.min(e.clientX, window.innerWidth - 190);
-    menuY = Math.min(e.clientY, window.innerHeight - 170);
-  }}
+  oncontextmenu={(e) => { void openPaneMenu(e); }}
 >
   <div class="local-pane-title px-2 py-1 shell-section-title border-b border-[var(--color-border-soft)]">
     {i18n.t('sftp.localPane')}
@@ -367,7 +390,7 @@
               class="local-row {selected ? 'selected' : ''} {focused ? 'focused' : ''}"
               draggable={e.kind === 'file' || e.kind === 'dir'}
               ondragstart={(ev) => onDragStartLocal(ev, e, path)}
-              oncontextmenu={(ev) => openMenu(e, ev)}
+              oncontextmenu={(ev) => { void openMenu(e, ev); }}
               onclick={(ev) => selectEntry(e, ev)}
               ondblclick={(ev) => { focusPane(); rememberActionPosition(ev); if (e.kind === 'dir') onNavigate(path); }}
             >
@@ -393,15 +416,17 @@
 </div>
 
 {#if menuOpen}
-  <div
-    data-aerotab-menu-open=""
-    class="panel local-context-menu fixed z-[80] min-w-[176px] py-1 text-[12px] text-[var(--color-fg)]"
-    style="left: {menuX}px; top: {menuY}px;"
-    role="menu"
-    tabindex="-1"
-    onkeydown={(e) => e.stopPropagation()}
-    onclick={(e) => e.stopPropagation()}
-  >
+  <div use:portal class="contents">
+    <div
+      bind:this={menuEl}
+      data-aerotab-menu-open=""
+      class="panel local-context-menu fixed z-[80] min-w-[176px] py-1 text-[12px] text-[var(--color-fg)]"
+      style="left: {menuX}px; top: {menuY}px;"
+      role="menu"
+      tabindex="-1"
+      onkeydown={(e) => e.stopPropagation()}
+      onclick={(e) => e.stopPropagation()}
+    >
     {#if menuEntry}
       <button type="button" class="menu-item" onclick={() => { const entry = menuEntry; closeMenu(); if (entry?.kind === 'dir') onNavigate(fullPath(entry)); }}>
         <Folder size={13} />
@@ -425,6 +450,7 @@
       <RefreshCw size={13} />
       {i18n.t('common.refresh')}
     </button>
+  </div>
   </div>
 {/if}
 

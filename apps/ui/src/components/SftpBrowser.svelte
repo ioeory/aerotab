@@ -99,6 +99,7 @@
   let listSeq = 0;
   let defaultDownloadDir = $state<string | null>(null);
   let lastDownloadPath = $state<string | null>(null);
+  let browseBusy = $state(false);
   let preparingTransfers = $state(false);
   let transfers = $state<TransferTask[]>([]);
   let processingTransfers = false;
@@ -1650,17 +1651,23 @@
   }
 
   async function chooseDownloadDir() {
-    const picked = await pickDirectoryPath();
-    if (!picked) return;
-    defaultDownloadDir = picked;
-    lastDownloadPath = picked;
+    if (browseBusy) return;
+    browseBusy = true;
     try {
-      await rpc.call('settings.set', {
-        key: 'sftp',
-        value: { defaultDownloadDir: picked },
-      });
-    } catch (e) {
-      onError(`sftp settings: ${(e as Error).message}`);
+      const picked = await pickDirectoryPath();
+      if (!picked) return;
+      defaultDownloadDir = picked;
+      lastDownloadPath = picked;
+      try {
+        await rpc.call('settings.set', {
+          key: 'sftp',
+          value: { defaultDownloadDir: picked },
+        });
+      } catch (e) {
+        onError(`sftp settings: ${(e as Error).message}`);
+      }
+    } finally {
+      browseBusy = false;
     }
   }
 

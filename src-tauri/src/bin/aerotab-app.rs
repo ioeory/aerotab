@@ -14,9 +14,17 @@
 use std::{
     io::SeekFrom,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
+
+static FILE_DIALOG_GUARD: Mutex<()> = Mutex::new(());
+
+fn lock_file_dialog() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    FILE_DIALOG_GUARD
+        .lock()
+        .map_err(|_| "file dialog is busy".to_string())
+}
 
 #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
 use aerotab_core::commands::set_parent_hwnd;
@@ -338,6 +346,7 @@ async fn write_chunk_to_path(
 
 #[tauri::command]
 fn pick_save_file(default_name: Option<String>) -> Result<Option<String>, String> {
+    let _guard = lock_file_dialog()?;
     let mut dialog = rfd::FileDialog::new();
     if let Some(name) = default_name.filter(|name| !name.trim().is_empty()) {
         dialog = dialog.set_file_name(name);
@@ -349,6 +358,7 @@ fn pick_save_file(default_name: Option<String>) -> Result<Option<String>, String
 
 #[tauri::command]
 fn pick_open_files(directory: Option<bool>) -> Result<Option<Vec<String>>, String> {
+    let _guard = lock_file_dialog()?;
     if directory.unwrap_or(false) {
         return Ok(rfd::FileDialog::new()
             .pick_folder()
@@ -364,6 +374,7 @@ fn pick_open_files(directory: Option<bool>) -> Result<Option<Vec<String>>, Strin
 
 #[tauri::command]
 fn pick_open_private_key_file() -> Result<Option<String>, String> {
+    let _guard = lock_file_dialog()?;
     Ok(rfd::FileDialog::new()
         .add_filter(
             "SSH private key",
@@ -376,6 +387,7 @@ fn pick_open_private_key_file() -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn pick_directory() -> Result<Option<String>, String> {
+    let _guard = lock_file_dialog()?;
     Ok(rfd::FileDialog::new()
         .pick_folder()
         .map(|path| path.to_string_lossy().into_owned()))

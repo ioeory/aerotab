@@ -11,6 +11,16 @@
     type ImportPreviewResult,
     type ImportSourceKind,
   } from '../lib/importTypes';
+  import {
+    buildImportPreviewTree,
+    collectFolderPaths,
+    collectCandidatesInFolder,
+    flattenVisibleImportRows,
+    importableCandidates,
+    invertImportSelection,
+    type ImportPreviewFolder,
+  } from '../lib/importPreviewTree';
+  import ImportPreviewTable from './ImportPreviewTable.svelte';
   import { notifyProfilesChanged } from '../lib/profileEvents';
 
   interface Props {
@@ -32,6 +42,9 @@
   let loading = $state(false);
   let applying = $state(false);
   let selectedIds = $state<Set<string>>(new Set());
+  let previewTree = $state<ImportPreviewFolder | null>(null);
+  let collapsedGroups = $state<Set<string>>(new Set());
+  let browseBusy = $state(false);
 
   $effect(() => {
     if (!open) {
@@ -43,6 +56,9 @@
       loading = false;
       applying = false;
       selectedIds = new Set();
+      previewTree = null;
+      collapsedGroups = new Set();
+      browseBusy = false;
     }
   });
 
@@ -105,12 +121,16 @@
   }
 
   async function browseFile(asDirectory = browseUsesDirectory()) {
+    if (browseBusy) return;
+    browseBusy = true;
     try {
       const paths = await tauriInvoke<string[] | null>('pick_open_files', { directory: asDirectory });
       const path = paths?.[0];
       if (path) selectedPath = path;
     } catch (e) {
       onError(`import browse: ${(e as Error).message}`);
+    } finally {
+      browseBusy = false;
     }
   }
 
@@ -125,7 +145,13 @@
         source,
         path: selectedPath ?? undefined,
       });
+      if (!r.candidates?.length) {
+        onError(i18n.t('import.previewEmpty'));
+        return;
+      }
       preview = r;
+      previewTree = buildImportPreviewTree(r.candidates);
+      collapsedGroups = new Set(collectFolderPaths(previewTree));
       selectedIds = defaultSelected(r.candidates);
       step = 'preview';
     } catch (e) {
@@ -144,7 +170,7 @@
 
   function toggleAllImportable() {
     if (!preview) return;
-    const importable = preview.candidates.filter((c) => c.status === 'ready' || c.status === 'duplicate');
+    const importable = importableCandidates(preview.candidates);
     const allSelected = importable.every((c) => selectedIds.has(c.sourceId));
     if (allSelected) {
       selectedIds = new Set();
@@ -153,11 +179,51 @@
     }
   }
 
+  function invertSelection() {
+    if (!preview) return;
+    selectedIds = invertImportSelection(selectedIds, preview.candidates);
+  }
+
+  function toggleFolder(path: string) {
+    const next = new Set(collapsedGroups);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    collapsedGroups = next;
+  }
+
+  function expandAllGroups() {
+    collapsedGroups = new Set();
+  }
+
+  function collapseAllGroups() {
+    if (!previewTree) return;
+    collapsedGroups = new Set(collectFolderPaths(previewTree));
+  }
+
+  function toggleGroup(folder: ImportPreviewFolder, checked: boolean) {
+    const next = new Set(selectedIds);
+    for (const c of importableCandidates(collectCandidatesInFolder(folder))) {
+      if (checked) next.add(c.sourceId);
+      else next.delete(c.sourceId);
+    }
+    selectedIds = next;
+  }
+
   function statusLabel(c: ImportCandidate): string {
     if (c.status === 'ready') return i18n.t('import.statusReady');
     if (c.status === 'duplicate') return i18n.t('import.statusDuplicate');
     return c.errorMessage ?? i18n.t('import.statusError');
   }
+
+  let previewRows = $derived(
+    previewTree
+      ? flattenVisibleImportRows(
+          previewTree,
+          collapsedGroups,
+          previewTree.candidates.length > 0 && previewTree.folders.length > 0,
+        )
+      : [],
+  );
 
   async function applyImport() {
     if (!preview || selectedIds.size === 0) return;
@@ -177,6 +243,14 @@
         skipped: r.skipped,
         updated: r.updated,
       });
+      if (r.created === 0 && r.updated === 0) {
+        onError(
+          r.errors.length > 0
+            ? `${msg} ${r.errors.join('; ')}`
+            : i18n.t('import.applyNothing', { skipped: r.skipped }),
+        );
+        return;
+      }
       onSummary?.(msg);
       if (r.errors.length > 0) {
         onError(r.errors.join('; '));
@@ -277,19 +351,29 @@
               <p class="text-[11px] font-mono text-[var(--color-fg-muted)] mt-2 truncate" title={selectedPath}>{selectedPath}</p>
             {/if}
           {/if}
-        {:else if preview}
-          <div class="flex flex-wrap items-center gap-3 mb-3 text-[11px] text-[var(--color-fg-muted)]">
+        {:else if preview && previewTree}
+          <div class="flex flex-wrap items-center gap-2 mb-3 text-[11px] text-[var(--color-fg-muted)]">
             <span>{i18n.t('import.statsTotal', { count: preview.stats.total })}</span>
             <span class="text-[var(--color-success)]">{i18n.t('import.statsReady', { count: preview.stats.ready })}</span>
             <span>{i18n.t('import.statsDuplicate', { count: preview.stats.duplicate })}</span>
             <span class="text-[var(--color-danger)]">{i18n.t('import.statsError', { count: preview.stats.error })}</span>
+            <span class="w-px h-3 bg-[var(--color-border-soft)]" aria-hidden="true"></span>
             <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={toggleAllImportable}>
-              {i18n.t('import.toggleImportable')}
+              {i18n.t('profiles.selectAll')}
+            </button>
+            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={invertSelection}>
+              {i18n.t('profiles.invertSelection')}
+            </button>
+            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={expandAllGroups}>
+              {i18n.t('import.expandAll')}
+            </button>
+            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={collapseAllGroups}>
+              {i18n.t('import.collapseAll')}
             </button>
           </div>
-          <div class="border border-[var(--color-border-soft)] rounded overflow-hidden">
+          <div class="border border-[var(--color-border-soft)] rounded overflow-hidden max-h-[min(480px,50vh)] overflow-y-auto">
             <table class="w-full text-[11.5px]">
-              <thead class="bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]">
+              <thead class="bg-[var(--color-panel-2)] text-[var(--color-fg-muted)] sticky top-0 z-[1]">
                 <tr>
                   <th class="w-8 px-2 py-1.5"></th>
                   <th class="text-left px-2 py-1.5 font-normal">{i18n.t('import.colName')}</th>
@@ -299,22 +383,15 @@
                 </tr>
               </thead>
               <tbody>
-                {#each preview.candidates as row (row.sourceId)}
-                  <tr class="border-t border-[var(--color-border-soft)] hover:bg-[var(--color-panel-2)]">
-                    <td class="px-2 py-1 text-center">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(row.sourceId)}
-                        disabled={row.status === 'error'}
-                        onchange={(e) => toggleRow(row.sourceId, e.currentTarget.checked)}
-                      />
-                    </td>
-                    <td class="px-2 py-1 truncate max-w-[200px]" title={row.name}>{row.name}</td>
-                    <td class="px-2 py-1 uppercase text-[10px]">{row.kind}</td>
-                    <td class="px-2 py-1 truncate max-w-[120px] text-[var(--color-fg-muted)]">{row.group ?? '—'}</td>
-                    <td class="px-2 py-1 text-[var(--color-fg-muted)] max-w-[220px] truncate" title={statusLabel(row)}>{statusLabel(row)}</td>
-                  </tr>
-                {/each}
+                <ImportPreviewTable
+                  rows={previewRows}
+                  collapsed={collapsedGroups}
+                  {selectedIds}
+                  onToggleFolder={toggleFolder}
+                  onToggleRow={toggleRow}
+                  onToggleGroup={toggleGroup}
+                  statusLabel={statusLabel}
+                />
               </tbody>
             </table>
           </div>

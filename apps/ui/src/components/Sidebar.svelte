@@ -517,7 +517,6 @@
   type SubmenuKey = 'move' | 'tagColors' | 'jump';
   let activeSubmenu = $state<SubmenuKey | null>(null);
   let submenuCloseTimer: ReturnType<typeof setTimeout> | null = null;
-  let focusedProfileId = $state<string | null>(null);
   let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectionAnchorId = $state<string | null>(null);
@@ -588,7 +587,6 @@
   }
 
   function focusProfile(p: StoredProfile) {
-    focusedProfileId = p.id;
     sidebarFocus.setFocused(p.id);
   }
 
@@ -1108,9 +1106,8 @@
     if (!(await appConfirm(i18n.t('sidebar.deleteProfileConfirm', { name: p.name }), { danger: true, confirmLabel: i18n.t('common.delete'), position: lastMenuPosition ?? undefined }))) return;
     try {
       await rpc.call('profile.delete', { id: p.id });
-      if (focusedProfileId === p.id) {
-        focusedProfileId = null;
-        sidebarFocus.setFocused(null);
+      if (sidebarFocus.focusedProfileId === p.id) {
+        sidebarFocus.clearFocused();
       }
       notifyProfilesChanged();
       await refresh();
@@ -1130,6 +1127,7 @@
   };
 
   function onProfileKeydown(p: StoredProfile, ev: KeyboardEvent) {
+    if (!sidebarFocus.isListFocused()) return;
     focusProfile(p);
     if (handleProfileSidebarShortcut(p, ev, profileShortcutHandlers)) {
       ev.preventDefault();
@@ -1402,7 +1400,7 @@
       </div>
     {/if}
   </div>
-  <div role="presentation" class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" ondragover={onRootDragOver} ondrop={onRootDrop}>
+  <div role="presentation" class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" data-aerotab-sidebar-profiles="" ondragover={onRootDragOver} ondrop={onRootDrop}>
     {#if !hasVisibleProfiles}
       <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)]">
         {#if profileQuery.trim()}
@@ -1427,7 +1425,7 @@
         folder={profileTree}
         collapsed={collapsedPaths}
         forceExpanded={forceExpandedPaths}
-        focusedProfileId={focusedProfileId}
+        focusedProfileId={sidebarFocus.focusedProfileId}
         selectedProfileIds={selectedProfileIds}
         profileHealth={profileHealth}
         showSelection={hasProfileSelection}

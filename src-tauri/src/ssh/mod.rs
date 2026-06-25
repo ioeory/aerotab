@@ -6,6 +6,7 @@
 //! [`KnownHosts`](known_hosts::KnownHosts) store (TOFU on first contact,
 //! strict match thereafter).
 
+pub mod keys;
 pub mod known_hosts;
 pub mod sftp;
 pub mod stats;
@@ -497,7 +498,14 @@ where
                 .await
                 .map_err(SshError::from)?
         }
-        AuthMethod::Agent => authenticate_agent_generic(handle, profile).await?,
+        AuthMethod::Agent => match authenticate_agent_generic(handle, profile).await {
+            Ok(authed) => authed,
+            Err(SshError::Agent(e)) => {
+                tracing::debug!("ssh agent unavailable ({e}); trying default private keys");
+                authenticate_default_public_keys(handle, &profile.user).await?
+            }
+            Err(e) => return Err(e),
+        },
         AuthMethod::VaultRef { .. } => {
             return Err(SshError::Connect(
                 "vault auth was not resolved before connect".into(),
@@ -509,6 +517,41 @@ where
     } else {
         Ok(())
     }
+}
+
+async fn authenticate_default_public_keys<H>(
+    handle: &mut client::Handle<H>,
+    user: &str,
+) -> Result<bool, SshError>
+where
+    H: client::Handler,
+    H::Error: From<russh::Error>,
+{
+    let mut last_err: Option<String> = None;
+    for key_path in keys::default_ssh_key_candidates() {
+        if !key_path.is_file() {
+            continue;
+        }
+        let key = match load_secret_key(&key_path, None) {
+            Ok(k) => k,
+            Err(e) => {
+                last_err = Some(format!("load {}: {e}", key_path.display()));
+                continue;
+            }
+        };
+        match handle
+            .authenticate_publickey(user, Arc::new(key))
+            .await
+            .map_err(SshError::from)
+        {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    Err(SshError::Agent(last_err.unwrap_or_else(|| {
+        "connect openssh agent failed and no default ~/.ssh private keys worked".into()
+    })))
 }
 
 async fn authenticate_agent_generic<H>(

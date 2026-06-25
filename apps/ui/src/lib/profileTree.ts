@@ -1,12 +1,12 @@
 import type { StoredProfile } from './types';
 import { sortProfiles } from './profileMeta';
 
-/** Split profile.group into nested folder segments (supports `/`, `\`, ` / `). */
+/** Split profile.group into nested folder segments (supports `/`, `\`, `>`, ` / `). */
 export function parseGroupSegments(group: string | null | undefined): string[] {
   const raw = group?.trim();
   if (!raw) return [];
   return raw
-    .split(/[/\\]+/)
+    .split(/[/\\>]+/)
     .flatMap((part) => part.split(/\s*\/\s*/))
     .map((s) => s.trim())
     .filter(Boolean);
