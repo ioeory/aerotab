@@ -1,6 +1,6 @@
 import type { StoredProfile } from './types';
 
-export type ImportSourceKind = 'windterm' | 'ssh-config' | 'csv' | 'putty' | 'mobaxterm' | 'xshell' | 'securecrt' | 'tabby';
+export type ImportSourceKind = 'windterm' | 'termius' | 'ssh-config' | 'csv' | 'putty' | 'mobaxterm' | 'xshell' | 'securecrt' | 'tabby';
 
 export type ImportCandidateStatus = 'ready' | 'duplicate' | 'error';
 
@@ -58,6 +58,7 @@ export interface ImportSourceCard {
 
 export const IMPORT_SOURCE_CARDS: ImportSourceCard[] = [
   { id: 'windterm', titleKey: 'import.source.windterm', descKey: 'import.source.windtermDesc', enabled: true },
+  { id: 'termius', titleKey: 'import.source.termius', descKey: 'import.source.termiusDesc', enabled: true },
   { id: 'ssh-config', titleKey: 'import.source.sshConfig', descKey: 'import.source.sshConfigDesc', enabled: true },
   { id: 'csv', titleKey: 'import.source.csv', descKey: 'import.source.csvDesc', enabled: true },
   { id: 'putty', titleKey: 'import.source.putty', descKey: 'import.source.puttyDesc', enabled: true },

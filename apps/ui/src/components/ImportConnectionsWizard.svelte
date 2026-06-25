@@ -56,6 +56,7 @@
 
   function fileStepHint(): string {
     if (source === 'windterm') return i18n.t('import.fileStepHint.windterm');
+    if (source === 'termius') return i18n.t('import.fileStepHint.termius');
     if (source === 'ssh-config') return i18n.t('import.fileStepHint.sshConfig');
     if (source === 'csv') return i18n.t('import.fileStepHint.csv');
     if (source === 'putty') return i18n.t('import.fileStepHint.putty');
@@ -74,6 +75,7 @@
     if (source === 'xshell') return i18n.t('import.noAutoDetect.xshell');
     if (source === 'securecrt') return i18n.t('import.noAutoDetect.securecrt');
     if (source === 'tabby') return i18n.t('import.noAutoDetect.tabby');
+    if (source === 'termius') return i18n.t('import.noAutoDetect.termius');
     return i18n.t('import.noAutoDetect');
   }
 

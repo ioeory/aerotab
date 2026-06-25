@@ -73,7 +73,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.14-ui-20260607';
+  const buildId = '0.2.15-ui-20260607';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1471,7 +1471,7 @@
         id: 'import-connections',
         title: i18n.t('action.importConnections'),
         subtitle: i18n.t('settings.nav.profiles'),
-        keywords: ['import', 'windterm', 'putty', 'mobaxterm', 'xshell', 'securecrt', 'tabby', 'csv', 'ssh'],
+        keywords: ['import', 'windterm', 'termius', 'putty', 'mobaxterm', 'xshell', 'securecrt', 'tabby', 'csv', 'ssh'],
         run: () => { importWizardOpen = true; },
       },
       { id: 'new-serial', title: i18n.t('action.newSerialConnection'), run: () => serialModal?.open() },

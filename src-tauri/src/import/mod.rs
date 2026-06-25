@@ -7,6 +7,7 @@ mod openssh;
 mod putty;
 mod securecrt;
 mod tabby;
+mod termius;
 mod types;
 mod windterm;
 mod xshell;
@@ -17,6 +18,7 @@ pub use openssh::{detect_openssh_paths, preview_openssh, read_openssh_file};
 pub use putty::{detect_putty_paths, preview_putty, read_putty_file};
 pub use securecrt::{detect_securecrt_paths, preview_securecrt, read_securecrt_file};
 pub use tabby::{detect_tabby_paths, preview_tabby, read_tabby_file};
+pub use termius::{detect_termius_paths, preview_termius, read_termius_file};
 pub use types::{
     endpoint_key, mark_duplicates, preview_stats, ImportApplyResult, ImportCandidate,
     ImportCandidateStatus, ImportDetectPath, ImportDetectResult, ImportPreviewResult,
@@ -37,6 +39,7 @@ pub fn import_detect(source: &str) -> Result<ImportDetectResult, String> {
         "xshell" => detect_xshell_paths(),
         "securecrt" => detect_securecrt_paths(),
         "tabby" => detect_tabby_paths(),
+        "termius" => detect_termius_paths(),
         other => return Err(format!("unknown import source: {other}")),
     })
 }
@@ -71,7 +74,9 @@ pub fn resolve_import_path(source: &str, path: Option<&str>) -> Result<PathBuf, 
             .first()
             .map(|p| PathBuf::from(&p.path))
             .ok_or_else(|| "Tabby config.yaml not found; pick a JSON or YAML export".into()),
-        "csv" | "putty" | "securecrt" => Err(format!("{source} import requires a file path")),
+        "csv" | "putty" | "securecrt" | "termius" => {
+            Err(format!("{source} import requires a file path"))
+        }
         other => Err(format!("unknown import source: {other}")),
     }
 }
@@ -86,6 +91,7 @@ pub fn read_import_text(source: &str, path: Option<&str>) -> Result<String, Stri
         "mobaxterm" => read_mobaxterm_file(resolved.as_path()),
         "securecrt" => read_securecrt_file(resolved.as_path()),
         "tabby" => read_tabby_file(resolved.as_path()),
+        "termius" => read_termius_file(resolved.as_path()),
         "xshell" => Err("Xshell import reads session files from a path".into()),
         other => Err(format!("unknown import source: {other}")),
     }
@@ -104,6 +110,7 @@ pub fn preview_import(
         "mobaxterm" => preview_mobaxterm(text, path),
         "securecrt" => preview_securecrt(text, path),
         "tabby" => preview_tabby(text, path),
+        "termius" => preview_termius(text, path),
         "xshell" => {
             let resolved = resolve_import_path(source, path)?;
             preview_xshell_at(resolved.as_path())
