@@ -90,6 +90,40 @@ export async function detectNativeTerminals(rpc: RpcClient): Promise<EmbedCapabi
   return rpc.call<EmbedCapabilities>('nativeTerminal.embedCapabilities');
 }
 
+export interface NativeSpawnResult {
+  instanceId: string;
+  pid: number;
+  program: string;
+  mode: 'detached' | 'embed';
+  message?: string;
+}
+
+export async function spawnDetachedNativeTerminal(
+  rpc: RpcClient,
+  session: SessionMeta,
+  program?: string,
+): Promise<NativeSpawnResult> {
+  const argv = buildNativeArgvForSession(session);
+  if (argv === null) {
+    throw new Error(
+      'native terminal: unsupported session or missing SSH profile / shell command',
+    );
+  }
+  const caps = await getEmbedCapabilities(rpc);
+  if (!caps.programs.length) {
+    throw new Error(
+      'No native terminal on PATH. Install alacritty, ghostty, or kitty.',
+    );
+  }
+  const prog = program ?? caps.programs[0]?.id;
+  return rpc.call<NativeSpawnResult>('nativeTerminal.spawn', {
+    program: prog,
+    title: session.title,
+    argv,
+    mode: 'detached',
+  });
+}
+
 export async function getEmbedCapabilities(rpc: RpcClient): Promise<EmbedCapabilities> {
   return detectNativeTerminals(rpc);
 }
@@ -142,17 +176,27 @@ export class NativeEmbedController {
       );
     }
     const caps = await getEmbedCapabilities(this.rpc);
-    if (!caps.embedSupported) {
-      throw new Error(
-        `Native embed not supported on ${caps.platform}: ${caps.note}`,
-      );
-    }
     if (!caps.programs.length) {
       throw new Error(
         'No native terminal on PATH. Install alacritty, ghostty, or kitty.',
       );
     }
     const prog = program ?? caps.programs[0]?.id;
+    if (!caps.embedSupported) {
+      const detached = await spawnDetachedNativeTerminal(this.rpc, session, prog);
+      const result: EmbedResult = {
+        instanceId: detached.instanceId,
+        pid: detached.pid,
+        program: detached.program,
+        platform: caps.platform,
+        message: detached.message ?? caps.note,
+      };
+      this.embedResult = result;
+      console.log(
+        `[native-terminal] detached fallback on ${caps.platform}: ${result.program} pid=${result.pid}`,
+      );
+      return result;
+    }
     const rect = await screenRectFromElement(this.rpc, element);
     const result = await this.rpc.call<EmbedResult>('nativeTerminal.embedStart', {
       program: prog,

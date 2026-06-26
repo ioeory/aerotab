@@ -29,6 +29,7 @@ fn lock_file_dialog() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
 use aerotab_core::commands::set_parent_hwnd;
 use aerotab_core::commands::{register_all, set_app_handle, AppState};
+use aerotab_core::desktop_session::{self, DesktopSessionInfo};
 use aerotab_core::ipc::{Dispatcher, ErrorCode, Request, Response, RpcError};
 use aerotab_core::settings::SettingsStore;
 use aerotab_core::CORE_VERSION;
@@ -665,6 +666,12 @@ fn spawn_minimize_to_tray_watcher(app: tauri::AppHandle) {
     });
 }
 
+/// Desktop session introspection (Wayland vs X11, X11 forward availability).
+#[tauri::command]
+fn session_info(display: Option<String>) -> DesktopSessionInfo {
+    desktop_session::desktop_session_info(display.as_deref())
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -875,6 +882,7 @@ fn main() {
             show_main_window,
             get_window_screen_rect,
             get_main_window_hwnd,
+            session_info,
             open_file_transfer_window,
             close_current_window,
             rpc,

@@ -99,6 +99,7 @@ impl From<KnownHostsError> for SshError {
 #[derive(Debug, Clone, Default)]
 pub struct X11ForwardOptions {
     pub enabled: bool,
+    pub display: Option<String>,
 }
 
 /// Persistent host-key handler.
@@ -110,6 +111,7 @@ pub struct TrustingClient {
     pinned_host_key_b64: Option<String>,
     /// When true, accept inbound X11 channels and bridge to the local display.
     x11_forward: bool,
+    x11_display: Option<String>,
     /// When true, accept OpenSSH agent forwarding channels and bridge them to the local agent.
     agent_forward: bool,
     agent_channels: HashMap<ChannelId, AgentForwardChannel>,
@@ -129,6 +131,7 @@ impl TrustingClient {
         host_port: String,
         known_hosts: Option<KnownHosts>,
         x11_forward: bool,
+        x11_display: Option<String>,
         agent_forward: bool,
     ) -> Self {
         Self {
@@ -136,6 +139,7 @@ impl TrustingClient {
             known_hosts,
             pinned_host_key_b64: None,
             x11_forward,
+            x11_display,
             agent_forward,
             agent_channels: HashMap::new(),
         }
@@ -181,7 +185,7 @@ impl client::Handler for TrustingClient {
         }
         #[cfg(unix)]
         {
-            if let Some(path) = local_x11_socket_path() {
+            if let Some(path) = resolve_x11_socket_path(self.x11_display.as_deref()) {
                 tokio::spawn(async move {
                     match tokio::net::UnixStream::connect(path).await {
                         Ok(mut unix) => {
@@ -293,12 +297,68 @@ impl client::Handler for TrustingClient {
 }
 
 #[cfg(unix)]
-fn local_x11_socket_path() -> Option<String> {
-    let display = std::env::var("DISPLAY").ok()?;
+pub fn resolve_x11_socket_path(display_override: Option<&str>) -> Option<String> {
+    let display = display_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("DISPLAY").ok().filter(|s| !s.is_empty()))?;
+    let path = parse_x11_unix_socket(&display)?;
+    if std::path::Path::new(&path).exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+pub fn resolve_x11_socket_path(_display_override: Option<&str>) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn parse_x11_unix_socket(display: &str) -> Option<String> {
     let trimmed = display.trim();
-    let num_part = trimmed.strip_prefix(':')?;
+    let colon_idx = trimmed.find(':')?;
+    let num_part = &trimmed[colon_idx + 1..];
     let num: u32 = num_part.split('.').next()?.parse().ok()?;
     Some(format!("/tmp/.X11-unix/X{num}"))
+}
+
+/// Returns an error when X11 forwarding is enabled but no local X socket is reachable.
+pub fn validate_x11_forward(opts: &X11ForwardOptions) -> Result<(), String> {
+    if !opts.enabled {
+        return Ok(());
+    }
+    if resolve_x11_socket_path(opts.display.as_deref()).is_some() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let wayland = std::env::var("WAYLAND_DISPLAY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some();
+        if wayland {
+            return Err(
+            "X11 forwarding is enabled but no local X display is available. Install and run XWayland (e.g. xorg-xwayland on Arch) or set x11Display in Settings → SSH.".into(),
+        );
+        }
+        Err(
+        "X11 forwarding is enabled but DISPLAY is unset or the X socket is missing. Set x11Display in Settings → SSH or start your X server.".into(),
+    )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = opts;
+        Err("X11 forwarding is only supported on Unix.".into())
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn local_x11_socket_path() -> Option<String> {
+    resolve_x11_socket_path(None)
 }
 
 const MAX_AGENT_PACKET_SIZE: usize = 256 * 1024;
@@ -739,6 +799,7 @@ pub async fn connect_authenticated(
             format!("{}:{}", hop.host, hop.port),
             kh.clone(),
             false,
+            None,
             false,
         )
     })
@@ -756,6 +817,7 @@ pub async fn connect_authenticated_with_agent_forwarding(
             format!("{}:{}", hop.host, hop.port),
             kh.clone(),
             false,
+            None,
             is_final,
         )
     })
@@ -772,6 +834,9 @@ pub async fn connect_shell_with_known_hosts(
     transport: SshTransportSettings,
 ) -> Result<SshShell, SshError> {
     let x11_enabled = x11.as_ref().is_some_and(|o| o.enabled);
+    let x11_display = x11
+        .as_ref()
+        .and_then(|o| if o.enabled { o.display.clone() } else { None });
     let kh = known_hosts.clone();
     let handle =
         connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
@@ -779,6 +844,7 @@ pub async fn connect_shell_with_known_hosts(
                 format!("{}:{}", hop.host, hop.port),
                 kh.clone(),
                 is_final && x11_enabled,
+                if is_final { x11_display.clone() } else { None },
                 false,
             )
         })
@@ -879,5 +945,25 @@ mod tests {
             Err(e) => e,
         };
         assert!(matches!(err, SshError::Connect(_)), "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_x11_unix_socket_local_display() {
+        assert_eq!(
+            super::parse_x11_unix_socket(":0").as_deref(),
+            Some("/tmp/.X11-unix/X0")
+        );
+        assert_eq!(
+            super::parse_x11_unix_socket(":1.0").as_deref(),
+            Some("/tmp/.X11-unix/X1")
+        );
+        assert!(super::parse_x11_unix_socket("").is_none());
+    }
+
+    #[test]
+    fn validate_x11_forward_skips_when_disabled() {
+        let opts = X11ForwardOptions::default();
+        assert!(super::validate_x11_forward(&opts).is_ok());
     }
 }

@@ -1,0 +1,76 @@
+# Maintainer: AeroTab CI <https://github.com/ioeory/aerotab>
+# Native Arch build (GitHub Actions). pkgver/source/sha256sums/arch are patched at release time.
+
+pkgname=aerotab
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Cross-platform SSH, serial, and terminal client (Rust + Tauri)"
+arch=('x86_64')
+url="https://github.com/ioeory/aerotab"
+license=('MIT')
+depends=(
+  'cairo'
+  'desktop-file-utils'
+  'gdk-pixbuf2'
+  'glib2'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libsoup3'
+  'pango'
+  'webkit2gtk-4.1'
+  'libappindicator-gtk3'
+  'librsvg'
+  'openssl'
+  'libxdo'
+)
+makedepends=(
+  'cargo'
+  'git'
+  'nodejs'
+  'npm'
+  'patchelf'
+  'rust'
+)
+options=('!strip' '!debug')
+install=aerotab.install
+source=("AeroTab-${pkgver}.tar.gz")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+build() {
+  cd "AeroTab-${pkgver}"
+  export CI=1
+  cd apps/ui
+  npm ci --no-audit --no-fund
+  npm run build
+  cd ../../src-tauri
+  cargo tauri build --bundles deb --features desktop
+}
+
+package() {
+  local deb_arch
+  case "${CARCH}" in
+    x86_64) deb_arch=amd64 ;;
+    aarch64) deb_arch=arm64 ;;
+    *)
+      printf 'unsupported CARCH: %s\n' "${CARCH}" >&2
+      return 1
+      ;;
+  esac
+
+  local deb="${srcdir}/AeroTab-${pkgver}/src-tauri/target/release/bundle/deb/AeroTab_${pkgver}_${deb_arch}.deb"
+  if [[ ! -f "$deb" ]]; then
+    deb=$(find "${srcdir}/AeroTab-${pkgver}/src-tauri/target" -name "AeroTab_*_${deb_arch}.deb" -print -quit)
+  fi
+  if [[ ! -f "$deb" ]]; then
+    printf 'deb bundle not found under src-tauri/target (expected *_%s.deb)\n' "${deb_arch}" >&2
+    find "${srcdir}/AeroTab-${pkgver}/src-tauri/target" -name '*.deb' 2>/dev/null || true
+    return 1
+  fi
+
+  local extract="${srcdir}/deb-extract"
+  rm -rf "$extract"
+  mkdir -p "$extract"
+  cd "$extract"
+  bsdtar -xf "$deb" data.tar.*
+  bsdtar -xf data.tar.* -C "${pkgdir}"
+}

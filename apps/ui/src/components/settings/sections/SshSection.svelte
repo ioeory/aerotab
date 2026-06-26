@@ -8,6 +8,7 @@
   import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import { appConfirm } from '../../../lib/confirm.svelte';
+  import { getSessionInfo, type DesktopSessionInfo } from '../../../lib/sessionInfo';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -44,6 +45,21 @@
   let tunnelTargetPort = $state(80);
   let tunnels = $state<TunnelMeta[]>([]);
   let tunnelsBusy = $state(false);
+  let desktopSession = $state<DesktopSessionInfo | null>(null);
+
+  async function refreshDesktopSession() {
+    try {
+      desktopSession = await getSessionInfo(rpc, x11Display.trim() || undefined);
+    } catch {
+      desktopSession = null;
+    }
+  }
+
+  const showX11WaylandHint = $derived(
+    !!desktopSession?.wayland
+    && x11Forwarding
+    && !desktopSession.x11ForwardAvailable,
+  );
 
   function markDirty() { settingsCoord.markDirty(); }
 
@@ -203,6 +219,7 @@
     settingsCoord.registerSaver('ssh', save);
     void (async () => {
       await load();
+      await refreshDesktopSession();
       await loadKnownHosts();
       await loadSshProfiles();
       await loadTunnels();
@@ -259,8 +276,11 @@
   </label>
   <label class="row">
     <span class="row-label">{i18n.t('ssh.x11Display')}</span>
-    <input type="text" bind:value={x11Display} oninput={markDirty} placeholder=":0.0" disabled={!x11Forwarding} />
+    <input type="text" bind:value={x11Display} oninput={() => { markDirty(); void refreshDesktopSession(); }} placeholder=":0.0" disabled={!x11Forwarding} />
   </label>
+  {#if showX11WaylandHint}
+    <p class="hint warn">{i18n.t('ssh.x11WaylandHint')}</p>
+  {/if}
 
   <div class="section-h">{i18n.t('ssh.files')}</div>
   <label class="row">
@@ -439,6 +459,14 @@
   .row input:focus,
   .row select:focus { outline: none; border-color: var(--color-accent); }
   .row input:disabled { opacity: 0.5; }
+  .hint {
+    font-size: 12px;
+    color: var(--color-fg-muted);
+    margin: 0 0 8px;
+    max-width: 620px;
+    line-height: 1.45;
+  }
+  .hint.warn { color: var(--color-warning, #c9a227); }
   .inline-row {
     display: flex;
     gap: 8px;

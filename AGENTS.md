@@ -9,6 +9,7 @@ AeroTab is a Rust + Tauri 2 desktop app with a Svelte 5 frontend.
 - Frontend shell: [apps/ui](apps/ui)
 - Rust/Tauri backend: [src-tauri](src-tauri)
 - Architecture notes: [docs/architecture.md](docs/architecture.md)
+- Wayland session notes: [docs/wayland.md](docs/wayland.md)
 - Sync protocol: [docs/sync-protocol.md](docs/sync-protocol.md)
 - Release playbook: [docs/release.md](docs/release.md)
 - Performance benchmark notes: [docs/perf-benchmark.md](docs/perf-benchmark.md)
@@ -29,6 +30,7 @@ Run from the repository root unless noted.
 - Frontend check: `cd apps/ui && npm run check`
 - Frontend build: `cd apps/ui && npm run build`
 - Tauri Linux deb: `cd src-tauri && cargo tauri build --bundles deb`
+- **Arch Linux pkg (native)**：在 Arch 或 `archlinux:base-devel` 容器内执行 `./tools/build-arch-pkg.sh [version] [x86_64|aarch64]`（见 [docs/release.md](docs/release.md) §2b；CI `build-arch` matrix 在 tag 推送时在 x86_64 / aarch64 runner 上各构建一份）
 - **Windows NSIS from WSL/Linux (交叉编译)**：在仓库根目录执行 `./tools/build-windows-xwin.sh`（见下文 §WSL → Windows）
 
 The frontend requires Node 20+. CI uses stable Rust with `rustfmt` and `clippy`; Linux builds need `libssl-dev`, `pkg-config`, and `libudev-dev`.
@@ -111,6 +113,8 @@ rustup target add x86_64-pc-windows-msvc
 - Color scheme swatches should key by scheme plus index, not by color value; palettes can contain duplicate colors.
 - App identifier is `com.aerotab`. Data dir: `~/.local/share/com.aerotab` (Linux), `%APPDATA%\com.aerotab` (Windows). Legacy Tabby v2 data under `org.tabby.v2` is copied on first launch via [`migrate.rs`](src-tauri/src/migrate.rs); keyring reads fall back to service `org.tabby.v2` when `com.aerotab` has no entry ([`secret.rs`](src-tauri/src/secret.rs)). Do not hand-edit `.sled` databases.
 - Config sync UI flow: fill backend → save sync master to keyring → **Configure / re-key** → (if Credentials) vault unlock in Config sync → **Sync now**. `Configure` calls `persist()` so `settings.sync` is saved. Master password is never stored in `settings.sync`.
+- **Import wizard / RPC payloads**: Do not `structuredClone()` Svelte `$state` or RPC-hydrated objects (e.g. `ImportCandidate.profile`) — WebView2 throws *could not be cloned*. Deep-copy with `JSON.parse(JSON.stringify(x))` (or field-wise clones like `cloneAuth`) before `profile.importApply`. Overwrite apply must send the frontend profile snapshot; do not rely on re-reading the WindTerm file + `source_id` lookup alone. Use inline confirm in high-z modals (`ImportConnectionsWizard` z-71), not `appConfirm`, which can sit behind the wizard.
+- **Wayland (Linux)**: Main SSH/SFTP/sync flows run on Wayland via WebKitGTK. SSH X11 forwarding needs XWayland + reachable `DISPLAY` (settings `ssh.x11Display` override); connect is rejected early when enabled but unavailable. Native terminal **embed** is blocked on Wayland—use detached external terminal. Window opacity &lt;100% may be inconsistent; see [docs/wayland.md](docs/wayland.md). Session probe: Tauri `session_info` / RPC `desktop.sessionInfo`.
 
 ## Validation Expectations
 

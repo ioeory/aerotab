@@ -241,6 +241,7 @@ async fn spawn_local_tunnel(
                 format!("{}:{}", hop.host, hop.port),
                 kh.clone(),
                 false,
+                None,
                 false,
             )
         },
@@ -307,6 +308,7 @@ async fn spawn_remote_tunnel(
                 format!("{}:{}", hop.host, hop.port),
                 kh.clone(),
                 false,
+                None,
                 false,
             );
             ForwardingClient {
@@ -358,6 +360,7 @@ async fn spawn_dynamic_tunnel(
                 format!("{}:{}", hop.host, hop.port),
                 kh.clone(),
                 false,
+                None,
                 false,
             )
         },

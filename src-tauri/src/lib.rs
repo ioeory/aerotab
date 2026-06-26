@@ -12,6 +12,7 @@
 
 pub mod commands;
 pub mod core;
+pub mod desktop_session;
 pub mod error;
 pub mod import;
 pub mod ipc;

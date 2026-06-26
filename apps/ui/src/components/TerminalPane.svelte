@@ -84,7 +84,7 @@
   import { focusTerminalIfAllowed } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
-  import { NativeEngineController } from '../lib/nativeTerminal';
+  import { NativeEngineController, spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
 
   interface Props {
     rpc: RpcClient;
@@ -180,6 +180,9 @@
   let transferFilterGeneration = 0;
   const transferDetector = new TerminalTransferDetector();
   const canOpenSftp = $derived(session.kind === 'Ssh' && !!onOpenSftp);
+  const canOpenExternalNative = $derived(
+    session.kind === 'Ssh' || session.kind === 'ssh' || session.kind === 'LocalShell' || session.kind === 'local',
+  );
 
   function isLocalWindowsShell(): boolean {
     if (session.kind !== 'LocalShell') return false;
@@ -1215,6 +1218,16 @@
     engineController = null;
   }
 
+  async function openExternalNativeTerminal() {
+    menuOpen = false;
+    try {
+      await spawnDetachedNativeTerminal(rpc, session);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onError?.(msg);
+    }
+  }
+
   function onEngineKeydown(e: KeyboardEvent) {
     if (!engineController) return;
     let s = e.key;
@@ -1433,6 +1446,11 @@
       <button type="button" class="menu-item" onclick={doSearchAction}>{i18n.t('terminal.searchAction')}</button>
       <button type="button" class="menu-item" onclick={doClear}>{i18n.t('common.clearScreen')}</button>
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+      {#if canOpenExternalNative}
+        <button type="button" class="menu-item" onclick={() => { void openExternalNativeTerminal(); }}>
+          {i18n.t('terminal.openExternalNative')}
+        </button>
+      {/if}
       {#if !engineController}
         <button type="button" class="menu-item" onclick={() => { menuOpen = false; void startNativeEngine(); }}>Try Native Engine (Canvas)</button>
       {:else}

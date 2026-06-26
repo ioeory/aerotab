@@ -39,9 +39,15 @@ only** — never publish artifacts signed with it.
 
 ## 2. Linux (.deb / AppImage)
 
+GitHub Actions builds native **amd64** (ubuntu-latest) and **arm64** (ubuntu-24.04-arm)
+`.deb` bundles on tag push. GTK/WebKit must be built on the target architecture (no
+cross-compile).
+
 ```bash
 cd src-tauri
-cargo tauri build --bundles deb appimage
+cargo tauri build --bundles deb appimage --features desktop
+# x86_64 → AeroTab_<version>_amd64.deb
+# aarch64 → AeroTab_<version>_arm64.deb
 ```
 
 Optional GPG sign of the `.deb` (Debian repo style):
@@ -54,6 +60,34 @@ dpkg-sig --sign builder \
 
 If you publish a Debian repo, regenerate `Release` + sign it with
 `apt-ftparchive release ... | gpg --clearsign > InRelease`.
+
+### 2b. Arch Linux (`.pkg.tar.zst`)
+
+GitHub Actions builds native Arch packages on tag push (`build-arch` matrix in
+`.github/workflows/ci.yml`) using `pkg/arch/PKGBUILD` inside an
+`archlinux:base-devel` container — **x86_64** on `ubuntu-latest`, **aarch64** on
+`ubuntu-24.04-arm`. Artifacts:
+
+- `aerotab-<version>-1-x86_64.pkg.tar.zst`
+- `aerotab-<version>-1-aarch64.pkg.tar.zst`
+
+Local build (on Arch or in the same container; must match host CPU):
+
+```bash
+./tools/build-arch-pkg.sh
+# or explicitly: ./tools/build-arch-pkg.sh 0.2.15 aarch64
+```
+
+Install on Arch:
+
+```bash
+sudo pacman -U pkg/arch/aerotab_*_x86_64.pkg.tar.zst
+sudo pacman -U pkg/arch/aerotab_*_aarch64.pkg.tar.zst
+```
+
+To publish to the AUR separately, copy/adapt `pkg/arch/PKGBUILD`, run
+`makepkg --printsrcinfo > .SRCINFO`, and push to your AUR git repo (requires AUR
+account + SSH keys; not automated in CI by default).
 
 ## 3. Windows (NSIS) — EV code-signing
 

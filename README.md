@@ -32,6 +32,8 @@
 - Node.js 20.19+ (frontend)
 - Linux desktop build: `libssl-dev`, `pkg-config`, `libudev-dev`
 
+On **Wayland** (GNOME/KDE/Sway), the main app is supported. SSH **X11 forwarding** requires [XWayland](docs/wayland.md) (`xorg-xwayland` on Arch). See [docs/wayland.md](docs/wayland.md) for limits (native embed, transparency).
+
 ### Development
 
 ```bash
@@ -105,7 +107,7 @@ Bump version in this order, then rebuild installers:
 2. [src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) — `"version"` and window `title`
 3. [apps/ui/package.json](apps/ui/package.json) — `"version"`
 
-Tag releases `vX.Y.Z`. Full signing and feed steps: [docs/release.md](docs/release.md).
+Tag releases `vX.Y.Z`. GitHub Actions attaches **deb** (amd64 + arm64), **Arch `.pkg.tar.zst`** (x86_64 + aarch64), **Windows NSIS**, and **macOS DMG** to each release. Full signing and feed steps: [docs/release.md](docs/release.md).
 
 ## Upgrading from Tabby v2 / older AeroTab
 

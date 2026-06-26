@@ -203,6 +203,8 @@ pub struct AppState {
     pub wasm_host: Arc<WasmHost>,
     /// Native terminal embed registry (in-pane child windows on supported platforms).
     pub embedded_terminals: EmbeddedTerminalRegistry,
+    /// Detached native terminal windows (Alacritty / Kitty / Ghostty).
+    pub native_terminals: crate::native_terminal::NativeTerminalRegistry,
     /// Native terminal engines (alacritty_terminal + PTY, renders cell grids).
     pub native_engine: EngineRegistry,
 }
@@ -276,6 +278,22 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
         });
     }
     {
+        dispatcher.register("desktop.sessionInfo", move |params| async move {
+            #[derive(Deserialize, Default)]
+            struct P {
+                #[serde(default)]
+                display: Option<String>,
+            }
+            let p: P = if params.is_null() {
+                P::default()
+            } else {
+                serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?
+            };
+            let info = crate::desktop_session::desktop_session_info(p.display.as_deref());
+            serde_json::to_value(info).map_err(|e| internal(e.to_string()))
+        });
+    }
+    {
         let st = state.clone();
         dispatcher.register("session.list", move |_p| {
             let st = st.clone();
@@ -335,6 +353,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
                 let x11 = load_ssh_x11_options(&st).await;
+                ssh::validate_x11_forward(&x11).map_err(invalid_params)?;
                 let transport = load_ssh_transport_settings(&st).await;
                 let profile = materialize_ssh_profile(&st, p.profile).await?;
                 let mut shell = ssh::connect_shell_with_known_hosts(
@@ -388,6 +407,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let cols = p.cols.unwrap_or(80);
                 let kh = st.known_hosts.lock().await.clone();
                 let x11 = load_ssh_x11_options(&st).await;
+                ssh::validate_x11_forward(&x11).map_err(invalid_params)?;
                 let transport = load_ssh_transport_settings(&st).await;
                 let mut shell = match profile.spec {
                     ProfileKind::Ssh { ssh } => {
@@ -2031,6 +2051,12 @@ async fn load_ssh_x11_options(st: &AppState) -> X11ForwardOptions {
             .get("x11Forwarding")
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
+        display: v
+            .get("x11Display")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -3319,6 +3345,38 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let caps = st.embedded_terminals.embed_capabilities();
                 serde_json::to_value(caps).map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("nativeTerminal.spawn", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    #[serde(default)]
+                    program: Option<String>,
+                    #[serde(default)]
+                    title: String,
+                    #[serde(default)]
+                    argv: Vec<String>,
+                    #[serde(default)]
+                    mode: Option<String>,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                use crate::native_terminal::NativeSpawnMode;
+                let mode = match p.mode.as_deref() {
+                    Some("embed") => NativeSpawnMode::Embed,
+                    _ => NativeSpawnMode::Detached,
+                };
+                let result = st
+                    .native_terminals
+                    .spawn(p.program.as_deref(), &p.title, &p.argv, mode)
+                    .map_err(|e| internal(e.to_string()))?;
+                serde_json::to_value(result).map_err(|e| internal(e.to_string()))
             }
         });
     }

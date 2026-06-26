@@ -15,6 +15,10 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 .tauri/dev-updater.key
+pkg/arch/pkg/
+pkg/arch/src/
+pkg/arch/*.pkg.tar.zst
+pkg/arch/*.tar.gz
 
 # OS / editor
 .DS_Store

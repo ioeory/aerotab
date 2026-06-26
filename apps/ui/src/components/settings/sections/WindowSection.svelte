@@ -8,6 +8,7 @@
   import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import { applyWindowSettings } from '../../../lib/windowSettings';
+  import { getSessionInfo, type DesktopSessionInfo } from '../../../lib/sessionInfo';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -33,6 +34,19 @@
   let confirmCloseWithMultipleTabs = $state(true);
   let disableGpuAcceleration = $state(false);
   let useNativeWindowControls = $state(true);
+  let desktopSession = $state<DesktopSessionInfo | null>(null);
+
+  const showWaylandOpacityHint = $derived(
+    !!desktopSession?.wayland && opacity < 100,
+  );
+
+  async function refreshDesktopSession() {
+    try {
+      desktopSession = await getSessionInfo(rpc);
+    } catch {
+      desktopSession = null;
+    }
+  }
 
   function currentValue() {
     return {
@@ -87,7 +101,13 @@
     settingsCoord.bumpRev();
   }
 
-  onMount(() => { settingsCoord.registerSaver('window', save); void load(); });
+  onMount(() => {
+    settingsCoord.registerSaver('window', save);
+    void (async () => {
+      await load();
+      await refreshDesktopSession();
+    })();
+  });
   onDestroy(() => settingsCoord.unregisterSaver('window'));
 </script>
 
@@ -112,6 +132,9 @@
     <span class="row-label">{i18n.t('window.opacity', { value: opacity })}</span>
     <input type="range" min="40" max="100" step="1" bind:value={opacity} oninput={markDirty} />
   </label>
+  {#if showWaylandOpacityHint}
+    <p class="hint warn">{i18n.t('window.waylandOpacityHint')}</p>
+  {/if}
   <label class="row">
     <span class="row-label">{i18n.t('window.acrylic')}</span>
     <input type="checkbox" bind:checked={acrylic} onchange={markDirty} />
@@ -192,6 +215,7 @@
 
 <style>
   .hint { font-size: 12px; color: var(--color-fg-muted); margin-bottom: 6px; }
+  .hint.warn { color: var(--color-warning, #c9a227); }
   .section-h {
     margin-top: 16px; margin-bottom: 6px; font-size: 11.5px;
     text-transform: uppercase; color: var(--color-fg-muted); letter-spacing: 0.04em;
