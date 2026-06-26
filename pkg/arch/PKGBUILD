@@ -21,7 +21,7 @@ depends=(
   'libappindicator-gtk3'
   'librsvg'
   'openssl'
-  'libxdo'
+  'xdotool'
 )
 makedepends=(
   'cargo'
