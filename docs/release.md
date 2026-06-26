@@ -65,8 +65,8 @@ If you publish a Debian repo, regenerate `Release` + sign it with
 
 GitHub Actions builds native Arch packages on tag push (`build-arch` matrix in
 `.github/workflows/ci.yml`) using `pkg/arch/PKGBUILD` inside an
-`archlinux:base-devel` container — **x86_64** on `ubuntu-latest`, **aarch64** on
-`ubuntu-24.04-arm`. Artifacts:
+`archlinux:base-devel` container on x86_64 (`ubuntu-latest`); **aarch64** uses
+`menci/archlinuxarm:base-devel` on `ubuntu-24.04-arm` (official Arch Docker is amd64-only).
 
 - `aerotab-<version>-1-x86_64.pkg.tar.zst`
 - `aerotab-<version>-1-aarch64.pkg.tar.zst`

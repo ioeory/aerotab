@@ -30,7 +30,7 @@ Run from the repository root unless noted.
 - Frontend check: `cd apps/ui && npm run check`
 - Frontend build: `cd apps/ui && npm run build`
 - Tauri Linux deb: `cd src-tauri && cargo tauri build --bundles deb`
-- **Arch Linux pkg (native)**：在 Arch 或 `archlinux:base-devel` 容器内执行 `./tools/build-arch-pkg.sh [version] [x86_64|aarch64]`（见 [docs/release.md](docs/release.md) §2b；CI `build-arch` matrix 在 tag 推送时在 x86_64 / aarch64 runner 上各构建一份）
+- **Arch Linux pkg (native)**：x86_64 用 `archlinux:base-devel` 容器；aarch64 用 `menci/archlinuxarm:base-devel`（官方 Arch 镜像仅 amd64）。执行 `./tools/build-arch-pkg.sh [version] [x86_64|aarch64]`（见 [docs/release.md](docs/release.md) §2b）
 - **Windows NSIS from WSL/Linux (交叉编译)**：在仓库根目录执行 `./tools/build-windows-xwin.sh`（见下文 §WSL → Windows）
 
 The frontend requires Node 20+. CI uses stable Rust with `rustfmt` and `clippy`; Linux builds need `libssl-dev`, `pkg-config`, and `libudev-dev`.

@@ -219,10 +219,13 @@ jobs:
         include:
           - runner: ubuntu-latest
             arch: x86_64
+            container_image: archlinux:base-devel
           - runner: ubuntu-24.04-arm
             arch: aarch64
+            # Official archlinux image is amd64-only; use multi-arch ARM rootfs.
+            container_image: menci/archlinuxarm:base-devel
     container:
-      image: archlinux:base-devel
+      image: ${{ matrix.container_image }}
     env:
       CI: true
     steps:
