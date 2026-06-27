@@ -17,7 +17,7 @@ src-tauri/gen/
 .tauri/dev-updater.key
 pkg/arch/pkg/
 pkg/arch/src/
-pkg/arch/*.pkg.tar.zst
+pkg/arch/*.pkg.tar.*
 pkg/arch/*.tar.gz
 
 # OS / editor

@@ -252,7 +252,7 @@ jobs:
             webkit2gtk-4.1 gtk3 \
             libappindicator-gtk3 librsvg \
             libsoup3 openssl xdotool \
-            nodejs npm patchelf libarchive
+            nodejs npm patchelf libarchive zstd
       - name: Install tauri-cli
         run: |
           cargo install tauri-cli --locked --root /usr/local
@@ -277,9 +277,9 @@ jobs:
         run: |
           set -euo pipefail
           ver="${{ steps.appver.outputs.version }}"
-          path=$(find pkg/arch -maxdepth 1 -name "aerotab-${ver}-*.pkg.tar.zst" -print -quit)
+          path=$(find pkg/arch -maxdepth 1 -name "aerotab-${ver}-*.pkg.tar.*" -print -quit)
           if [[ -z "$path" || ! -f "$path" ]]; then
-            echo "Arch package not found for ${{ matrix.arch }} (expected aerotab-${ver}-*.pkg.tar.zst)" >&2
+            echo "Arch package not found for ${{ matrix.arch }} (expected aerotab-${ver}-*.pkg.tar.*)" >&2
             ls -la pkg/arch/ || true
             exit 1
           fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build AeroTab Arch package (.pkg.tar.zst) inside an Arch container or on Arch host.
+# Build AeroTab Arch package (.pkg.tar.zst or .pkg.tar.xz) inside an Arch container or on Arch host.
 # Usage (repo root): ./tools/build-arch-pkg.sh [version] [arch]
 #   arch: x86_64 | aarch64 (default: native uname -m)
 # CI calls this after patching pkg/arch/PKGBUILD.
@@ -33,7 +33,7 @@ tar -czf "${pkg_dir}/${tarball}" \
   --exclude='src-tauri/target' \
   --exclude="${pkg_dir}/pkg" \
   --exclude="${pkg_dir}/src" \
-  --exclude="${pkg_dir}/*.pkg.tar.zst" \
+  --exclude="${pkg_dir}/*.pkg.tar.*" \
   --exclude="${pkg_dir}/*.tar.gz" \
   --transform "s,^,AeroTab-${version}/," .
 
@@ -46,9 +46,13 @@ sed -i "s/^sha256sums=.*/sha256sums=('${sha256}')/" "${pkg_dir}/PKGBUILD"
 
 cd "$pkg_dir"
 export PKGDEST="${PWD}"
+# Official Arch defaults to zst; archlinuxarm images may still emit xz.
+if command -v zstd >/dev/null 2>&1; then
+  export PKGEXT='.pkg.tar.zst'
+fi
 makepkg -fs --noconfirm --nocheck
 
-mapfile -t pkgs < <(find "${PKGDEST}" -maxdepth 1 -name "aerotab-${version}-*.pkg.tar.zst" -print | sort)
+mapfile -t pkgs < <(find "${PKGDEST}" -maxdepth 1 -name "aerotab-${version}-*.pkg.tar.*" -print | sort)
 if ((${#pkgs[@]} == 0)); then
   echo "Arch package not found under ${PKGDEST}" >&2
   ls -la "${PKGDEST}" || true
