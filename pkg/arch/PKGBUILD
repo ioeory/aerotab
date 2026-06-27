@@ -39,6 +39,8 @@ sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 build() {
   cd "AeroTab-${pkgver}"
   export CI=true
+  # Arch makepkg/rust may force lld; ring/aws-lc link reliably with GNU ld in CI.
+  export RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
   cd apps/ui
   npm ci --no-audit --no-fund
   npm run build
@@ -57,13 +59,17 @@ package() {
       ;;
   esac
 
-  local deb="${srcdir}/AeroTab-${pkgver}/src-tauri/target/release/bundle/deb/AeroTab_${pkgver}_${deb_arch}.deb"
+  local root="${srcdir}/AeroTab-${pkgver}"
+  local deb="${root}/target/release/bundle/deb/AeroTab_${pkgver}_${deb_arch}.deb"
   if [[ ! -f "$deb" ]]; then
-    deb=$(find "${srcdir}/AeroTab-${pkgver}/src-tauri/target" -name "AeroTab_*_${deb_arch}.deb" -print -quit)
+    deb="${root}/src-tauri/target/release/bundle/deb/AeroTab_${pkgver}_${deb_arch}.deb"
   fi
   if [[ ! -f "$deb" ]]; then
-    printf 'deb bundle not found under src-tauri/target (expected *_%s.deb)\n' "${deb_arch}" >&2
-    find "${srcdir}/AeroTab-${pkgver}/src-tauri/target" -name '*.deb' 2>/dev/null || true
+    deb=$(find "${root}/target" "${root}/src-tauri/target" -name "AeroTab_*_${deb_arch}.deb" -print -quit 2>/dev/null || true)
+  fi
+  if [[ ! -f "$deb" ]]; then
+    printf 'deb bundle not found (expected *_%s.deb)\n' "${deb_arch}" >&2
+    find "${root}" -name '*.deb' 2>/dev/null || true
     return 1
   fi
 
