@@ -47,6 +47,7 @@ pub fn desktop_session_info(display_override: Option<&str>) -> DesktopSessionInf
     }
 }
 
+#[cfg(unix)]
 fn effective_display(display_override: Option<&str>) -> Option<String> {
     display_override
         .map(str::trim)

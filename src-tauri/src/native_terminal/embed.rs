@@ -485,7 +485,6 @@ fn spawn_and_position(
     rect: &EmbedRectDip,
 ) -> Result<(isize, u32, Child), EmbedError> {
     use std::os::windows::process::CommandExt;
-    use std::process::Command as StdCommand;
     use tauri::Manager;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{

@@ -103,11 +103,6 @@ fn default_login_shell_args(command: &str) -> Vec<String> {
     }
 }
 
-#[cfg(not(unix))]
-fn default_login_shell_args(_command: &str) -> Vec<String> {
-    vec![]
-}
-
 #[cfg(unix)]
 fn detect_unix(macos: bool) -> Vec<ShellEntry> {
     let icon = if macos { "apple" } else { "linux" };

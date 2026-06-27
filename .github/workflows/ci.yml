@@ -232,6 +232,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Arch build dependencies
         run: |
+          # pacman 6.x Landlock sandbox fails in unprivileged GHA job containers.
+          if ! grep -q '^DisableSandbox' /etc/pacman.conf; then
+            sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+          fi
           if [[ "${{ matrix.arch }}" == "aarch64" ]]; then
             pacman-key --init
             pacman-key --populate archlinuxarm

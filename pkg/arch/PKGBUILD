@@ -38,7 +38,7 @@ sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 
 build() {
   cd "AeroTab-${pkgver}"
-  export CI=1
+  export CI=true
   cd apps/ui
   npm ci --no-audit --no-fund
   npm run build

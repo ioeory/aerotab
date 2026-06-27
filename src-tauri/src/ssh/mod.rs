@@ -111,6 +111,7 @@ pub struct TrustingClient {
     pinned_host_key_b64: Option<String>,
     /// When true, accept inbound X11 channels and bridge to the local display.
     x11_forward: bool,
+    #[cfg_attr(not(unix), allow(dead_code))]
     x11_display: Option<String>,
     /// When true, accept OpenSSH agent forwarding channels and bridge them to the local agent.
     agent_forward: bool,
