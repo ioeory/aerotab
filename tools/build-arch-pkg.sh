@@ -45,5 +45,17 @@ sed -i "s|^source=.*|source=(\"${tarball}\")|" "${pkg_dir}/PKGBUILD"
 sed -i "s/^sha256sums=.*/sha256sums=('${sha256}')/" "${pkg_dir}/PKGBUILD"
 
 cd "$pkg_dir"
+export PKGDEST="${PWD}"
 makepkg -fs --noconfirm --nocheck
-ls -la "aerotab-${version}"-*-"${arch}".pkg.tar.zst
+
+mapfile -t pkgs < <(find "${PKGDEST}" -maxdepth 1 -name "aerotab-${version}-*.pkg.tar.zst" -print | sort)
+if ((${#pkgs[@]} == 0)); then
+  echo "Arch package not found under ${PKGDEST}" >&2
+  ls -la "${PKGDEST}" || true
+  exit 1
+fi
+if ((${#pkgs[@]} > 1)); then
+  echo "multiple Arch packages found: ${pkgs[*]}" >&2
+  exit 1
+fi
+ls -la "${pkgs[0]}"

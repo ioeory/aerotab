@@ -31,7 +31,8 @@ makedepends=(
   'patchelf'
   'rust'
 )
-options=('!strip' '!debug')
+# Arch makepkg enables LTO by default; ring + thin LTO in Cargo.toml fails to link.
+options=('!strip' '!debug' '!lto')
 install=aerotab.install
 source=("AeroTab-${pkgver}.tar.gz")
 sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
@@ -39,8 +40,6 @@ sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 build() {
   cd "AeroTab-${pkgver}"
   export CI=true
-  # Arch makepkg/rust may force lld; ring/aws-lc link reliably with GNU ld in CI.
-  export RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
   cd apps/ui
   npm ci --no-audit --no-fund
   npm run build
