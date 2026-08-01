@@ -29,8 +29,9 @@ Run from the repository root unless noted.
 - Rust desktop check: `cargo check --features desktop`
 - Frontend check: `cd apps/ui && npm run check`
 - Frontend build: `cd apps/ui && npm run build`
-- Tauri Linux deb: `cd src-tauri && cargo tauri build --bundles deb`
+- **Linux deb (native)**：在 Debian/Ubuntu 上执行 `./tools/build-linux-deb.sh`（见 [docs/release.md](docs/release.md) §2）；也可 `cd src-tauri && cargo tauri build --bundles deb --features desktop`
 - **Arch Linux pkg (native)**：x86_64 用 `archlinux:base-devel` 容器；aarch64 用 `menci/archlinuxarm:base-devel`（官方 Arch 镜像仅 amd64）。执行 `./tools/build-arch-pkg.sh [version] [x86_64|aarch64]`（见 [docs/release.md](docs/release.md) §2b）
+- **macOS DMG**：在 macOS 上执行 `./tools/build-macos-dmg.sh`（见 [docs/release.md](docs/release.md) §5）；Intel 交叉：`TARGET=x86_64-apple-darwin ./tools/build-macos-dmg.sh`
 - **Windows NSIS from WSL/Linux (交叉编译)**：在仓库根目录执行 `./tools/build-windows-xwin.sh`（见下文 §WSL → Windows）
 
 The frontend requires Node 20+. CI uses stable Rust with `rustfmt` and `clippy`; Linux builds need `libssl-dev`, `pkg-config`, and `libudev-dev`.

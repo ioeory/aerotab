@@ -76,6 +76,7 @@ impl NativeTerminalEngine {
         if shell_cmd.is_none() {
             cmd.arg("-l");
         }
+        crate::terminal::apply_terminal_env(&mut cmd);
 
         pty_pair
             .slave

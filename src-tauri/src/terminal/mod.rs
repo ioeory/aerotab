@@ -72,7 +72,23 @@ pub fn build_shell_command(program: &str, args: &[String]) -> CommandBuilder {
     for a in args {
         cmd.arg(a);
     }
+    apply_terminal_env(&mut cmd);
     cmd
+}
+
+/// Terminal type advertised to local PTY children; matches the xterm.js frontend.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Set the terminal environment on a locally spawned PTY command.
+///
+/// A GUI process launched from Finder/launchd has no `TERM`, so children inherit
+/// none and tools such as `clear`, `tput`, or `less` fail with
+/// "TERM environment variable not set."
+pub fn apply_terminal_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM", DEFAULT_TERM);
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "AeroTab");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(unix)]
@@ -127,24 +143,36 @@ pub fn prepare_process_environment() {
         return;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((key, value)) = line.split_once('=') else {
+    if let Some(path) = parse_path_helper_path(&text) {
+        // SAFETY: called from main/setup before worker threads use env.
+        unsafe {
+            std::env::set_var("PATH", path);
+        }
+    }
+}
+
+/// Extract the `PATH` value from `path_helper -s` output.
+///
+/// The shell syntax is `PATH="a:b:c"; export PATH;`, so only the quoted span may
+/// be kept. Leaking the trailing `"; export PATH` into `PATH` produces an
+/// unbalanced quote that breaks `eval $(path_helper -s)` in `/etc/zprofile`.
+#[cfg(target_os = "macos")]
+fn parse_path_helper_path(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let Some(rest) = line.trim().strip_prefix("PATH=") else {
             continue;
         };
-        let key = key.trim();
-        if key != "PATH" {
-            continue;
-        }
-        let value = value.trim().trim_matches('"').trim_end_matches(';');
+        let value = if let Some(quoted) = rest.strip_prefix('"') {
+            quoted.split('"').next().unwrap_or_default()
+        } else {
+            rest.split(';').next().unwrap_or_default()
+        };
+        let value = value.trim();
         if !value.is_empty() {
-            // SAFETY: called from main/setup before worker threads use env.
-            unsafe {
-                std::env::set_var("PATH", value);
-            }
+            return Some(value.to_string());
         }
-        break;
     }
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -276,6 +304,36 @@ mod login_shell_tests {
         assert!(!should_prepend_login_flag(&["-l".into()]));
         assert!(!should_prepend_login_flag(&["--login".into()]));
         assert!(!should_prepend_login_flag(&["-c".into(), "echo".into()]));
+    }
+
+    #[test]
+    fn build_shell_command_sets_term() {
+        let cmd = build_shell_command("/bin/zsh", &[]);
+        let term = cmd.get_env("TERM").and_then(|v| v.to_str());
+        assert_eq!(term, Some(DEFAULT_TERM));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_quoted_path_helper_output() {
+        let out = concat!(
+            "PATH=\"/usr/local/bin:/usr/bin:/bin\"; export PATH;\n",
+            "MANPATH=\"/usr/share/man\"; export MANPATH;\n"
+        );
+        assert_eq!(
+            parse_path_helper_path(out).as_deref(),
+            Some("/usr/local/bin:/usr/bin:/bin")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_unquoted_path_helper_output() {
+        assert_eq!(
+            parse_path_helper_path("PATH=/usr/bin:/bin; export PATH;").as_deref(),
+            Some("/usr/bin:/bin")
+        );
+        assert_eq!(parse_path_helper_path("MANPATH=\"/x\";"), None);
     }
 
     #[test]

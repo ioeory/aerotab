@@ -44,11 +44,13 @@ GitHub Actions builds native **amd64** (ubuntu-latest) and **arm64** (ubuntu-24.
 cross-compile).
 
 ```bash
-cd src-tauri
-cargo tauri build --bundles deb appimage --features desktop
-# x86_64 → AeroTab_<version>_amd64.deb
-# aarch64 → AeroTab_<version>_arm64.deb
+./tools/build-linux-deb.sh
+# optional AppImage too: BUNDLES=deb,appimage ./tools/build-linux-deb.sh
+# x86_64 → target/release/bundle/deb/AeroTab_<version>_amd64.deb
+# aarch64 → target/release/bundle/deb/AeroTab_<version>_arm64.deb
 ```
+
+Equivalent to `cd src-tauri && cargo tauri build --bundles deb --features desktop`.
 
 Optional GPG sign of the `.deb` (Debian repo style):
 
@@ -159,20 +161,44 @@ python3 -m http.server -d target 8080
 Open the app → **Settings → Updates → Check for updates** to validate the
 end-to-end flow.
 
-## 5. macOS (out of scope for v2.0)
+## 5. macOS (.dmg)
 
-The first releases ship Linux + Windows only. When macOS lands, follow
-Apple's notarization path:
+GitHub Actions builds **Intel** (`x86_64-apple-darwin`) and **Apple Silicon**
+DMGs on tag push (`macos-14`). Local builds must run on macOS.
+
+One-time deps:
 
 ```bash
-cargo tauri build --bundles app dmg
+brew install pkg-config create-dmg
+cargo install tauri-cli --locked
+# Xcode CLT if missing: xcode-select --install
+```
+
+Build (repo root):
+
+```bash
+./tools/build-macos-dmg.sh
+# Apple Silicon → target/release/bundle/dmg/AeroTab_<version>_aarch64.dmg
+# Intel host    → target/release/bundle/dmg/AeroTab_<version>_x64.dmg
+
+# Cross-compile Intel DMG from Apple Silicon (matches CI dmg-intel):
+TARGET=x86_64-apple-darwin ./tools/build-macos-dmg.sh
+# → target/x86_64-apple-darwin/release/bundle/dmg/AeroTab_<version>_x64.dmg
+```
+
+Equivalent to `cd src-tauri && cargo tauri build --bundles dmg` (plus `--target`
+when `TARGET` is set). Optional: `BUNDLES=app,dmg`, `FEATURES=desktop`.
+
+Notarization (Developer ID required for distribution outside your Mac):
+
+```bash
 codesign --deep --force --options runtime --timestamp \
   --sign "Developer ID Application: <Name> (<TEAMID>)" \
   "target/release/bundle/macos/AeroTab.app"
 xcrun notarytool submit \
-  "target/release/bundle/dmg/AeroTab_0.2.0_x64.dmg" \
-  --apple-id <id> --team-id <TEAMID> --keychain-profile tabby-notary --wait
-xcrun stapler staple "target/release/bundle/dmg/AeroTab_0.2.0_x64.dmg"
+  "target/release/bundle/dmg/AeroTab_<version>_aarch64.dmg" \
+  --apple-id <id> --team-id <TEAMID> --keychain-profile aerotab-notary --wait
+xcrun stapler staple "target/release/bundle/dmg/AeroTab_<version>_aarch64.dmg"
 ```
 
 ## 6. Release checklist
@@ -184,6 +210,7 @@ xcrun stapler staple "target/release/bundle/dmg/AeroTab_0.2.0_x64.dmg"
 - [ ] `cd apps/ui && npm run build`
 - [ ] Build Linux bundles (§2) with signing env vars set.
 - [ ] Build Windows bundles (§3) on Windows host or cross-compile + sign.
+- [ ] Build macOS DMGs (§5) on macOS (`./tools/build-macos-dmg.sh`; notarize if distributing).
 - [ ] Verify `.sig` exists for every bundle in `target/.../bundle/`.
 - [ ] Authenticode-sign Windows installer (`signtool verify /pa`).
 - [ ] Upload artifacts to the release host; generate `latest.json` (§4).
