@@ -1217,7 +1217,10 @@
   }
 
   async function receiveRemoteDrop(payload: RemoteDragPayload) {
-    if (!sessionId || !payload.sourceSessionId) return;
+    if (!sessionId || !payload.sourceSessionId) {
+      onError(i18n.t('sftp.crossTransferUnavailable'));
+      return;
+    }
     const destPath = joinPath(cwd, payload.name);
     if (onRemoteCrossTransfer) {
       onRemoteCrossTransfer({

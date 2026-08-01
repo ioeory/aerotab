@@ -30,7 +30,9 @@
 //! | `sftp.removeDir`        | `{ id, path }`                      | `null`            |
 //! | `sftp.rename`           | `{ id, from, to }`                  | `null`            |
 //! | `sftp.realpath`         | `{ id, path }`                      | `{ path }`        |
-//! | `sftp.directTransfer`  | `{ source_profile, source_path, kind, target }` | transfer output |
+//! | `sftp.directTransfer`  | `{ transfer_id, source_session_id, dest_session_id, … }` | transfer output |
+//! | `sftp.directPreflight` | `{ source_session_id, dest_session_id }` | capability + consent |
+//! | `sftp.cancelDirectTransfer` | `{ transfer_id }` | `{ canceled }` |
 //! | `settings.configure`    | `{ path }`                          | `null`            |
 //! | `settings.get`          | `{ key }`                           | `{ value }`       |
 //! | `settings.set`          | `{ key, value }`                    | `null`            |
@@ -1316,13 +1318,33 @@ struct SftpRenameParams {
 
 #[derive(Debug, Deserialize)]
 struct SftpDirectTransferParams {
+    transfer_id: String,
     source_session_id: Uuid,
     dest_session_id: Uuid,
     source_path: String,
     kind: crate::remote_transfer::DirectTransferKind,
     dest_path: String,
+    /// When true, caller already obtained (or remembered) agent-forward consent.
     #[serde(default)]
-    timeout_ms: Option<u64>,
+    consent_granted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SftpDirectPreflightParams {
+    source_session_id: Uuid,
+    dest_session_id: Uuid,
+    /// When true, run a short source-side tool probe (`rsync`/`scp`).
+    #[serde(default = "default_true")]
+    probe_tools: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+struct SftpRememberDirectConsentParams {
+    source_host_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1513,6 +1535,114 @@ fn emit_relay_file(transfer_id: &str, path: &str, total: u64) {
         );
     } else {
         tracing::warn!("relay file event dropped: AppHandle not set");
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct DirectTransferHeartbeatEvent {
+    transfer_id: String,
+}
+
+#[derive(Clone, Serialize)]
+struct DirectTransferProgressEvent {
+    transfer_id: String,
+    percent: Option<u8>,
+    transferred_hint: Option<u64>,
+}
+
+fn emit_direct_heartbeat(transfer_id: &str) {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit(
+            "transfer:direct-heartbeat",
+            DirectTransferHeartbeatEvent {
+                transfer_id: transfer_id.to_string(),
+            },
+        );
+    }
+}
+
+fn emit_direct_progress(transfer_id: &str, percent: Option<u8>, transferred_hint: Option<u64>) {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit(
+            "transfer:direct-progress",
+            DirectTransferProgressEvent {
+                transfer_id: transfer_id.to_string(),
+                percent,
+                transferred_hint,
+            },
+        );
+    }
+}
+
+const DIRECT_CONSENT_SETTINGS_KEY: &str = "sftp.directAgentConsent";
+
+fn load_direct_consent_hosts(store: &crate::settings::SettingsStore) -> Vec<String> {
+    match store.get(DIRECT_CONSENT_SETTINGS_KEY) {
+        Ok(Some(value)) => value
+            .get("hosts")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn remember_direct_consent_host(
+    store: &crate::settings::SettingsStore,
+    host_key: &str,
+) -> Result<(), RpcError> {
+    let mut hosts = load_direct_consent_hosts(store);
+    if !hosts.iter().any(|h| h == host_key) {
+        hosts.push(host_key.to_string());
+    }
+    let value = json!({ "hosts": hosts });
+    store
+        .set(DIRECT_CONSENT_SETTINGS_KEY, &value)
+        .map_err(|e| internal(e.to_string()))
+}
+
+async fn prepare_direct_agent_sock(
+    dest_profile: &SshProfile,
+) -> Result<
+    (
+        Option<String>,
+        Option<crate::ssh::ephemeral_agent::EphemeralAgent>,
+    ),
+    RpcError,
+> {
+    use crate::ssh::ephemeral_agent::dest_auth_supports_direct;
+    use crate::ssh::AuthMethod;
+
+    if !dest_auth_supports_direct(&dest_profile.auth) {
+        return Err(invalid_params(
+            "destination auth does not support Direct (agent-forward); use Relay",
+        ));
+    }
+    match &dest_profile.auth {
+        AuthMethod::Agent => Ok((None, None)),
+        AuthMethod::PublicKey {
+            key_path,
+            passphrase,
+        } => {
+            let agent = crate::ssh::ephemeral_agent::EphemeralAgent::spawn_with_key(
+                key_path,
+                passphrase.as_deref(),
+            )
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+            let sock = agent.sock().to_string();
+            Ok((Some(sock), Some(agent)))
+        }
+        AuthMethod::VaultRef { .. } => Err(internal(
+            "destination vault auth was not resolved; reopen SFTP session",
+        )),
+        AuthMethod::Password { .. } => {
+            Err(invalid_params("destination password auth requires Relay"))
+        }
     }
 }
 
@@ -1883,13 +2013,109 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
     {
         let st = state.clone();
+        dispatcher.register("sftp.directPreflight", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpDirectPreflightParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let source_profile = require_sftp_profile(&st, p.source_session_id).await?;
+                let dest_profile = require_sftp_profile(&st, p.dest_session_id).await?;
+                let source_host_key =
+                    crate::remote_transfer::source_host_consent_key(&source_profile);
+                let mut reasons = Vec::new();
+                let dest_auth_ok =
+                    crate::ssh::ephemeral_agent::dest_auth_supports_direct(&dest_profile.auth);
+                if !dest_auth_ok {
+                    reasons.push("dest_auth_unsupported".into());
+                }
+                let consented = if let Ok(store) = require_settings(&st).await {
+                    load_direct_consent_hosts(&store)
+                        .iter()
+                        .any(|h| h == &source_host_key)
+                } else {
+                    false
+                };
+                let needs_consent = !consented;
+                let mut has_rsync = false;
+                let mut has_scp = false;
+                if p.probe_tools && dest_auth_ok {
+                    let kh = st.known_hosts.lock().await.clone();
+                    let transport = load_ssh_transport_settings(&st).await;
+                    match crate::remote_transfer::probe_source_transfer_tools(
+                        &source_profile,
+                        kh,
+                        transport,
+                    )
+                    .await
+                    {
+                        Ok((r, s)) => {
+                            has_rsync = r;
+                            has_scp = s;
+                            if !has_rsync && !has_scp {
+                                reasons.push("missing_rsync_or_scp".into());
+                            }
+                        }
+                        Err(e) => {
+                            reasons.push(format!("source_probe_failed:{e}"));
+                        }
+                    }
+                }
+                let can_direct = dest_auth_ok && (has_rsync || has_scp || !p.probe_tools);
+                Ok(json!({
+                    "ok": can_direct && reasons.is_empty(),
+                    "can_direct": can_direct,
+                    "needs_consent": needs_consent,
+                    "source_host_key": source_host_key,
+                    "has_rsync": has_rsync,
+                    "has_scp": has_scp,
+                    "dest_auth_ok": dest_auth_ok,
+                    "reasons": reasons,
+                }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sftp.rememberDirectConsent", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpRememberDirectConsentParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                if p.source_host_key.trim().is_empty() {
+                    return Err(invalid_params("source_host_key is required"));
+                }
+                let store = require_settings(&st).await?;
+                remember_direct_consent_host(&store, p.source_host_key.trim())?;
+                Ok(json!({ "remembered": true }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
         dispatcher.register("sftp.directTransfer", move |params| {
             let st = st.clone();
             async move {
                 let p: SftpDirectTransferParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                if p.transfer_id.trim().is_empty() {
+                    return Err(invalid_params("transfer_id is required"));
+                }
                 let source_profile = require_sftp_profile(&st, p.source_session_id).await?;
                 let dest_profile = require_sftp_profile(&st, p.dest_session_id).await?;
+                let source_host_key =
+                    crate::remote_transfer::source_host_consent_key(&source_profile);
+                let consented = if let Ok(store) = require_settings(&st).await {
+                    load_direct_consent_hosts(&store)
+                        .iter()
+                        .any(|h| h == &source_host_key)
+                } else {
+                    false
+                };
+                if !consented && !p.consent_granted {
+                    return Err(invalid_params(
+                        "agent-forward consent required for Direct transfer on this source host",
+                    ));
+                }
                 let target = crate::remote_transfer::DirectTransferTarget {
                     user: dest_profile.user.clone(),
                     host: dest_profile.host.clone(),
@@ -1898,26 +2124,44 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 };
                 let kh = st.known_hosts.lock().await.clone();
                 let transport = load_ssh_transport_settings(&st).await;
-                let timeout_ms = p
-                    .timeout_ms
-                    .unwrap_or(24 * 60 * 60 * 1000)
-                    .clamp(1_000, 7 * 24 * 60 * 60 * 1000);
-                let dest_key_path = match &dest_profile.auth {
-                    crate::ssh::AuthMethod::PublicKey { key_path, .. } => Some(key_path.as_path()),
-                    _ => None,
-                };
-                let output = crate::remote_transfer::run_direct_transfer(
+                let (agent_sock, _ephemeral) = prepare_direct_agent_sock(&dest_profile).await?;
+                let cancel = Arc::new(AtomicBool::new(false));
+                st.relay_cancel
+                    .lock()
+                    .await
+                    .insert(p.transfer_id.clone(), cancel.clone());
+                let transfer_id = p.transfer_id.clone();
+                let on_heartbeat: crate::remote_transfer::DirectHeartbeatFn =
+                    Arc::new(move || emit_direct_heartbeat(&transfer_id));
+                let transfer_id_progress = p.transfer_id.clone();
+                let on_progress: crate::remote_transfer::DirectProgressFn = Arc::new(move |hint| {
+                    emit_direct_progress(
+                        &transfer_id_progress,
+                        hint.percent,
+                        hint.transferred_hint,
+                    );
+                });
+                let result = crate::remote_transfer::run_direct_transfer(
                     &source_profile,
                     &p.source_path,
                     p.kind,
                     &target,
                     kh,
                     transport,
-                    Duration::from_millis(timeout_ms),
-                    dest_key_path,
+                    agent_sock,
+                    Some(cancel),
+                    Some(on_heartbeat),
+                    Some(on_progress),
                 )
-                .await
-                .map_err(|e| internal(e.to_string()))?;
+                .await;
+                st.relay_cancel.lock().await.remove(&p.transfer_id);
+                let output = result.map_err(|e| {
+                    if e.to_string().contains("canceled") {
+                        RpcError::new(ErrorCode::InternalError, "direct transfer canceled")
+                    } else {
+                        internal(e.to_string())
+                    }
+                })?;
                 serde_json::to_value(output).map_err(|e| internal(e.to_string()))
             }
         });
@@ -1984,6 +2228,26 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
     {
         let st = state.clone();
         dispatcher.register("sftp.cancelRelayTransfer", move |params| {
+            let st = st.clone();
+            async move {
+                let p: SftpCancelRelayParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let canceled = st
+                    .relay_cancel
+                    .lock()
+                    .await
+                    .get(&p.transfer_id)
+                    .is_some_and(|flag| {
+                        flag.store(true, Ordering::Relaxed);
+                        true
+                    });
+                Ok(json!({ "canceled": canceled }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sftp.cancelDirectTransfer", move |params| {
             let st = st.clone();
             async move {
                 let p: SftpCancelRelayParams =

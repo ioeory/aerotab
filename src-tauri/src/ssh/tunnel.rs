@@ -243,6 +243,7 @@ async fn spawn_local_tunnel(
                 false,
                 None,
                 false,
+                None,
             )
         },
     )
@@ -310,6 +311,7 @@ async fn spawn_remote_tunnel(
                 false,
                 None,
                 false,
+                None,
             );
             ForwardingClient {
                 trusting,
@@ -362,6 +364,7 @@ async fn spawn_dynamic_tunnel(
                 false,
                 None,
                 false,
+                None,
             )
         },
     )

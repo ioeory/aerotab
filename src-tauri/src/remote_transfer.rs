@@ -1,13 +1,15 @@
-use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use russh::{ChannelMsg, Disconnect};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
-use uuid::Uuid;
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::ssh::known_hosts::KnownHosts;
-use crate::ssh::{connect_authenticated, SshError, SshProfile, SshTransportSettings};
+use crate::ssh::{
+    connect_authenticated_with_agent_forwarding_sock, SshError, SshProfile, SshTransportSettings,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectTransferTarget {
@@ -32,6 +34,19 @@ pub struct DirectTransferOutput {
     pub command: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DirectProgressHint {
+    pub percent: Option<u8>,
+    pub transferred_hint: Option<u64>,
+}
+
+pub type DirectProgressFn = Arc<dyn Fn(DirectProgressHint) + Send + Sync>;
+pub type DirectHeartbeatFn = Arc<dyn Fn() + Send + Sync>;
+
+/// Run source-exec Direct transfer with agent forwarding (no key file on source).
+///
+/// `agent_sock`: when set, forwarded agent channels use this socket (ephemeral
+/// agent holding the destination key). When `None`, the system agent is used.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_direct_transfer(
     source_profile: &SshProfile,
@@ -40,93 +55,83 @@ pub async fn run_direct_transfer(
     target: &DirectTransferTarget,
     known_hosts: Option<KnownHosts>,
     transport: SshTransportSettings,
-    timeout_duration: Duration,
-    dest_key_path: Option<&Path>,
+    agent_sock: Option<String>,
+    cancel: Option<Arc<AtomicBool>>,
+    on_heartbeat: Option<DirectHeartbeatFn>,
+    on_progress: Option<DirectProgressFn>,
 ) -> Result<DirectTransferOutput, SshError> {
-    let handle = connect_authenticated(source_profile, known_hosts, transport).await?;
+    let handle = connect_authenticated_with_agent_forwarding_sock(
+        source_profile,
+        known_hosts,
+        transport,
+        agent_sock,
+    )
+    .await?;
 
-    // If we have a dest key, upload it to the source host so rsync/scp can use -i.
-    let remote_key_path: Option<String> = if let Some(key_path) = dest_key_path {
-        let key_content = std::fs::read(key_path).map_err(|e| SshError::Io(e.to_string()))?;
-        let remote = format!("/tmp/aerotab-transfer-key-{}", Uuid::new_v4());
-        let upload_cmd = format!(
-            "cat > {} && chmod 600 {}",
-            shell_quote(&remote),
-            shell_quote(&remote),
-        );
-        let mut ch = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::Channel(format!("key upload channel: {e}")))?;
-        ch.exec(true, upload_cmd.as_str())
-            .await
-            .map_err(|e| SshError::Channel(format!("key upload exec: {e}")))?;
-        ch.data(key_content.as_slice())
-            .await
-            .map_err(|e| SshError::Channel(format!("key upload write: {e}")))?;
-        ch.eof()
-            .await
-            .map_err(|e| SshError::Channel(format!("key upload eof: {e}")))?;
-        let mut exit = None;
-        while let Some(msg) = ch.wait().await {
-            if let ChannelMsg::ExitStatus { exit_status } = msg {
-                exit = Some(exit_status);
-            }
-            if matches!(msg, ChannelMsg::Eof | ChannelMsg::Close) {
-                break;
-            }
-        }
-        if exit != Some(0) {
-            return Err(SshError::Channel(
-                "failed to upload destination key to source host".into(),
-            ));
-        }
-        Some(remote)
-    } else {
-        None
-    };
-
-    let command =
-        build_direct_transfer_command(source_path, kind, target, remote_key_path.as_deref());
+    let command = build_direct_transfer_command(source_path, kind, target);
 
     let mut channel = handle
         .channel_open_session()
         .await
         .map_err(|e| SshError::Channel(format!("direct transfer channel: {e}")))?;
+
+    channel
+        .agent_forward(true)
+        .await
+        .map_err(|e| SshError::Channel(format!("agent forward request: {e}")))?;
+
     channel
         .exec(true, command.as_str())
         .await
         .map_err(|e| SshError::Channel(format!("direct transfer exec: {e}")))?;
 
-    let collect = async {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_status = None;
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { ref data } => append_capped(&mut stdout, data),
-                ChannelMsg::ExtendedData { ref data, ext: _ } => append_capped(&mut stderr, data),
-                ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
-                ChannelMsg::Eof | ChannelMsg::Close => break,
-                _ => {}
-            }
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_status = None;
+    let mut tick = interval(Duration::from_secs(2));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Skip the immediate first tick so we don't spam before any output.
+    tick.tick().await;
+
+    loop {
+        if cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+            let _ = channel.close().await;
+            let _ = handle
+                .disconnect(Disconnect::ByApplication, "direct transfer canceled", "en")
+                .await;
+            return Err(SshError::Channel("direct transfer canceled".into()));
         }
-        Ok::<_, SshError>((stdout, stderr, exit_status))
-    };
 
-    let (stdout, stderr, exit_status) = timeout(timeout_duration, collect)
-        .await
-        .map_err(|_| SshError::Channel("direct transfer timed out".into()))??;
-
-    // Clean up the temp key file from the source host.
-    if let Some(ref remote_key) = remote_key_path {
-        let cleanup_cmd = format!("rm -f {}", shell_quote(remote_key));
-        if let Ok(mut ch) = handle.channel_open_session().await {
-            if ch.exec(true, cleanup_cmd.as_str()).await.is_ok() {
-                while let Some(msg) = ch.wait().await {
-                    if matches!(msg, ChannelMsg::Eof | ChannelMsg::Close) {
-                        break;
+        tokio::select! {
+            biased;
+            msg = channel.wait() => {
+                match msg {
+                    Some(ChannelMsg::Data { ref data }) => {
+                        append_capped(&mut stdout, data);
+                        if let Some(ref cb) = on_progress {
+                            if let Some(hint) = parse_rsync_progress(data) {
+                                cb(hint);
+                            }
+                        }
                     }
+                    Some(ChannelMsg::ExtendedData { ref data, ext: _ }) => {
+                        append_capped(&mut stderr, data);
+                        if let Some(ref cb) = on_progress {
+                            if let Some(hint) = parse_rsync_progress(data) {
+                                cb(hint);
+                            }
+                        }
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status: code }) => {
+                        exit_status = Some(code);
+                    }
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    Some(_) => {}
+                }
+            }
+            _ = tick.tick() => {
+                if let Some(ref hb) = on_heartbeat {
+                    hb();
                 }
             }
         }
@@ -173,23 +178,19 @@ fn finish_direct_transfer_result(
     })
 }
 
+/// Build the source-side shell that prefers `rsync`, falls back to `scp`.
+/// Auth to the destination uses the forwarded agent (no `-i` key path).
 pub fn build_direct_transfer_command(
     source_path: &str,
     kind: DirectTransferKind,
     target: &DirectTransferTarget,
-    dest_key_path: Option<&str>,
 ) -> String {
-    let identity_opt = dest_key_path
-        .map(|p| format!("-i {} -o IdentitiesOnly=yes", shell_quote(p)))
-        .unwrap_or_default();
-    let ssh_command = format!(
-        "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 {}",
-        target.port, identity_opt,
-    );
-    let scp_command = format!(
-        "scp -P {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p -r {}",
-        target.port, identity_opt,
-    );
+    let ssh_command =
+        "ssh -p {port} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+            .replace("{port}", &target.port.to_string());
+    let scp_command =
+        "scp -P {port} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p -r"
+            .replace("{port}", &target.port.to_string());
     let remote_login = format!("{}@{}", target.user, target.host);
     let rsync_dest_path = match kind {
         DirectTransferKind::File => target.path.clone(),
@@ -224,6 +225,50 @@ pub fn build_direct_transfer_command(
         shell_quote(source_path),
         shell_quote(&format!("{remote_login}:{}", target.path)),
     )
+}
+
+/// Light source-side tool check used by `sftp.directPreflight`.
+pub async fn probe_source_transfer_tools(
+    source_profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+    transport: SshTransportSettings,
+) -> Result<(bool, bool), SshError> {
+    let handle = connect_authenticated_with_agent_forwarding_sock(
+        source_profile,
+        known_hosts,
+        transport,
+        None,
+    )
+    .await?;
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| SshError::Channel(format!("preflight channel: {e}")))?;
+    let cmd = "command -v rsync >/dev/null 2>&1; echo RSYNC:$?; command -v scp >/dev/null 2>&1; echo SCP:$?; command -v ssh >/dev/null 2>&1; echo SSH:$?";
+    channel
+        .exec(true, cmd)
+        .await
+        .map_err(|e| SshError::Channel(format!("preflight exec: {e}")))?;
+    let mut stdout = Vec::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } => append_capped(&mut stdout, data),
+            ChannelMsg::Eof | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    let _ = handle
+        .disconnect(Disconnect::ByApplication, "preflight complete", "en")
+        .await;
+    let text = String::from_utf8_lossy(&stdout);
+    let has_rsync = text.contains("RSYNC:0");
+    let has_scp = text.contains("SCP:0");
+    let has_ssh = text.contains("SSH:0");
+    Ok((has_rsync && has_ssh, has_scp && has_ssh))
+}
+
+pub fn source_host_consent_key(profile: &SshProfile) -> String {
+    format!("{}@{}:{}", profile.user, profile.host, profile.port)
 }
 
 pub fn shell_quote(input: &str) -> String {
@@ -276,6 +321,37 @@ fn append_capped(out: &mut Vec<u8>, data: &[u8]) {
     }
 }
 
+/// Parse `rsync --info=progress2` lines for a percent / byte hint.
+fn parse_rsync_progress(data: &[u8]) -> Option<DirectProgressHint> {
+    let text = String::from_utf8_lossy(data);
+    let mut percent = None;
+    let mut transferred_hint = None;
+    for token in text.split_whitespace() {
+        if let Some(p) = token.strip_suffix('%') {
+            if let Ok(v) = p.parse::<u8>() {
+                if v <= 100 {
+                    percent = Some(v);
+                }
+            }
+        } else if token.chars().all(|c| c.is_ascii_digit() || c == ',') {
+            let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(v) = digits.parse::<u64>() {
+                if v > 0 {
+                    transferred_hint = Some(v);
+                }
+            }
+        }
+    }
+    if percent.is_some() || transferred_hint.is_some() {
+        Some(DirectProgressHint {
+            percent,
+            transferred_hint,
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,12 +365,8 @@ mod tests {
             path: "/var/www/app config.tar".into(),
         };
 
-        let command = build_direct_transfer_command(
-            "/tmp/app config.tar",
-            DirectTransferKind::File,
-            &target,
-            None,
-        );
+        let command =
+            build_direct_transfer_command("/tmp/app config.tar", DirectTransferKind::File, &target);
 
         assert!(command.contains("command -v rsync"));
         assert!(command.contains("BatchMode=yes"));
@@ -302,27 +374,8 @@ mod tests {
         assert!(command.contains("mkdir -p -- '/var/www'"));
         assert!(command.contains("'deploy@10.0.0.8:/var/www/app config.tar'"));
         assert!(command.contains("'/tmp/app config.tar'"));
-    }
-
-    #[test]
-    fn builds_command_with_key_path() {
-        let target = DirectTransferTarget {
-            user: "deploy".into(),
-            host: "10.0.0.8".into(),
-            port: 2222,
-            path: "/var/www/data".into(),
-        };
-
-        let command = build_direct_transfer_command(
-            "/tmp/data",
-            DirectTransferKind::File,
-            &target,
-            Some("/tmp/my-key.pem"),
-        );
-
-        assert!(command.contains("-i '/tmp/my-key.pem'"));
-        assert!(command.contains("-o IdentitiesOnly=yes"));
-        assert!(command.contains("BatchMode=yes"));
+        assert!(!command.contains("-i "));
+        assert!(!command.contains("IdentitiesOnly"));
     }
 
     #[test]
@@ -335,7 +388,7 @@ mod tests {
         };
 
         let command =
-            build_direct_transfer_command("/opt/data set", DirectTransferKind::Dir, &target, None);
+            build_direct_transfer_command("/opt/data set", DirectTransferKind::Dir, &target);
 
         assert!(command.contains("mkdir -p -- '/srv/backups/data set'"));
         assert!(command.contains("'/opt/data set/'"));
@@ -352,5 +405,12 @@ mod tests {
     #[test]
     fn shell_quote_handles_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn parses_rsync_progress2_line() {
+        let hint = parse_rsync_progress(b"  12,345,678  45%  1.23MB/s    0:00:12").unwrap();
+        assert_eq!(hint.percent, Some(45));
+        assert_eq!(hint.transferred_hint, Some(12_345_678));
     }
 }

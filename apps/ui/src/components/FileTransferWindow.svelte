@@ -17,8 +17,20 @@
   import { onDestroy, onMount } from 'svelte';
   import { tabs, type TransferBootstrap } from '../lib/tabs.svelte';
   import { transferTabBridge } from '../lib/transferTabBridge.svelte';
+  import { appConfirm } from '../lib/confirm.svelte';
   import EndpointSelector from './EndpointSelector.svelte';
   import SftpTransferQueue, { type TransferQueueItem } from './SftpTransferQueue.svelte';
+
+  interface DirectPreflightResult {
+    ok: boolean;
+    can_direct: boolean;
+    needs_consent: boolean;
+    source_host_key: string;
+    has_rsync: boolean;
+    has_scp: boolean;
+    dest_auth_ok: boolean;
+    reasons: string[];
+  }
 
   interface TransferTarget {
     name: string;
@@ -422,7 +434,11 @@
     }
   }
 
-  async function withRelayStallCancel<T>(id: string, promise: Promise<T>): Promise<T> {
+  async function withTransferStallCancel<T>(
+    id: string,
+    promise: Promise<T>,
+    cancelRpc: 'sftp.cancelRelayTransfer' | 'sftp.cancelDirectTransfer',
+  ): Promise<T> {
     let stalled = false;
     let stopMonitor = false;
     const monitor = (async () => {
@@ -438,7 +454,7 @@
         if (remaining <= 0) {
           stalled = true;
           updateTask(id, { message: i18n.t('transfer.cancelingStalled') });
-          await rpc.call('sftp.cancelRelayTransfer', { transfer_id: id }).catch(() => {});
+          await rpc.call(cancelRpc, { transfer_id: id }).catch(() => {});
           await sleep(RELAY_CANCEL_GRACE_MS);
           throw new Error(i18n.t('transfer.timeout', { seconds: Math.round(TRANSFER_STALL_MS / 1000) }));
         }
@@ -456,6 +472,14 @@
       stopMonitor = true;
       await monitor.catch(() => {});
     }
+  }
+
+  async function withRelayStallCancel<T>(id: string, promise: Promise<T>): Promise<T> {
+    return withTransferStallCancel(id, promise, 'sftp.cancelRelayTransfer');
+  }
+
+  async function withDirectStallCancel<T>(id: string, promise: Promise<T>): Promise<T> {
+    return withTransferStallCancel(id, promise, 'sftp.cancelDirectTransfer');
   }
 
   async function retryOrFailTask(task: TransferTask, err: unknown) {
@@ -508,6 +532,7 @@
     const status = currentTask(id)?.status;
     if (!status || status === 'done' || status === 'error' || status === 'canceled') return;
     void rpc.call('sftp.cancelRelayTransfer', { transfer_id: id }).catch(() => {});
+    void rpc.call('sftp.cancelDirectTransfer', { transfer_id: id }).catch(() => {});
     updateTask(id, { status: 'canceled', message: i18n.t('sftp.transferCanceled'), finishedAt: Date.now() });
   }
 
@@ -680,19 +705,105 @@
     await runRemoteToLocalTask(id, task);
   }
 
+  async function ensureDirectConsent(preflight: DirectPreflightResult): Promise<boolean> {
+    if (!preflight.needs_consent) return true;
+    const ok = await appConfirm(i18n.t('transfer.directConsentBody', { host: preflight.source_host_key }), {
+      title: i18n.t('transfer.directConsentTitle'),
+      confirmLabel: i18n.t('transfer.directConsentAllow'),
+      cancelLabel: i18n.t('transfer.directConsentDeny'),
+    });
+    if (!ok) return false;
+    await rpc.call('sftp.rememberDirectConsent', { source_host_key: preflight.source_host_key }).catch(() => {});
+    return true;
+  }
+
   async function tryDirectRemoteTransfer(id: string, task: TransferTask): Promise<boolean> {
     if (isCanceled(id)) return false;
-    if (!task.sourceSessionId || !task.destSessionId) return false;
-    updateTask(id, { method: 'direct', message: i18n.t('transfer.directRunning') });
+    if (!task.sourceSessionId || !task.destSessionId) {
+      updateTask(id, { message: i18n.t('transfer.directUnavailable') });
+      return false;
+    }
+
+    let preflight: DirectPreflightResult;
     try {
-      await withTransferTimeout('sftp.directTransfer', rpc.call('sftp.directTransfer', {
-        source_session_id: task.sourceSessionId,
-        dest_session_id: task.destSessionId,
-        source_path: task.sourcePath,
-        kind: task.sourceKind,
-        dest_path: task.destPath,
-        timeout_ms: TRANSFER_RPC_TIMEOUT_MS,
-      }), TRANSFER_RPC_TIMEOUT_MS + 5000);
+      preflight = await withTransferTimeout(
+        'sftp.directPreflight',
+        rpc.call<DirectPreflightResult>('sftp.directPreflight', {
+          source_session_id: task.sourceSessionId,
+          dest_session_id: task.destSessionId,
+          probe_tools: true,
+        }),
+        TRANSFER_RPC_TIMEOUT_MS,
+      );
+    } catch (e) {
+      updateTask(id, {
+        message: i18n.t('transfer.directPreflightFailed', { message: (e as Error).message }),
+      });
+      return false;
+    }
+
+    if (!preflight.can_direct || !preflight.dest_auth_ok || (!preflight.has_rsync && !preflight.has_scp)) {
+      const reason = preflight.reasons.join(', ') || i18n.t('transfer.directUnavailable');
+      updateTask(id, { message: i18n.t('transfer.directFallback', { message: reason }) });
+      return false;
+    }
+
+    const consented = await ensureDirectConsent(preflight);
+    if (!consented) {
+      updateTask(id, { message: i18n.t('transfer.directConsentDenied') });
+      return false;
+    }
+    if (isCanceled(id)) return false;
+
+    updateTask(id, {
+      method: 'direct',
+      message: i18n.t('transfer.directRunning'),
+      lastProgressAt: Date.now(),
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    const eventListen: any = w.__TAURI__?.event?.listen
+      ?? w.__TAURI_INTERNALS__?.event?.listen;
+    let unlistenHeartbeat: (() => void) | null = null;
+    let unlistenProgress: (() => void) | null = null;
+    if (eventListen) {
+      unlistenHeartbeat = await eventListen('transfer:direct-heartbeat', (event: { payload: { transfer_id: string } }) => {
+        if (event.payload.transfer_id === id) {
+          updateTask(id, { lastProgressAt: Date.now() });
+        }
+      });
+      unlistenProgress = await eventListen(
+        'transfer:direct-progress',
+        (event: { payload: { transfer_id: string; percent?: number | null; transferred_hint?: number | null } }) => {
+          const p = event.payload;
+          if (p.transfer_id !== id) return;
+          const patch: Partial<TransferTask> = { lastProgressAt: Date.now(), method: 'direct' };
+          if (typeof p.transferred_hint === 'number' && p.transferred_hint > 0) {
+            patch.transferred = p.transferred_hint;
+            patch.size = Math.max(task.size, task.sourceSize, p.transferred_hint);
+          }
+          if (typeof p.percent === 'number') {
+            patch.message = `${i18n.t('transfer.directRunning')} — ${p.percent}%`;
+          }
+          updateTask(id, patch);
+        },
+      );
+    }
+
+    try {
+      await withDirectStallCancel(
+        id,
+        rpc.call('sftp.directTransfer', {
+          transfer_id: id,
+          source_session_id: task.sourceSessionId,
+          dest_session_id: task.destSessionId,
+          source_path: task.sourcePath,
+          kind: task.sourceKind,
+          dest_path: task.destPath,
+          consent_granted: true,
+        }),
+      );
       await verifyDirectTransferTarget(task);
       updateTask(id, {
         method: 'direct',
@@ -701,8 +812,12 @@
       });
       return true;
     } catch (e) {
+      if (isCanceled(id)) return false;
       updateTask(id, { message: `${i18n.t('transfer.directFallback', { message: (e as Error).message })}` });
       return false;
+    } finally {
+      unlistenHeartbeat?.();
+      unlistenProgress?.();
     }
   }
 
