@@ -181,7 +181,8 @@
   let pasteFlattenNewlines = false;
   let pasteTrimWhitespace = false;
   let bellFlashHandle: number | null = null;
-  let transferDetectionEnabled = false;
+  /** Must be $state: shared settings cache only runs Fresh side-effects on one pane. */
+  let transferDetectionEnabled = $state(false);
   let transferNotice = $state<TerminalTransferDetection | null>(null);
   let transferNoticeHandle: number | null = null;
   let transferFilter = $state<TrzszFilterInstance | null>(null);
@@ -559,16 +560,21 @@
     // even when the app chrome is transparent. DOM renderer keeps cell
     // backgrounds in CSS/DOM and can honor a transparent theme background.
     if (isTranslucent()) out.renderer = 'dom';
-    if (!out.experimentalTransferDetection) {
-      transferDetector.reset();
-      clearTransferNotice();
-    }
-    transferDetectionEnabled = out.experimentalTransferDetection;
+    // Do not mutate per-pane state here — getTerminalSettings() caches this
+    // result and skips Fresh for other panes. Callers must applyTransferDetectionFromCfg.
     return out;
   }
 
   async function loadTermSettings() {
     return getTerminalSettings(() => loadTermSettingsFresh());
+  }
+
+  function applyTransferDetectionFromCfg(enabled: boolean) {
+    if (!enabled) {
+      transferDetector.reset();
+      clearTransferNotice();
+    }
+    transferDetectionEnabled = enabled;
   }
 
   function inspectTransferOutput(text: string) {
@@ -943,6 +949,7 @@
     });
     if (host) ro.observe(host);
 
+    applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
     await configureTransferFilter(cfg.experimentalTransferDetection);
     syncPolling();
 
@@ -1044,6 +1051,7 @@
     term.options.scrollOnUserInput = cfg.scrollOnInput;
     term.options.wordSeparator = cfg.wordSeparator;
     term.options.allowTransparency = isTranslucent();
+    applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
     await configureTransferFilter(cfg.experimentalTransferDetection);
     await applyRenderer(cfg.renderer);
     applyLigatures(cfg.ligatures);
