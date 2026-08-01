@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { ChevronDown, ChevronRight } from '@lucide/svelte';
   import type { ProfileHealthResult, StoredProfile } from '../lib/types';
   import type { ProfileTreeFolder } from '../lib/profileTree';
@@ -85,6 +86,11 @@
     return !collapsed.has(path);
   }
 
+  let groupRenameInputEl = $state<HTMLInputElement | null>(null);
+  const editingDirectChild = $derived(
+    !!inlineEditGroupPath && folder.folders.some((f) => f.path === inlineEditGroupPath),
+  );
+
   function onGroupRenameKeydown(path: string, ev: KeyboardEvent) {
     if (ev.key === 'Enter') {
       ev.preventDefault();
@@ -96,6 +102,28 @@
       onInlineGroupRenameCancel?.();
     }
   }
+
+  $effect(() => {
+    if (!editingDirectChild) return;
+    let cancelled = false;
+    void tick().then(() => {
+      if (cancelled) return;
+      groupRenameInputEl?.focus({ preventScroll: true });
+      groupRenameInputEl?.select();
+    });
+    const onDocKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onInlineGroupRenameCancel?.();
+      }
+    };
+    window.addEventListener('keydown', onDocKey, true);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('keydown', onDocKey, true);
+    };
+  });
 </script>
 
 {#each folder.folders as child (child.path)}
@@ -130,12 +158,11 @@
       >
         <span class="profile-group-swatch" aria-hidden="true"></span>
         {#if inlineEditGroupPath === child.path}
-          <!-- svelte-ignore a11y_autofocus -->
           <input
+            bind:this={groupRenameInputEl}
             type="text"
             class="profile-inline-rename input flex-1 min-w-0 text-[11px] font-medium"
             value={inlineEditGroupDraft}
-            autofocus
             onclick={(ev) => ev.stopPropagation()}
             oninput={(ev) => onInlineGroupDraftChange?.((ev.currentTarget as HTMLInputElement).value)}
             onkeydown={(ev) => onGroupRenameKeydown(child.path, ev)}
@@ -233,7 +260,7 @@
 {/each}
 
 <style>
-  .profile-folder {
+  .folder-header {
     padding-left: calc(var(--depth, 0) * 10px);
   }
   .folder-children {

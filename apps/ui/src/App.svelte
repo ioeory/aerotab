@@ -61,6 +61,7 @@
   import { transferTabBridge } from './lib/transferTabBridge.svelte';
   import type { LocalUploadTransferRequest, RemoteCrossTransferRequest } from './lib/sftpTransferTypes';
   import { sidebarFocus } from './lib/sidebarFocus.svelte';
+  import { sessionEndedGate } from './lib/sessionEndedGate.svelte';
   import {
     getSidebarProfileHandlers,
   } from './lib/sidebarProfileBridge';
@@ -73,7 +74,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.15-ui-20260607';
+  const buildId = '0.2.16-ui-20260802';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -167,6 +168,11 @@
   const broadcastOn = $derived(!!(tabs.activeId && broadcastByTab[tabs.activeId]));
   const broadcastTargets = $derived(broadcastTargetIds(activeTab));
 
+  /** Tabs with an open SFTP dock (kept mounted across tab switches). */
+  const sftpDockKeepAliveTabs = $derived(
+    tabs.tabs.filter((t) => t.kind !== 'transfer' && !!sftpDockOpen[t.id]),
+  );
+
   $effect(() => {
     void tabs.revision;
     void tabs.activeId;
@@ -174,8 +180,6 @@
       if (tab.kind === 'transfer') continue;
       const tabId = tab.id;
       if (!sftpDockOpen[tabId]) continue;
-      // Resolve profile targets only for the visible dock (avoids background work on other tabs).
-      if (tabs.activeId !== tabId) continue;
 
       const pane = resolveTabActivePane(tab.panes, tab.activePaneId);
       if (!pane?.profileId || pane.sshProfile) continue;
@@ -1260,12 +1264,14 @@
     const { [tabId]: _profile, ...restProfile } = dockProfileByTab;
     const { [tabId]: _loading, ...restLoading } = dockProfileLoadingByTab;
     const { [tabId]: _seq, ...restSeq } = dockProfileFetchSeq;
+    const { [tabId]: _count, ...restCounts } = dockTransferCounts;
     sftpDockOpen = restOpen;
     sftpDockPinned = restPinned;
     sftpDockCollapsed = restCollapsed;
     dockProfileByTab = restProfile;
     dockProfileLoadingByTab = restLoading;
     dockProfileFetchSeq = restSeq;
+    dockTransferCounts = restCounts;
   }
 
   function setCurrentSftpCollapsed(collapsed: boolean) {
@@ -1628,6 +1634,11 @@
     hotkeys.registerHandler('session-ended-reconnect', () => {
       document.dispatchEvent(new CustomEvent('aerotab:session-ended-action', { detail: 'reconnect' }));
     });
+    // Only consume Enter/R when the active pane has ended — otherwise sidebar
+    // "Enter to connect" and typing in SFTP never receive the key.
+    const sessionEndedActive = () => sessionEndedGate.activeExited;
+    hotkeys.registerGuard('session-ended-close', sessionEndedActive);
+    hotkeys.registerGuard('session-ended-reconnect', sessionEndedActive);
 
     const profileActionKeyById = Object.fromEntries(
       Object.entries(PROFILE_SIDEBAR_ACTION_IDS).map(([key, id]) => [id, key]),
@@ -1661,7 +1672,13 @@
 
     kbdHandler = (e: KeyboardEvent) => {
       if (isOverlayBlockingInput()) return;
-      if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'r' || e.key === 'R'))) {
+      const terminalFocused = (() => {
+        const el = e.target instanceof Element ? e.target : document.activeElement;
+        if (!(el instanceof Element)) return false;
+        return !!el.closest('.xterm, .terminal-host, [data-aerotab-terminal]');
+      })();
+      // Block WebView reload, but let Ctrl+R / F5 reach the shell when terminal focused.
+      if (!terminalFocused && (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'r' || e.key === 'R')))) {
         e.preventDefault();
         return;
       }
@@ -1873,8 +1890,9 @@
             </div>
           {/if}
         </div>
-        {#if hasOpenSftpDock}
-          {#if currentSftpCollapsed}
+        <!-- Keep SFTP browsers mounted for every tab with an open dock (like terminal panes). -->
+        {#if sftpDockKeepAliveTabs.length > 0}
+          {#if hasOpenSftpDock && currentSftpCollapsed}
             <div class="w-9 shrink-0 border-l border-[var(--color-border-soft)] bg-[var(--color-panel)] flex flex-col items-center py-2 gap-1 shadow-[inset_1px_0_0_var(--color-border-soft)]">
               <button
                 type="button"
@@ -1907,57 +1925,63 @@
                 <X size={13} />
               </button>
             </div>
-          {:else}
+          {:else if hasOpenSftpDock}
             <button
               type="button"
               aria-label={i18n.t('sftp.resizeDock')}
               class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
               onpointerdown={onSftpDockResizePointerDown}
             ></button>
-            <div
-              class="shrink-0 h-full border-l border-[var(--color-border-soft)] min-w-0"
-              style="width: {sftpDockWidthPx}px; max-width: min({SFTP_DOCK_WIDTH_MAX}px, 55vw);"
-            >
-              {#if activeTab && activeTab.kind !== 'transfer'}
-                {@const dockTarget = sftpDockTargetForTab(activeTab)}
-                {@const dockLoading = sftpDockLoadingForTab(activeTab)}
-                <div class="h-full w-full">
-                  {#if dockLoading && !dockTarget}
-                    <div class="h-full grid place-items-center px-3 text-center text-[12px] text-[var(--color-fg-muted)]">
-                      {i18n.t('sftp.dockLoading')}
-                    </div>
-                  {:else if dockTarget}
-                    {#key `${activeTab.id}|${dockTarget.ssh.host}|${dockTarget.ssh.port}|${dockTarget.ssh.user}`}
-                    <SftpBrowser
-                      {rpc}
-                      registryId={`dock-${activeTab.id}`}
-                      terminalSessionId={sftpDockSessionIdForTab(activeTab)}
-                      source={dockTarget}
-                      mode="dock"
-                      dockWidthPx={sftpDockWidthPx}
-                      transferPanelHeightPx={sftpDockTransferHeightPx}
-                      onTransferPanelHeightChange={(h) => {
-                        sftpDockTransferHeightPx = h;
-                        void persistSftpDockSettings();
-                      }}
-                      onActiveTransferCountChange={(count) => onDockTransferCountChange(activeTab.id, count)}
-                      onRemoteCrossTransfer={onDockRemoteCrossTransfer}
-                      onOpenTransferCenter={() => { openFileTransferWindow(); }}
-                      onClose={() => closeSftpDock(activeTab.id)}
-                      onCollapse={() => { sftpDockCollapsed = { ...sftpDockCollapsed, [activeTab.id]: true }; }}
-                      onPopOut={(sudo) => openSftpWindow({ ...dockTarget, sudo })}
-                      {onError}
-                    />
-                    {/key}
-                  {:else}
-                    <div class="h-full grid place-items-center px-3 text-center text-[12px] text-[var(--color-fg-muted)]">
-                      {i18n.t('sftp.dockNoTarget')}
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-            </div>
           {/if}
+          <div
+            class="relative shrink-0 h-full min-w-0 overflow-hidden"
+            class:border-l={hasOpenSftpDock && !currentSftpCollapsed}
+            class:border-[var(--color-border-soft)]={hasOpenSftpDock && !currentSftpCollapsed}
+            style={hasOpenSftpDock && !currentSftpCollapsed
+              ? `width: ${sftpDockWidthPx}px; max-width: min(${SFTP_DOCK_WIDTH_MAX}px, 55vw);`
+              : 'width: 0; max-width: 0;'}
+            aria-hidden={!(hasOpenSftpDock && !currentSftpCollapsed)}
+          >
+            {#each sftpDockKeepAliveTabs as dockTab (dockTab.id)}
+              {@const dockTarget = sftpDockTargetForTab(dockTab)}
+              {@const dockLoading = sftpDockLoadingForTab(dockTab)}
+              {@const dockVisible = tabs.activeId === dockTab.id && hasOpenSftpDock && !currentSftpCollapsed}
+              <div class="absolute inset-0" hidden={!dockVisible}>
+                {#if dockLoading && !dockTarget}
+                  <div class="h-full grid place-items-center px-3 text-center text-[12px] text-[var(--color-fg-muted)]">
+                    {i18n.t('sftp.dockLoading')}
+                  </div>
+                {:else if dockTarget}
+                  {#key `${dockTab.id}|${dockTarget.ssh.host}|${dockTarget.ssh.port}|${dockTarget.ssh.user}`}
+                  <SftpBrowser
+                    {rpc}
+                    registryId={`dock-${dockTab.id}`}
+                    terminalSessionId={sftpDockSessionIdForTab(dockTab)}
+                    source={dockTarget}
+                    mode="dock"
+                    dockWidthPx={sftpDockWidthPx}
+                    transferPanelHeightPx={sftpDockTransferHeightPx}
+                    onTransferPanelHeightChange={(h) => {
+                      sftpDockTransferHeightPx = h;
+                      void persistSftpDockSettings();
+                    }}
+                    onActiveTransferCountChange={(count) => onDockTransferCountChange(dockTab.id, count)}
+                    onRemoteCrossTransfer={onDockRemoteCrossTransfer}
+                    onOpenTransferCenter={() => { openFileTransferWindow(); }}
+                    onClose={() => closeSftpDock(dockTab.id)}
+                    onCollapse={() => { sftpDockCollapsed = { ...sftpDockCollapsed, [dockTab.id]: true }; }}
+                    onPopOut={(sudo) => openSftpWindow({ ...dockTarget, sudo })}
+                    {onError}
+                  />
+                  {/key}
+                {:else}
+                  <div class="h-full grid place-items-center px-3 text-center text-[12px] text-[var(--color-fg-muted)]">
+                    {i18n.t('sftp.dockNoTarget')}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
         {/if}
       </div>
     </div>

@@ -265,6 +265,23 @@ fn session_not_found(id: SessionId) -> RpcError {
     )
 }
 
+/// Merge PTY/SSH packets from one poll burst so binary protocols (e.g. trzsz) are
+/// less likely to be split across frontend processing calls.
+fn coalesce_poll_output_chunks(raw_chunks: Vec<Vec<u8>>) -> Vec<String> {
+    if raw_chunks.is_empty() {
+        return Vec::new();
+    }
+    if raw_chunks.len() == 1 {
+        return vec![BASE64.encode(&raw_chunks[0])];
+    }
+    let total: usize = raw_chunks.iter().map(|c| c.len()).sum();
+    let mut merged = Vec::with_capacity(total);
+    for chunk in raw_chunks {
+        merged.extend_from_slice(&chunk);
+    }
+    vec![BASE64.encode(&merged)]
+}
+
 /// Registers every method on `dispatcher`, capturing `state` by clone.
 pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
     {
@@ -598,13 +615,14 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     }
                 };
                 let mut rx = rx.lock().await;
-                let mut chunks = Vec::new();
+                let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
                 for _ in 0..max {
                     match rx.try_recv() {
-                        Ok(c) => chunks.push(BASE64.encode(&c)),
+                        Ok(c) => raw_chunks.push(c),
                         Err(_) => break,
                     }
                 }
+                let chunks: Vec<String> = coalesce_poll_output_chunks(raw_chunks);
                 Ok(Value::Array(
                     chunks.into_iter().map(Value::String).collect(),
                 ))
@@ -637,11 +655,11 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     }
                 };
                 let mut rx = rx.lock().await;
-                let mut chunks = Vec::new();
+                let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
                 use tokio::sync::mpsc::error::TryRecvError;
                 for _ in 0..max {
                     match rx.try_recv() {
-                        Ok(c) => chunks.push(BASE64.encode(&c)),
+                        Ok(c) => raw_chunks.push(c),
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             alive = false;
@@ -649,6 +667,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         }
                     }
                 }
+                let chunks = coalesce_poll_output_chunks(raw_chunks);
                 Ok(json!({
                     "chunks": chunks,
                     "alive": alive,

@@ -140,6 +140,8 @@ export class HotkeyManager {
   private bindings = new Map<string, ParsedBinding[]>();
   /** action id -> handler */
   private handlers = new Map<string, () => void>();
+  /** action id -> optional guard; when false, the binding is ignored (no preventDefault). */
+  private guards = new Map<string, () => boolean>();
 
   constructor() {
     this.resetToDefaults();
@@ -198,11 +200,18 @@ export class HotkeyManager {
     this.handlers.set(actionId, fn);
   }
 
+  /** When the guard returns false, this action does not consume the event. */
+  registerGuard(actionId: string, fn: () => boolean): void {
+    this.guards.set(actionId, fn);
+  }
+
   /** Returns true if the event was consumed. */
   dispatch(ev: KeyboardEvent): boolean {
     for (const [actionId, list] of this.bindings) {
       for (const b of list) {
         if (matches(ev, b)) {
+          const guard = this.guards.get(actionId);
+          if (guard && !guard()) continue;
           const fn = this.handlers.get(actionId);
           if (fn) {
             ev.preventDefault();

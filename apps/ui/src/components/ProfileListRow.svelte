@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     FolderOpen, Image, Pencil, Plug, ShieldAlert, ShieldCheck, ShieldX, Star, StickyNote, Tags, Trash2,
   } from '@lucide/svelte';
@@ -75,6 +76,8 @@
   let tagPopoverOpen = $state(false);
   let tagPopoverPos = $state({ left: 0, top: 0 });
   let tagPopoverCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  let renameInputEl = $state<HTMLInputElement | null>(null);
+  let mainButtonEl = $state<HTMLButtonElement | null>(null);
 
   function updateTagPopoverPos(el: HTMLElement) {
     const rect = el.getBoundingClientRect();
@@ -131,6 +134,40 @@
     };
   });
 
+  $effect(() => {
+    if (!renaming) return;
+    let cancelled = false;
+    void tick().then(() => {
+      if (cancelled) return;
+      renameInputEl?.focus({ preventScroll: true });
+      renameInputEl?.select();
+    });
+    const onDocKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onRenameCancel?.();
+      }
+    };
+    window.addEventListener('keydown', onDocKey, true);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('keydown', onDocKey, true);
+    };
+  });
+
+  $effect(() => {
+    if (!focused || renaming || variant !== 'sidebar') return;
+    if (typeof document === 'undefined') return;
+    const active = document.activeElement;
+    if (active instanceof Element && active.closest('[data-aerotab-sidebar-profiles]')) {
+      // Keep focus inside the list (e.g. after arrow nav) on the row button.
+      if (active !== mainButtonEl && active !== renameInputEl) {
+        mainButtonEl?.focus({ preventScroll: true });
+      }
+    }
+  });
+
   function healthLabel(status: ProfileHealthResult['status']): string {
     if (status === 'ok') return i18n.t('profiles.healthOk');
     if (status === 'warning') return i18n.t('profiles.healthWarning');
@@ -168,6 +205,13 @@
       onRenameCancel?.();
     }
   }
+
+  function onMainClick(ev: MouseEvent) {
+    if (renaming) return;
+    onClick?.(ev);
+    // Ensure DOM focus lands on the row so Enter can connect.
+    queueMicrotask(() => mainButtonEl?.focus({ preventScroll: true }));
+  }
 </script>
 
 <div
@@ -199,64 +243,72 @@
     aria-label={p.name}
   />
   <div class="profile-list-row-content min-w-0 flex-1">
-    <button
-      type="button"
-      class="profile-list-row-main"
-      onclick={(ev) => { if (!renaming) onClick?.(ev); }}
-      ondblclick={() => { if (!renaming) onOpen?.(); }}
-      onkeydown={onRowKeydown}
-    >
-      <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={variant === 'sidebar' ? 12 : 14} />
-      <div class="profile-list-row-body min-w-0 flex-1 text-left">
-        <div class="profile-list-row-title flex items-center gap-1 truncate">
-          {#if renaming}
-            <!-- svelte-ignore a11y_autofocus -->
+    {#if renaming}
+      <div class="profile-list-row-main profile-list-row-main--renaming">
+        <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={variant === 'sidebar' ? 12 : 14} />
+        <div class="profile-list-row-body min-w-0 flex-1 text-left">
+          <div class="profile-list-row-title flex items-center gap-1 min-w-0">
             <input
+              bind:this={renameInputEl}
               type="text"
               class="profile-inline-rename input min-w-0 flex-1"
               value={renameDraft}
-              autofocus
               onclick={(ev) => ev.stopPropagation()}
               oninput={(ev) => onRenameDraftChange?.((ev.currentTarget as HTMLInputElement).value)}
               onkeydown={onRenameKeydown}
               onblur={() => onRenameCommit?.()}
               aria-label={i18n.t('sidebar.renameProfile')}
             />
-          {:else}
-            <span class="truncate">{p.name}</span>
+            <ProfileKindBadge kind={p.kind} compact />
+          </div>
+        </div>
+      </div>
+    {:else}
+      <button
+        bind:this={mainButtonEl}
+        type="button"
+        class="profile-list-row-main"
+        onclick={onMainClick}
+        ondblclick={() => onOpen?.()}
+        onkeydown={onRowKeydown}
+      >
+        <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={variant === 'sidebar' ? 12 : 14} />
+        <div class="profile-list-row-body min-w-0 flex-1 text-left">
+          <div class="profile-list-row-title flex items-center gap-1 min-w-0">
+            <span class="min-w-0 flex-1 truncate">{p.name}</span>
+            <ProfileKindBadge kind={p.kind} compact />
+            {#if h}
+              <span class="health-chip {h.status}" title={healthTitle(h)} aria-label={healthLabel(h.status)}>
+                {#if h.status === 'ok'}
+                  <ShieldCheck size={10} />
+                {:else if h.status === 'warning'}
+                  <ShieldAlert size={10} />
+                {:else}
+                  <ShieldX size={10} />
+                {/if}
+              </span>
+            {/if}
+            {#if p.favorite}
+              <Star size={10} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
+            {/if}
+          </div>
+          <div class="profile-list-row-endpoint truncate">{profileEndpointLabel(p)}</div>
+          {#if variant === 'sidebar' && focused}
+            <div class="profile-list-row-connect-hint truncate">{i18n.t('sidebar.profileConnectHint')}</div>
           {/if}
-          <ProfileKindBadge kind={p.kind} compact />
-          {#if h}
-            <span class="health-chip {h.status}" title={healthTitle(h)} aria-label={healthLabel(h.status)}>
-              {#if h.status === 'ok'}
-                <ShieldCheck size={10} />
-              {:else if h.status === 'warning'}
-                <ShieldAlert size={10} />
-              {:else}
-                <ShieldX size={10} />
-              {/if}
-            </span>
+          {#if variant === 'sidebar' && p.note}
+            <div class="profile-list-row-note truncate">{p.note}</div>
           {/if}
-          {#if p.favorite}
-            <Star size={10} class="shrink-0 text-[var(--color-accent)]" fill="currentColor" />
+          {#if variant === 'settings' && h && h.status !== 'ok' && healthIssues.length > 0}
+            <div class="profile-list-row-health-details">
+              {#each healthIssues as check (`${p.id}-${check.name}`)}
+                <span>{check.name}: {check.message}</span>
+              {/each}
+            </div>
           {/if}
         </div>
-        <div class="profile-list-row-endpoint truncate">{profileEndpointLabel(p)}</div>
-        {#if variant === 'sidebar' && focused}
-          <div class="profile-list-row-connect-hint truncate">{i18n.t('sidebar.profileConnectHint')}</div>
-        {/if}
-        {#if variant === 'sidebar' && p.note}
-          <div class="profile-list-row-note truncate">{p.note}</div>
-        {/if}
-        {#if variant === 'settings' && h && h.status !== 'ok' && healthIssues.length > 0}
-          <div class="profile-list-row-health-details">
-            {#each healthIssues as check (`${p.id}-${check.name}`)}
-              <span>{check.name}: {check.message}</span>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    </button>
+      </button>
+    {/if}
     {#if allTags.length > 0}
       <div class="profile-list-row-tags">
         {#each visibleTags as tag (tag)}
@@ -281,7 +333,7 @@
     {/if}
   </div>
   {#if variant === 'sidebar'}
-    <div class="profile-action-chips shrink-0">
+    <div class="profile-action-chips">
       <button type="button" class="action-chip {p.note ? 'action-chip--active' : ''}" title={p.note?.trim() || i18n.t('sidebar.editNote')} aria-label={i18n.t('sidebar.editNote')} onclick={(ev) => quickAction(ev, 'note')}><StickyNote size={11} /></button>
       <button type="button" class="action-chip {(p.tags ?? []).length > 0 ? 'action-chip--active' : ''}" title={i18n.t('sidebar.editTags')} aria-label={i18n.t('sidebar.editTags')} onclick={(ev) => quickAction(ev, 'tags')}><Tags size={11} /></button>
       <button type="button" class="action-chip" title={i18n.t('sidebar.renameProfile')} aria-label={i18n.t('sidebar.renameProfile')} onclick={(ev) => quickAction(ev, 'rename')}><Pencil size={11} /></button>
@@ -318,6 +370,7 @@
 
 <style>
   .profile-list-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -325,6 +378,7 @@
   }
   .profile-list-row--sidebar {
     gap: 6px;
+    /* Sole depth indent for profiles (folder headers indent separately). */
     padding-left: calc(var(--depth, 0) * 10px);
   }
   .profile-list-row--settings {
@@ -355,6 +409,9 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
+  }
+  .profile-list-row-main--renaming {
+    cursor: default;
   }
   .profile-list-row--sidebar .profile-list-row-main {
     padding: 4px 0;
@@ -483,10 +540,19 @@
     align-items: center;
     gap: 2px;
   }
+  /* Overlay chips so narrow sidebars keep room for name/endpoint. */
   .profile-action-chips {
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
     opacity: 0;
     pointer-events: none;
-    padding-right: 2px;
+    padding: 2px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
   }
   .profile-list-row:hover .profile-action-chips,
   .profile-list-row--focused .profile-action-chips,

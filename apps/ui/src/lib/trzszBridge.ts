@@ -20,6 +20,8 @@ export interface TrzszFilterOptions {
   isWindowsShell?: boolean;
   maxDataChunkSize?: number;
   dragInitTimeout?: number;
+  /** High-latency SSH: longer wait for drag paths after remote `trz`. */
+  sshSlowLink?: boolean;
 }
 
 type TrzszFilterConstructor = new (options: TrzszFilterOptions & {
@@ -55,6 +57,11 @@ interface OpenFile {
 const openFiles = new Map<number, OpenFile>();
 let nextFileDescriptor = 3;
 let filterConstructorPromise: Promise<TrzszFilterConstructor> | null = null;
+
+let dragPathWaiter: ((paths: string[] | undefined) => void) | null = null;
+let pendingDragPaths: string[] | null = null;
+let nativePickerOpen = false;
+let dragWaitBeforePickerMs = 5000;
 
 function toError(value: unknown): Error {
   if (value instanceof Error) return value;
@@ -262,14 +269,88 @@ function installNodeRuntimeShim(): void {
   globalObject.require = shim;
 }
 
+function waitForDragPaths(ms: number): Promise<string[] | undefined> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (paths: string[] | undefined) => {
+      if (settled) return;
+      settled = true;
+      if (dragPathWaiter === onDrag) dragPathWaiter = null;
+      clearTimeout(timer);
+      resolve(paths);
+    };
+
+    const timer = window.setTimeout(() => finish(undefined), ms);
+    const onDrag = (paths: string[] | undefined) => finish(paths);
+    dragPathWaiter = onDrag;
+  });
+}
+
+/** Queue paths for the next `chooseSendFiles` (e.g. drag before waiter is installed). */
+export function queueTrzszDragPaths(paths: string[]): void {
+  if (paths.length > 0) pendingDragPaths = paths;
+}
+
+/**
+ * Deliver native file paths from a terminal drag-drop.
+ * Returns true when consumed by a waiting remote `trz` handshake.
+ * Does not queue — callers that need queueing should use `queueTrzszDragPaths`.
+ */
+export function notifyTrzszDragPaths(paths: string[]): boolean {
+  if (paths.length === 0) return false;
+  if (dragPathWaiter) {
+    const resolve = dragPathWaiter;
+    dragPathWaiter = null;
+    resolve(paths);
+    return true;
+  }
+  return false;
+}
+
 async function chooseSendFiles(directory?: boolean): Promise<string[] | undefined> {
-  const selected = await invokeNative<string[] | null>('pick_open_files', { directory: !!directory });
-  return selected ?? undefined;
+  if (pendingDragPaths?.length) {
+    const paths = pendingDragPaths;
+    pendingDragPaths = null;
+    return paths;
+  }
+
+  const fromDrag = await waitForDragPaths(dragWaitBeforePickerMs);
+  if (fromDrag?.length) return fromDrag;
+
+  if (nativePickerOpen) return undefined;
+  nativePickerOpen = true;
+  try {
+    const selected = await invokeNative<string[] | null>('pick_open_files', { directory: !!directory });
+    return selected ?? undefined;
+  } finally {
+    nativePickerOpen = false;
+  }
 }
 
 async function chooseSaveDirectory(): Promise<string | undefined> {
   const selected = await invokeNative<string | null>('pick_directory');
   return selected ?? undefined;
+}
+
+/**
+ * On high-latency SSH, give the shell time to finish handling Ctrl+C from
+ * uploadFiles before starting `trz`. Do not delay protocol payloads.
+ */
+function wrapSendToServer(
+  send: (input: TrzszTerminalInput) => void,
+  sshSlowLink: boolean,
+): (input: TrzszTerminalInput) => void {
+  return (input) => {
+    if (
+      sshSlowLink
+      && typeof input === 'string'
+      && (input === 'trz\r' || input === 'trz -d\r')
+    ) {
+      window.setTimeout(() => send(input), 800);
+      return;
+    }
+    send(input);
+  };
 }
 
 export async function createTrzszFilter(options: TrzszFilterOptions): Promise<TrzszFilterInstance> {
@@ -279,9 +360,44 @@ export async function createTrzszFilter(options: TrzszFilterOptions): Promise<Tr
     return imported.TrzszFilter;
   });
   const TrzszFilter = await filterConstructorPromise;
-  return new TrzszFilter({
+
+  const sshSlowLink = !!options.sshSlowLink;
+  dragWaitBeforePickerMs = sshSlowLink ? 30_000 : 5_000;
+  // Keep pendingDragPaths across filter recreate so a drop just before
+  // session/filter swap is not lost; only clear an active waiter.
+  dragPathWaiter = null;
+
+  const inner = new TrzszFilter({
     ...options,
+    sendToServer: wrapSendToServer(options.sendToServer, sshSlowLink),
     chooseSendFiles,
     chooseSaveDirectory,
   });
+
+  return {
+    processServerOutput(output: TrzszTerminalOutput): void {
+      inner.processServerOutput(output);
+    },
+    processTerminalInput(input: string): void {
+      inner.processTerminalInput(input);
+    },
+    processBinaryInput(input: string): void {
+      inner.processBinaryInput(input);
+    },
+    setTerminalColumns(columns: number): void {
+      inner.setTerminalColumns(columns);
+    },
+    isTransferringFiles(): boolean {
+      return inner.isTransferringFiles();
+    },
+    stopTransferringFiles(): void {
+      inner.stopTransferringFiles();
+    },
+    uploadFiles(items: string[] | DataTransferItemList): Promise<void> {
+      // Direct path upload — drop any stale queued drag so the next remote
+      // `trz` handshake does not reuse the wrong files.
+      if (Array.isArray(items)) pendingDragPaths = null;
+      return inner.uploadFiles(items);
+    },
+  };
 }

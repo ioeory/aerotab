@@ -43,10 +43,11 @@ export function resolveDockTargetState(
 ): DockTargetState {
   if (!dockOpen) return { status: 'empty' };
 
+  // Prefer the active SSH pane; pin is only a fallback when the pane is not SSH.
   if (pane?.sshProfile) {
     return {
       status: 'ready',
-      target: pinned ?? { name: pane.title || 'SSH session', ssh: pane.sshProfile },
+      target: { name: pane.title || 'SSH session', ssh: pane.sshProfile },
     };
   }
 

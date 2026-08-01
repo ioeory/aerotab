@@ -106,6 +106,21 @@ export function collectProfilesInFolder(folder: ProfileTreeFolder): StoredProfil
   return out;
 }
 
+/** Profiles visible in the sidebar tree (respects collapsed folders). Depth-first. */
+export function collectVisibleProfiles(
+  folder: ProfileTreeFolder,
+  collapsed: Set<string>,
+  forceExpanded: Set<string> = new Set(),
+): StoredProfile[] {
+  const out: StoredProfile[] = [...folder.profiles];
+  for (const child of folder.folders) {
+    const expanded = forceExpanded.has(child.path) || !collapsed.has(child.path);
+    if (!expanded) continue;
+    out.push(...collectVisibleProfiles(child, collapsed, forceExpanded));
+  }
+  return out;
+}
+
 /** All folder paths that contain at least one profile (for expand-on-search). */
 export function collectFolderPaths(node: ProfileTreeFolder): string[] {
   const paths: string[] = [];

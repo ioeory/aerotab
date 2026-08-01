@@ -29,6 +29,7 @@
     type LocalDragPayload,
     type RemoteDragPayload,
   } from '../lib/sftpLocal';
+  import { resolveDropFilePaths } from '../lib/terminalFileDrag';
 
   interface SftpSource {
     name: string;
@@ -335,28 +336,53 @@
   async function handleLocalPaneDrop(e: DragEvent) {
     e.preventDefault();
     const remoteRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE);
-    if (!remoteRaw || !sessionId) return;
-    const payload = parseRemoteDrag(remoteRaw);
-    if (!payload) return;
-    if (payload.kind === 'Dir') {
-      await downloadDirectoryToLocal(payload.path, [payload.name], localCwd);
+    if (remoteRaw && sessionId) {
+      const payload = parseRemoteDrag(remoteRaw);
+      if (!payload) return;
+      if (payload.kind === 'Dir') {
+        await downloadDirectoryToLocal(payload.path, [payload.name], localCwd);
+        return;
+      }
+      const dest = joinLocalPath(localCwd, payload.name);
+      const id = nextTransferId();
+      downloadEntries.set(id, {
+        name: payload.name,
+        kind: 'File',
+        size: payload.size,
+        mode: 0,
+        mtime: null,
+      });
+      enqueueDownloadTransfer(
+        { name: payload.name, kind: 'File', size: payload.size, mode: 0, mtime: null },
+        payload.path,
+        payload.name,
+        { id, localPath: dest },
+      );
       return;
     }
-    const dest = joinLocalPath(localCwd, payload.name);
-    const id = nextTransferId();
-    downloadEntries.set(id, {
-      name: payload.name,
-      kind: 'File',
-      size: payload.size,
-      mode: 0,
-      mtime: null,
-    });
-    enqueueDownloadTransfer(
-      { name: payload.name, kind: 'File', size: payload.size, mode: 0, mtime: null },
-      payload.path,
-      payload.name,
-      { id, localPath: dest },
-    );
+    await handleLocalOsFileDrop(e);
+  }
+
+  async function handleLocalOsFileDrop(e: DragEvent) {
+    if (!localCwd) return;
+    const dt = e.dataTransfer;
+    if (!dt || dt.files.length === 0) return;
+    const invoke = tauriInvoke<void>;
+    if (!invoke) {
+      onError(i18n.t('sftp.localCopyNeedsNative'));
+      return;
+    }
+    try {
+      const paths = await resolveDropFilePaths(dt);
+      for (const src of paths) {
+        const name = src.split(/[/\\]/).pop() || 'file';
+        const dest = joinLocalPath(localCwd, name);
+        await invoke('local_copy_file', { from: src, to: dest });
+      }
+      await refreshLocal();
+    } catch (err) {
+      onError(i18n.t('sftp.localCopyFailed', { message: (err as Error).message }));
+    }
   }
 
   async function enqueueUploadFromLocal(payload: LocalDragPayload) {
@@ -1822,7 +1848,7 @@
             onGoHome={() => { void localGoHome(); }}
             onDragOverPane={preventDragDefaults}
             onDropRemote={(e) => { void handleLocalPaneDrop(e); }}
-            onDropFiles={() => {}}
+            onDropFiles={(e) => { void handleLocalOsFileDrop(e); }}
             {onError}
           />
         </div>

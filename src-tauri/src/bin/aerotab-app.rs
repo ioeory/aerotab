@@ -345,6 +345,47 @@ async fn write_chunk_to_path(
     Ok(())
 }
 
+fn safe_drop_filename(name: &str) -> String {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("drop");
+    let sanitized: String = base
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+        .collect();
+    if sanitized.is_empty() {
+        "drop".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Stage a drag-dropped file (macOS WKWebView has no `File.path`) for trzsz upload.
+#[tauri::command]
+async fn local_stage_drop_file(
+    app: tauri::AppHandle,
+    name: String,
+    data: String,
+) -> Result<String, String> {
+    let safe_name = safe_drop_filename(&name);
+    let temp_root = app
+        .path()
+        .cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("drop-staging");
+    tokio::fs::create_dir_all(&temp_root)
+        .await
+        .map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = temp_root.join(format!("{stamp}-{safe_name}"));
+    write_chunk_to_path(&path, 0, &data, true).await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn pick_save_file(default_name: Option<String>) -> Result<Option<String>, String> {
     let _guard = lock_file_dialog()?;
@@ -570,6 +611,14 @@ async fn local_remove(path: String, recursive: Option<bool>) -> Result<bool, Str
 #[tauri::command]
 async fn local_rename(from: String, to: String) -> Result<(), String> {
     tokio::fs::rename(from, to).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn local_copy_file(from: String, to: String) -> Result<(), String> {
+    tokio::fs::copy(&from, &to)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -901,9 +950,11 @@ fn main() {
             local_mkdir,
             local_remove,
             local_rename,
+            local_copy_file,
             local_mkdir_relative,
             local_write_chunk,
             local_write_relative_chunk,
+            local_stage_drop_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

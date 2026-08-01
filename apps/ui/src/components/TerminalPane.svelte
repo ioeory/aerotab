@@ -63,11 +63,18 @@
   import { appConfirm } from '../lib/confirm.svelte';
   import { hotkeys } from '../lib/hotkeys';
   import { isPaneDragActive } from '../lib/paneDrag';
+  import {
+    allowTerminalFileDragOver,
+    installTerminalFileDrag,
+    resolveDropFilePaths,
+  } from '../lib/terminalFileDrag';
   import { clampMenuToViewport } from '../lib/contextMenuPosition';
   import { portal } from '../lib/portal';
   import { TerminalTransferDetector, type TerminalTransferDetection } from '../lib/terminalTransfer';
   import {
     createTrzszFilter,
+    notifyTrzszDragPaths,
+    queueTrzszDragPaths,
     type TrzszFilterInstance,
     type TrzszTerminalInput,
     type TrzszTerminalOutput,
@@ -85,6 +92,7 @@
   import { scheduleTerminalFit } from '../lib/terminalFit';
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
   import { NativeEngineController, spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
+  import { sessionEndedGate } from '../lib/sessionEndedGate.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -178,6 +186,8 @@
   let transferNoticeHandle: number | null = null;
   let transferFilter = $state<TrzszFilterInstance | null>(null);
   let transferFilterGeneration = 0;
+  let cleanupFileDrag: (() => void) | null = null;
+  let sessionWriteChain: Promise<void> = Promise.resolve();
   const transferDetector = new TerminalTransferDetector();
   const canOpenSftp = $derived(session.kind === 'Ssh' && !!onOpenSftp);
   const canOpenExternalNative = $derived(
@@ -187,6 +197,15 @@
   function isLocalWindowsShell(): boolean {
     if (session.kind !== 'LocalShell') return false;
     return typeof navigator !== 'undefined' && /Win/i.test(navigator.userAgent);
+  }
+
+  function isSshSession(): boolean {
+    return session.kind === 'Ssh' || session.kind === 'ssh';
+  }
+
+  function trzszDragInitTimeoutMs(): number {
+    // Remote SSH needs more time for trz handshake over higher-latency links.
+    return isSshSession() ? 30_000 : 8_000;
   }
 
   // Liveness state. Flips to true when backend reports session ended.
@@ -230,6 +249,13 @@
     tabs.markActivity(session.id, 'bell');
     focusExitedOverlay();
   }
+
+  $effect(() => {
+    if (active) sessionEndedGate.setActiveExited(exited);
+    return () => {
+      if (active) sessionEndedGate.setActiveExited(false);
+    };
+  });
 
   function focusExitedOverlay() {
     requestAnimationFrame(() => exitedOverlayEl?.focus());
@@ -353,8 +379,7 @@
         max_chunks: maxChunks,
       });
       if (epoch !== pollEpoch || !term) return false;
-      for (const c of r.chunks) {
-        const bytes = b64decode(c);
+      for (const bytes of concatPollChunks(r.chunks)) {
         const text = decoder.decode(bytes);
         inspectTransferOutput(text);
         const replaySeq = appendReplayChunk(session.id, bytes);
@@ -602,18 +627,36 @@
     }
   }
 
-  function sendSessionInput(input: TrzszTerminalInput): void {
+  async function sendSessionInputAsync(input: TrzszTerminalInput): Promise<void> {
     if (typeof input === 'string') {
       if (input.includes('\x03')) {
         interruptOutputCooldownUntil = performance.now() + INTERRUPT_OUTPUT_COOLDOWN_MS;
       }
-      void sendSessionBytes(encoder.encode(input))
-        .catch((err: unknown) => console.warn('terminal write failed', err));
+      await sendSessionBytes(encoder.encode(input));
       return;
     }
-    void terminalInputBytes(input)
-      .then(sendSessionBytes)
+    await sendSessionBytes(await terminalInputBytes(input));
+  }
+
+  function sendSessionInput(input: TrzszTerminalInput): void {
+    sessionWriteChain = sessionWriteChain
+      .then(() => sendSessionInputAsync(input))
       .catch((err: unknown) => console.warn('terminal write failed', err));
+  }
+
+  function concatPollChunks(chunks: string[]): Uint8Array[] {
+    if (chunks.length <= 1) {
+      return chunks.map((c) => b64decode(c));
+    }
+    const parts = chunks.map((c) => b64decode(c));
+    const total = parts.reduce((sum, part) => sum + part.length, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      merged.set(part, offset);
+      offset += part.length;
+    }
+    return [merged];
   }
 
   function writeTerminalOutput(output: TrzszTerminalOutput): void {
@@ -646,17 +689,22 @@
     }
   }
 
-  async function configureTransferFilter(enabled: boolean): Promise<void> {
+  async function configureTransferFilter(enabled: boolean, forceRecreate = false): Promise<void> {
     const generation = ++transferFilterGeneration;
     if (!enabled) {
       if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
       transferFilter = null;
       return;
     }
-    if (transferFilter) {
+    if (transferFilter && !forceRecreate) {
       transferFilter.setTerminalColumns(term?.cols ?? 80);
       return;
     }
+    if (transferFilter) {
+      if (transferFilter.isTransferringFiles()) transferFilter.stopTransferringFiles();
+      transferFilter = null;
+    }
+    sessionWriteChain = Promise.resolve();
     try {
       const filter = await createTrzszFilter({
         writeToTerminal: writeTerminalOutput,
@@ -664,7 +712,8 @@
         terminalColumns: term?.cols ?? 80,
         isWindowsShell: isLocalWindowsShell(),
         maxDataChunkSize: 1024 * 1024,
-        dragInitTimeout: 8000,
+        dragInitTimeout: trzszDragInitTimeoutMs(),
+        sshSlowLink: isSshSession(),
       });
       if (generation !== transferFilterGeneration || !transferDetectionEnabled) {
         if (filter.isTransferringFiles()) filter.stopTransferringFiles();
@@ -761,6 +810,11 @@
         };
     term.loadAddon(new WebLinksAddon(linkHandler));
     term.open(host);
+    cleanupFileDrag?.();
+    cleanupFileDrag = installTerminalFileDrag(host, {
+      onDragOver: onTransferDragOver,
+      onDrop: (ev) => { void onTransferDrop(ev); },
+    });
     replayCachedOutput(session.id, true);
     await applyRenderer(cfg.renderer);
     scheduleSafeFit();
@@ -793,7 +847,9 @@
     // chain is somehow stale.
     const settingsListener = () => {
       invalidateTerminalSettingsCache();
-      if (!active || !tabVisible) return;
+      // Reload on all mounted panes (including inactive splits) so enabling
+      // experimental transfer detection applies without refocusing each pane.
+      if (!term) return;
       void reloadSettingsLive();
     };
     document.addEventListener('aerotab:settings-changed', settingsListener);
@@ -924,6 +980,8 @@
     exitedOverlayEl = null;
     lastTabVisibleForReplay = tabVisible;
     replayCursorSeq = 0;
+    sessionWriteChain = Promise.resolve();
+    if (term) void configureTransferFilter(transferDetectionEnabled, true);
   });
 
   $effect(() => {
@@ -999,7 +1057,7 @@
 
   $effect(() => {
     void settingsRev;
-    if (!term || !active) return;
+    if (!term) return;
     void reloadSettingsLive();
   });
 
@@ -1010,6 +1068,8 @@
     const filterToStop = transferFilter;
     cleanupHost?.();
     cleanupHost = null;
+    cleanupFileDrag?.();
+    cleanupFileDrag = null;
     cleanupSearchListener?.();
     cleanupSearchListener = null;
     macTextareaGuard?.();
@@ -1165,22 +1225,54 @@
       if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
       return;
     }
-    if (!canUseTrzszTransfer) return;
-    if (!ev.dataTransfer?.types.includes('Files')) return;
-    ev.preventDefault();
-    ev.dataTransfer.dropEffect = 'copy';
+    // Accept drops on the focused pane even when detection is off, so we can
+    // surface a clear "enable in Settings" error instead of a silent no-op.
+    allowTerminalFileDragOver(ev, active && !exited);
   }
 
   async function onTransferDrop(ev: DragEvent) {
-    if (!canUseTrzszTransfer || !transferFilter) return;
-    const items = ev.dataTransfer?.items;
-    if (!items?.length) return;
+    if (isPaneDragActive()) return;
+    if (!active || exited) return;
     ev.preventDefault();
+    ev.stopPropagation();
+    const dt = ev.dataTransfer;
+    if (!dt) return;
     clearTransferNotice();
+
+    if (!transferDetectionEnabled) {
+      onError?.(i18n.t('terminal.transferDisabled'));
+      return;
+    }
+    if (!transferFilter) {
+      onError?.(i18n.t('terminal.transferNotReady'));
+      return;
+    }
+
     try {
-      await transferFilter.uploadFiles(items);
+      const paths = await resolveDropFilePaths(dt);
+      if (transferFilter.isTransferringFiles()) {
+        // Handshake already running — feed paths into chooseSendFiles waiter/queue.
+        if (paths.length > 0) {
+          if (!notifyTrzszDragPaths(paths)) queueTrzszDragPaths(paths);
+        }
+        return;
+      }
+
+      if (paths.length > 0) {
+        // Prefer an in-flight remote `trz` waiter; otherwise start upload ourselves.
+        if (notifyTrzszDragPaths(paths)) return;
+        await transferFilter.uploadFiles(paths);
+        return;
+      }
+      const items = dt.items;
+      if (items && items.length > 0) {
+        await transferFilter.uploadFiles(items);
+        return;
+      }
+      onError?.(i18n.t('terminal.transferNoPaths'));
     } catch (err) {
       console.warn('trzsz upload failed', err);
+      onError?.(i18n.t('terminal.transferFailed', { message: (err as Error).message }));
     }
   }
 

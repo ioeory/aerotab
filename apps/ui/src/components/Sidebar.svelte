@@ -25,6 +25,7 @@
     buildProfileTree,
     collectProfileGroupPaths,
     collectProfilesInFolder,
+    collectVisibleProfiles,
     expandPathsForGroup,
     expandPathsForMatches,
     loadCollapsedPaths,
@@ -1126,9 +1127,34 @@
     onOpenSftp: (p: StoredProfile) => { openSftp(p); },
   };
 
+  function moveProfileFocus(delta: number) {
+    const visible = collectVisibleProfiles(profileTree, collapsedPaths, forceExpandedPaths);
+    if (visible.length === 0) return;
+    const currentId = sidebarFocus.focusedProfileId;
+    let idx = currentId ? visible.findIndex((p) => p.id === currentId) : -1;
+    if (idx < 0) idx = delta > 0 ? -1 : 0;
+    const next = visible[Math.max(0, Math.min(visible.length - 1, idx + delta))];
+    if (!next) return;
+    focusProfile(next);
+    selectedProfileIds = new Set([next.id]);
+    selectionAnchorId = next.id;
+  }
+
   function onProfileKeydown(p: StoredProfile, ev: KeyboardEvent) {
     if (!sidebarFocus.isListFocused()) return;
     focusProfile(p);
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      moveProfileFocus(ev.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (ev.key === 'Enter' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void openProfilesForAction(p, 'new-tab');
+      return;
+    }
     if (handleProfileSidebarShortcut(p, ev, profileShortcutHandlers)) {
       ev.preventDefault();
       ev.stopPropagation();

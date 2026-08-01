@@ -4,6 +4,7 @@ import { mount } from 'svelte';
 import './app.css';
 import App from './App.svelte';
 import { revealMainWindow } from './lib/revealWindow';
+import { installWebKitFileDropGuard } from './lib/terminalFileDrag';
 
 const target = document.getElementById('root');
 if (!target) throw new Error('#root not found');
@@ -20,9 +21,16 @@ document.addEventListener(
   { capture: true },
 );
 
+// WKWebView opens dropped images in-page unless document-level preventDefault runs.
+const cleanupFileDropGuard = installWebKitFileDropGuard();
+
 mount(App, { target });
 
 // Focus the main window after the first frame (setup also shows it; this is a backup).
 requestAnimationFrame(() => {
   revealMainWindow();
 });
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => cleanupFileDropGuard());
+}
