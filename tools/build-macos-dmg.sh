@@ -7,6 +7,7 @@
 #   TARGET    Rust triple override. Examples:
 #               x86_64-apple-darwin   — Intel DMG from Apple Silicon
 #               aarch64-apple-darwin  — ARM DMG (usually native on M-series)
+#   SKIP_NPM_INSTALL  Set to 1 to skip the apps/ui dependency install
 #   TAURI_BUNDLER_DMG_IGNORE_CI  Set to true in CI to skip Finder AppleScript layout
 set -euo pipefail
 
@@ -50,6 +51,30 @@ if ! xcode-select -p >/dev/null 2>&1; then
   echo "Xcode Command Line Tools are required: xcode-select --install" >&2
   exit 1
 fi
+
+# --- Frontend dependencies ----------------------------------------------------
+
+# `beforeBuildCommand` runs `npx vite build`, which fails outright when
+# apps/ui/node_modules is missing.
+ensure_frontend_deps() {
+  if [[ "${SKIP_NPM_INSTALL:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -d apps/ui/node_modules/vite ]]; then
+    return 0
+  fi
+  echo "Installing apps/ui dependencies..."
+  (
+    cd apps/ui
+    if [[ -f package-lock.json ]]; then
+      npm ci --no-audit --no-fund
+    else
+      npm install --no-audit --no-fund
+    fi
+  )
+}
+
+ensure_frontend_deps
 
 # --- Resolve target / artifact path ------------------------------------------
 

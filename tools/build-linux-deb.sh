@@ -4,6 +4,7 @@
 # Env:
 #   BUNDLES   Tauri bundle list (default: deb). Example: BUNDLES=deb,appimage
 #   FEATURES  Cargo features (default: desktop)
+#   SKIP_NPM_INSTALL  Set to 1 to skip the apps/ui dependency install
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -54,6 +55,32 @@ sudo apt-get install -y \
 APT
   exit 1
 fi
+
+# --- Frontend dependencies ----------------------------------------------------
+
+# `beforeBuildCommand` runs `npx vite build`, which fails outright when
+# apps/ui/node_modules is missing.
+ensure_frontend_deps() {
+  if [[ "${SKIP_NPM_INSTALL:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -d apps/ui/node_modules/vite ]]; then
+    return 0
+  fi
+  echo "Installing apps/ui dependencies..."
+  (
+    cd apps/ui
+    if [[ -f package-lock.json ]]; then
+      npm ci --no-audit --no-fund
+    else
+      npm install --no-audit --no-fund
+    fi
+  )
+}
+
+ensure_frontend_deps
+
+# --- Build -------------------------------------------------------------------
 
 version=""
 if command -v jq >/dev/null 2>&1; then
