@@ -6,6 +6,7 @@
 //! [`KnownHosts`](known_hosts::KnownHosts) store (TOFU on first contact,
 //! strict match thereafter).
 
+pub mod ephemeral_agent;
 pub mod keys;
 pub mod known_hosts;
 pub mod sftp;
@@ -115,6 +116,8 @@ pub struct TrustingClient {
     x11_display: Option<String>,
     /// When true, accept OpenSSH agent forwarding channels and bridge them to the local agent.
     agent_forward: bool,
+    /// Optional `SSH_AUTH_SOCK` override (ephemeral agent for Direct transfer).
+    agent_sock: Option<String>,
     agent_channels: HashMap<ChannelId, AgentForwardChannel>,
 }
 
@@ -134,6 +137,7 @@ impl TrustingClient {
         x11_forward: bool,
         x11_display: Option<String>,
         agent_forward: bool,
+        agent_sock: Option<String>,
     ) -> Self {
         Self {
             host_port,
@@ -142,6 +146,7 @@ impl TrustingClient {
             x11_forward,
             x11_display,
             agent_forward,
+            agent_sock,
             agent_channels: HashMap::new(),
         }
     }
@@ -214,7 +219,7 @@ impl client::Handler for TrustingClient {
             session.close(channel);
             return Ok(());
         }
-        match connect_local_agent_stream().await {
+        match connect_local_agent_stream(self.agent_sock.as_deref()).await {
             Ok(agent) => {
                 self.agent_channels.insert(
                     channel,
@@ -400,26 +405,35 @@ async fn read_agent_packet(agent: &mut dyn LocalAgentStream) -> std::io::Result<
     Ok(packet)
 }
 
-async fn connect_local_agent_stream() -> std::io::Result<Box<dyn LocalAgentStream>> {
+async fn connect_local_agent_stream(
+    sock_override: Option<&str>,
+) -> std::io::Result<Box<dyn LocalAgentStream>> {
     #[cfg(unix)]
     {
-        let path = std::env::var("SSH_AUTH_SOCK").map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
-        })?;
+        let path = match sock_override {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => std::env::var("SSH_AUTH_SOCK").map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
+            })?,
+        };
         let stream = tokio::net::UnixStream::connect(path).await?;
         Ok(Box::new(stream))
     }
 
     #[cfg(windows)]
     {
-        let pipe = std::env::var("SSH_AUTH_SOCK")
-            .unwrap_or_else(|_| r"\.\pipe\openssh-ssh-agent".to_string());
+        let pipe = match sock_override {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => std::env::var("SSH_AUTH_SOCK")
+                .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string()),
+        };
         let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe)?;
         Ok(Box::new(stream))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
+        let _ = sock_override;
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "system ssh-agent is unavailable on this platform",
@@ -802,6 +816,7 @@ pub async fn connect_authenticated(
             false,
             None,
             false,
+            None,
         )
     })
     .await
@@ -812,7 +827,19 @@ pub async fn connect_authenticated_with_agent_forwarding(
     known_hosts: Option<KnownHosts>,
     transport: SshTransportSettings,
 ) -> Result<client::Handle<TrustingClient>, SshError> {
+    connect_authenticated_with_agent_forwarding_sock(profile, known_hosts, transport, None).await
+}
+
+/// Like [`connect_authenticated_with_agent_forwarding`], but bridges forwarded
+/// agent channels to `agent_sock` (ephemeral agent) when set.
+pub async fn connect_authenticated_with_agent_forwarding_sock(
+    profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+    transport: SshTransportSettings,
+    agent_sock: Option<String>,
+) -> Result<client::Handle<TrustingClient>, SshError> {
     let kh = known_hosts.clone();
+    let sock = agent_sock.clone();
     connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
         TrustingClient::new(
             format!("{}:{}", hop.host, hop.port),
@@ -820,6 +847,7 @@ pub async fn connect_authenticated_with_agent_forwarding(
             false,
             None,
             is_final,
+            if is_final { sock.clone() } else { None },
         )
     })
     .await
@@ -847,6 +875,7 @@ pub async fn connect_shell_with_known_hosts(
                 is_final && x11_enabled,
                 if is_final { x11_display.clone() } else { None },
                 false,
+                None,
             )
         })
         .await?;
