@@ -54,6 +54,8 @@ const TRAY_QUIT_ID: &str = "tray-quit";
 struct AppRpc {
     dispatcher: Arc<Dispatcher>,
     state: Arc<AppState>,
+    // Retain the lifecycle owner for the lifetime of the desktop application.
+    _mcp: Arc<aerotab_core::mcp::McpRuntime>,
 }
 
 struct DesktopWindowState {
@@ -884,9 +886,30 @@ fn main() {
                 false
             };
 
+            let mcp = Arc::new(aerotab_core::mcp::McpRuntime::new());
+            aerotab_core::mcp::register_rpc(&dispatcher, core_state.clone(), mcp.clone());
+            let saved_mcp = settings_store
+                .as_ref()
+                .and_then(|store| store.get("mcp").ok().flatten())
+                .map(serde_json::from_value::<aerotab_core::mcp::config::McpConfig>)
+                .transpose();
+            match saved_mcp {
+                Ok(Some(config)) => {
+                    if let Err(error) = rt.block_on(mcp.configure(
+                        config,
+                        core_state.clone(),
+                        dispatcher.clone(),
+                    )) {
+                        tracing::warn!(%error, "MCP startup failed; listener remains disabled");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "Invalid saved MCP configuration"),
+            }
             app.manage(AppRpc {
                 dispatcher,
                 state: core_state,
+                _mcp: mcp,
             });
             app.manage(DesktopWindowState {
                 settings: settings_store,

@@ -6,6 +6,7 @@
 //! [`KnownHosts`](known_hosts::KnownHosts) store (TOFU on first contact,
 //! strict match thereafter).
 
+pub mod agent;
 pub mod ephemeral_agent;
 pub mod keys;
 pub mod known_hosts;
@@ -29,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+pub use agent::AgentPreference;
 use known_hosts::{KnownHosts, KnownHostsError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +65,8 @@ pub enum AgentSource {
     /// The user's system agent (`SSH_AUTH_SOCK` / OpenSSH named pipe).
     #[default]
     System,
+    /// Follow the same saved agent preference used for SSH authentication.
+    Configured(AgentPreference),
     /// A per-transfer in-process agent holding only the destination key.
     InMemory(ephemeral_agent::InMemoryAgent),
 }
@@ -431,30 +435,12 @@ async fn connect_local_agent_stream(
         return Ok(Box::new(stream));
     }
 
-    #[cfg(unix)]
-    {
-        let path = std::env::var("SSH_AUTH_SOCK").map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
-        })?;
-        let stream = tokio::net::UnixStream::connect(path).await?;
-        Ok(Box::new(stream))
-    }
-
-    #[cfg(windows)]
-    {
-        let pipe = std::env::var("SSH_AUTH_SOCK")
-            .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe)?;
-        Ok(Box::new(stream))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "system ssh-agent is unavailable on this platform",
-        ))
-    }
+    let preference = match source {
+        AgentSource::Configured(preference) => *preference,
+        AgentSource::System => AgentPreference::System,
+        AgentSource::InMemory(_) => unreachable!("handled above"),
+    };
+    agent::connect(preference).await
 }
 
 fn random_x11_cookie() -> String {
@@ -537,6 +523,8 @@ pub async fn connect_shell(
 /// TCP/SSH timing applied to every new SSH dial (terminal, SFTP, tunnels).
 #[derive(Debug, Clone)]
 pub struct SshTransportSettings {
+    /// Local agent used for authentication and external-agent forwarding.
+    pub agent: AgentPreference,
     /// Client keepalive interval when no data is received from the server.
     pub keepalive_interval: Duration,
     /// Close after this many unanswered keepalives.
@@ -548,6 +536,7 @@ pub struct SshTransportSettings {
 impl Default for SshTransportSettings {
     fn default() -> Self {
         Self {
+            agent: AgentPreference::default(),
             // Tolerant defaults for high-latency / NAT links.
             keepalive_interval: Duration::from_secs(45),
             keepalive_max: 10,
@@ -568,6 +557,7 @@ pub fn ssh_config(transport: &SshTransportSettings) -> Arc<client::Config> {
 async fn authenticate_custom<H>(
     handle: &mut client::Handle<H>,
     profile: &SshProfile,
+    agent_preference: AgentPreference,
 ) -> Result<(), SshError>
 where
     H: client::Handler,
@@ -582,12 +572,12 @@ where
             key_path,
             passphrase,
         } => {
-            authenticate_public_key_with_fallback(handle, profile, key_path, passphrase.as_deref())
+            authenticate_public_key_with_fallback(handle, profile, key_path, passphrase.as_deref(), agent_preference)
                 .await?
         }
-        AuthMethod::Agent => match authenticate_agent_generic(handle, profile).await {
+        AuthMethod::Agent => match authenticate_agent_generic(handle, profile, agent_preference).await {
             Ok(authed) => authed,
-            Err(SshError::Agent(e)) => {
+            Err(SshError::Agent(e)) if matches!(agent_preference, AgentPreference::Auto | AgentPreference::System) => {
                 tracing::debug!("ssh agent unavailable ({e}); trying default private keys");
                 authenticate_default_public_keys(handle, &profile.user).await?
             }
@@ -598,7 +588,7 @@ where
                 russh::keys::decode_secret_key(pem, passphrase.as_deref())
                     .map_err(|e| e.to_string()),
             );
-            authenticate_loaded_key_with_fallback(handle, profile, loaded, "vault key").await?
+            authenticate_loaded_key_with_fallback(handle, profile, loaded, "vault key", agent_preference).await?
         }
         AuthMethod::VaultRef { .. } => {
             return Err(SshError::Connect(
@@ -618,6 +608,7 @@ async fn authenticate_public_key_with_fallback<H>(
     profile: &SshProfile,
     key_path: &std::path::Path,
     passphrase: Option<&str>,
+    agent_preference: AgentPreference,
 ) -> Result<bool, SshError>
 where
     H: client::Handler,
@@ -633,7 +624,7 @@ where
         None
     };
     let label = key_path.display().to_string();
-    authenticate_loaded_key_with_fallback(handle, profile, loaded, &label).await
+    authenticate_loaded_key_with_fallback(handle, profile, loaded, &label, agent_preference).await
 }
 
 async fn authenticate_loaded_key_with_fallback<H>(
@@ -641,6 +632,7 @@ async fn authenticate_loaded_key_with_fallback<H>(
     profile: &SshProfile,
     loaded: Option<Result<key::KeyPair, String>>,
     label: &str,
+    agent_preference: AgentPreference,
 ) -> Result<bool, SshError>
 where
     H: client::Handler,
@@ -675,7 +667,7 @@ where
         Err(e) => return Err(e),
     }
 
-    authenticate_agent_generic(handle, profile).await
+    authenticate_agent_generic(handle, profile, agent_preference).await
 }
 
 async fn authenticate_default_public_keys<H>(
@@ -716,38 +708,17 @@ where
 async fn authenticate_agent_generic<H>(
     handle: &mut client::Handle<H>,
     profile: &SshProfile,
+    preference: AgentPreference,
 ) -> Result<bool, SshError>
 where
     H: client::Handler,
     H::Error: From<russh::Error>,
 {
-    #[cfg(unix)]
-    {
-        let agent = AgentClient::connect_env()
-            .await
-            .map_err(|e| SshError::Agent(e.to_string()))?;
-        return authenticate_agent_client_generic(handle, &profile.user, agent).await;
-    }
-
-    #[cfg(windows)]
-    {
-        let pipe = std::env::var("SSH_AUTH_SOCK")
-            .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(pipe)
-            .map_err(|e| SshError::Agent(format!("connect openssh agent: {e}")))?;
-        let agent = AgentClient::connect(stream);
-        return authenticate_agent_client_generic(handle, &profile.user, agent).await;
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = handle;
-        let _ = profile;
-        Err(SshError::Agent(
-            "system ssh-agent is unavailable on this platform".into(),
-        ))
-    }
+    let stream = agent::connect(preference)
+        .await
+        .map_err(|e| SshError::Agent(e.to_string()))?;
+    let agent = AgentClient::connect(stream);
+    authenticate_agent_client_generic(handle, &profile.user, agent).await
 }
 
 async fn authenticate_agent_client_generic<H, R>(
@@ -830,7 +801,7 @@ where
                     .map_err(|e| SshError::Connect(format!("jump connect: {e}")))?
             }
         };
-        authenticate_custom(&mut handle, hop).await?;
+        authenticate_custom(&mut handle, hop, transport.agent).await?;
         prev_handle = Some(handle);
     }
 

@@ -14,6 +14,7 @@
   import ProfilesSection from './sections/ProfilesSection.svelte';
   import TerminalSection from './sections/TerminalSection.svelte';
   import AISection from './sections/AISection.svelte';
+  import McpSection from './sections/McpSection.svelte';
   import ColorSchemeSection from './sections/ColorSchemeSection.svelte';
   import ConfigSyncSection from './sections/ConfigSyncSection.svelte';
   import HotkeysSection from './sections/HotkeysSection.svelte';
@@ -30,6 +31,7 @@
     | 'profiles'
     | 'terminal'
     | 'ai'
+    | 'mcp'
     | 'colorscheme'
     | 'configsync'
     | 'hotkeys'
@@ -64,6 +66,7 @@
         { id: 'profiles', labelKey: 'settings.nav.profiles' },
         { id: 'terminal', labelKey: 'settings.nav.terminal' },
         { id: 'ai', labelKey: 'settings.nav.ai' },
+        { id: 'mcp', labelKey: 'settings.nav.mcp' },
         { id: 'colorscheme', labelKey: 'settings.nav.colorScheme' },
         { id: 'configsync', labelKey: 'settings.nav.configSync' },
         { id: 'hotkeys', labelKey: 'settings.nav.hotkeys' },
@@ -190,6 +193,8 @@
           <TerminalSection {rpc} {onError} />
         {:else if active === 'ai'}
           <AISection {rpc} {onError} />
+        {:else if active === 'mcp'}
+          <McpSection {rpc} {onError} />
         {:else if active === 'colorscheme'}
           <ColorSchemeSection {rpc} {onError} />
         {:else if active === 'configsync'}

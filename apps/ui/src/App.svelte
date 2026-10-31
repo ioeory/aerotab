@@ -75,7 +75,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.19-ui-20261101h';
+  const buildId = '0.2.20-ui-20261101a';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1649,6 +1649,61 @@
   async function refreshProfileList() {
     try { savedProfiles = await rpc.call<StoredProfile[]>('profile.list'); } catch { savedProfiles = []; }
   }
+
+  // MCP open_terminal only requests a visible connection. The backend must not
+  // create a hidden session first: connectProfile owns session + tab creation.
+  onMount(() => {
+    type McpOpenTerminal = { payload: { profileId: string } };
+    type EventApi = { listen: (name: string, handler: (event: McpOpenTerminal) => void) => Promise<() => void> };
+    type Internals = {
+      transformCallback: (handler: (event: McpOpenTerminal) => void) => number;
+      unregisterCallback: (id: number) => void;
+      invoke: <T>(command: string, args: Record<string, unknown>) => Promise<T>;
+    };
+    const host = window as unknown as {
+      __TAURI__?: { event?: EventApi };
+      __TAURI_INTERNALS__?: Internals;
+    };
+    const eventName = 'aerotab:mcp-open-terminal';
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const handler = (event: McpOpenTerminal) => {
+      const profileId = event.payload?.profileId;
+      if (disposed || typeof profileId !== 'string' || !profileId) return;
+      void (async () => {
+        try {
+          const profiles = await rpc.call<StoredProfile[]>('profile.list');
+          const profile = profiles.find((candidate) => candidate.id === profileId);
+          if (!profile || (profile.kind && profile.kind !== 'ssh')) {
+            throw new Error(i18n.t('mcp.profileUnavailable'));
+          }
+          if (!disposed) await connectProfile(profile);
+        } catch (error) { onError(`MCP: ${(error as Error).message}`); }
+      })();
+    };
+    void (async () => {
+      try {
+        if (host.__TAURI__?.event?.listen) {
+          unlisten = await host.__TAURI__.event.listen(eventName, handler);
+        } else if (host.__TAURI_INTERNALS__?.transformCallback) {
+          // Tauri 2 without withGlobalTauri: match @tauri-apps/api/event wire format.
+          const internal = host.__TAURI_INTERNALS__;
+          const callback = internal.transformCallback(handler);
+          try {
+            const eventId = await internal.invoke<number>('plugin:event|listen', {
+              event: eventName, target: { kind: 'Any' }, handler: callback,
+            });
+            unlisten = () => {
+              internal.unregisterCallback(callback);
+              void internal.invoke('plugin:event|unlisten', { event: eventName, eventId }).catch(() => {});
+            };
+          } catch (error) { internal.unregisterCallback(callback); throw error; }
+        }
+        if (disposed) unlisten?.();
+      } catch (error) { if (!disposed) onError(`MCP: ${(error as Error).message}`); }
+    })();
+    return () => { disposed = true; unlisten?.(); };
+  });
 
   onMount(() => {
     // Wire action handlers (M5). Bindings are owned by HotkeyManager and

@@ -51,6 +51,9 @@ pub const LOCAL_ONLY_SETTINGS_KEYS: &[&str] = &[
     // Engine config + backend secrets; importing a redacted copy would wipe
     // local credentials after the first `sync.now`.
     "sync",
+    // MCP listening address, TLS paths, roots, and grants are device-local security policy.
+    "mcp",
+    "mcp.",
     // Legacy location of the run log (now in the `local` tree).
     "syncHistory",
     // Per-device session state.
@@ -541,6 +544,9 @@ mod tests {
     #[test]
     fn local_only_keys_are_recognised() {
         assert!(is_local_only_key("sync"));
+        assert!(is_local_only_key("mcp"));
+        assert!(is_local_only_key("mcp.endpoint"));
+        assert_eq!(settings_group_for_key("mcp"), None);
         assert!(is_local_only_key("syncHistory"));
         assert!(is_local_only_key("openTabs"));
         assert!(is_local_only_key("diagnostics"));

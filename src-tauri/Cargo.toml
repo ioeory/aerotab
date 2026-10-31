@@ -52,6 +52,14 @@ quick-xml = "0.37"
 wasmi = { workspace = true }
 encoding_rs = "0.8"
 
+# Official MCP SDK, Streamable HTTP and authenticated TLS listener.
+rmcp = { version = "=0.8.5", default-features = false, features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+axum = "0.8"
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+subtle = "2"
+tokio-util = "0.7"
+
 tauri = { version = "2", optional = true , features = ["tray-icon"] }
 tauri-plugin-updater = { version = "2", optional = true }
 rfd = { version = "0.15", optional = true }
@@ -68,6 +76,9 @@ wat = "1"
 windows = { version = "0.58", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Memory",
+  "Win32_System_DataExchange",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

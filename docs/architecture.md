@@ -24,6 +24,10 @@
 └─────────────────────────────────────────────┘
 ```
 
+## MCP integration
+
+The optional MCP server exposes an allowlisted, permission-gated adapter over the existing core. Streamable HTTP runs on the desktop async runtime; `aerotab-mcp` provides stdio integration. Listener settings and permissions are device-local, and authentication tokens remain in the OS keyring. Non-loopback listeners require explicit consent and TLS. See [mcp.md](mcp.md).
+
 ## Threading model
 
 - **Main thread**: Tauri runtime + UI event pump.

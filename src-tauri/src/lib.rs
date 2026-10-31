@@ -16,6 +16,7 @@ pub mod desktop_session;
 pub mod error;
 pub mod import;
 pub mod ipc;
+pub mod mcp;
 pub mod migrate;
 pub mod native_terminal;
 pub mod plugins;
