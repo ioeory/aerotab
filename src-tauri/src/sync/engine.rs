@@ -381,21 +381,21 @@ impl SyncEngine {
             remote.writer.as_bytes() > local.writer.as_bytes()
         };
 
-        let chosen_payload;
-        let chosen_tombstone;
-        let chosen_updated;
-        let chosen_writer;
-        if pick_remote {
-            chosen_payload = remote.payload;
-            chosen_tombstone = remote.tombstone;
-            chosen_updated = remote.updated_at_ms;
-            chosen_writer = remote.writer;
+        let (chosen_payload, chosen_tombstone, chosen_updated, chosen_writer) = if pick_remote {
+            (
+                remote.payload,
+                remote.tombstone,
+                remote.updated_at_ms,
+                remote.writer,
+            )
         } else {
-            chosen_payload = local.payload.clone();
-            chosen_tombstone = local.tombstone;
-            chosen_updated = local.updated_at_ms;
-            chosen_writer = local.writer;
-        }
+            (
+                local.payload.clone(),
+                local.tombstone,
+                local.updated_at_ms,
+                local.writer,
+            )
+        };
 
         local.vv.merge(&remote.vv);
         local.vv.bump(self.device_id);

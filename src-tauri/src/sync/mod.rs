@@ -103,6 +103,8 @@ pub enum SyncError {
     NotImplemented(&'static str),
 }
 
+// `async_trait` adds a bare `#[must_use]` to required methods returning boxed futures.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SyncBackend: Send + Sync {
     async fn list(&self, group: Group) -> Result<Vec<RecordId>, SyncError>;

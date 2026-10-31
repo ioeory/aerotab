@@ -17,6 +17,8 @@ use uuid::Uuid;
 use super::engine::LocalRecord;
 use super::{Group, RecordId, SyncError};
 
+// `async_trait` adds a bare `#[must_use]` to required methods returning boxed futures.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SyncStore: Send + Sync {
     /// Loads every persisted record. Called once on engine startup.
