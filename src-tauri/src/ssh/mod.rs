@@ -572,23 +572,43 @@ where
             key_path,
             passphrase,
         } => {
-            authenticate_public_key_with_fallback(handle, profile, key_path, passphrase.as_deref(), agent_preference)
-                .await?
+            authenticate_public_key_with_fallback(
+                handle,
+                profile,
+                key_path,
+                passphrase.as_deref(),
+                agent_preference,
+            )
+            .await?
         }
-        AuthMethod::Agent => match authenticate_agent_generic(handle, profile, agent_preference).await {
-            Ok(authed) => authed,
-            Err(SshError::Agent(e)) if matches!(agent_preference, AgentPreference::Auto | AgentPreference::System) => {
-                tracing::debug!("ssh agent unavailable ({e}); trying default private keys");
-                authenticate_default_public_keys(handle, &profile.user).await?
+        AuthMethod::Agent => {
+            match authenticate_agent_generic(handle, profile, agent_preference).await {
+                Ok(authed) => authed,
+                Err(SshError::Agent(e))
+                    if matches!(
+                        agent_preference,
+                        AgentPreference::Auto | AgentPreference::System
+                    ) =>
+                {
+                    tracing::debug!("ssh agent unavailable ({e}); trying default private keys");
+                    authenticate_default_public_keys(handle, &profile.user).await?
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
-        },
+        }
         AuthMethod::PrivateKeyMemory { pem, passphrase } => {
             let loaded = Some(
                 russh::keys::decode_secret_key(pem, passphrase.as_deref())
                     .map_err(|e| e.to_string()),
             );
-            authenticate_loaded_key_with_fallback(handle, profile, loaded, "vault key", agent_preference).await?
+            authenticate_loaded_key_with_fallback(
+                handle,
+                profile,
+                loaded,
+                "vault key",
+                agent_preference,
+            )
+            .await?
         }
         AuthMethod::VaultRef { .. } => {
             return Err(SshError::Connect(

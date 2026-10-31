@@ -89,13 +89,29 @@ fn read_endpoint(dir: &std::path::Path) -> anyhow::Result<Option<Endpoint>> {
 
 fn validate_url(raw: &str, explicit: bool) -> anyhow::Result<reqwest::Url> {
     let url = reqwest::Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid MCP endpoint URL"))?;
-    anyhow::ensure!(url.username().is_empty() && url.password().is_none(), "MCP endpoint must not contain credentials");
-    anyhow::ensure!(url.fragment().is_none() && url.query().is_none(), "MCP endpoint must not contain a query or fragment");
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "MCP endpoint must not contain credentials"
+    );
+    anyhow::ensure!(
+        url.fragment().is_none() && url.query().is_none(),
+        "MCP endpoint must not contain a query or fragment"
+    );
     let local = url.host_str().is_some_and(|host| {
-        host == "localhost" || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
     });
-    anyhow::ensure!(url.scheme() == "https" || (url.scheme() == "http" && local), "MCP requires HTTPS except on loopback");
-    anyhow::ensure!(explicit || local, "discovered MCP endpoint must be loopback; use --url for an explicit remote endpoint");
+    anyhow::ensure!(
+        url.scheme() == "https" || (url.scheme() == "http" && local),
+        "MCP requires HTTPS except on loopback"
+    );
+    anyhow::ensure!(
+        explicit || local,
+        "discovered MCP endpoint must be loopback; use --url for an explicit remote endpoint"
+    );
     anyhow::ensure!(url.host_str().is_some(), "MCP endpoint requires a host");
     Ok(url)
 }
@@ -111,20 +127,25 @@ fn process_alive(pid: u32) -> bool {
             .args(["-0", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status().map_or(true, |status| status.success())
+            .status()
+            .map_or(true, |status| status.success())
     }
     #[cfg(windows)]
     {
         // Failure to inspect a process must never authorize a headless fallback.
         std::process::Command::new("tasklist.exe")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output().map_or(true, |output| {
-                !output.status.success() || String::from_utf8_lossy(&output.stdout)
-                    .contains(&format!("\"{pid}\""))
+            .output()
+            .map_or(true, |output| {
+                !output.status.success()
+                    || String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
             })
     }
     #[cfg(not(any(unix, windows)))]
-    { let _ = pid; true }
+    {
+        let _ = pid;
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -163,12 +184,18 @@ fn proxy_error(error: rmcp::service::ServiceError) -> rmcp::ErrorData {
 }
 
 async fn proxy(url: reqwest::Url) -> anyhow::Result<()> {
-    use rmcp::{transport::streamable_http_client::StreamableHttpClientTransportConfig, ServiceExt};
+    use rmcp::{
+        transport::streamable_http_client::StreamableHttpClientTransportConfig, ServiceExt,
+    };
     let token = match std::env::var("AEROTAB_MCP_TOKEN") {
         Ok(token) if !token.trim().is_empty() => token,
         Ok(_) => anyhow::bail!("AEROTAB_MCP_TOKEN is empty"),
         Err(std::env::VarError::NotPresent) => aerotab_core::secret::get_secret("mcp.apiKey")
-            .map_err(|_| anyhow::anyhow!("MCP API token unavailable; configure the desktop keyring or AEROTAB_MCP_TOKEN"))?,
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "MCP API token unavailable; configure the desktop keyring or AEROTAB_MCP_TOKEN"
+                )
+            })?,
         Err(_) => anyhow::bail!("AEROTAB_MCP_TOKEN must be valid UTF-8"),
     };
     anyhow::ensure!(!token.trim().is_empty(), "MCP API token is empty");
@@ -188,7 +215,10 @@ async fn proxy(url: reqwest::Url) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("desktop MCP connection timed out; no headless fallback attempted"))?
         .map_err(|_| anyhow::anyhow!("desktop MCP connection failed; verify enablement, API token and TLS trust; no headless fallback attempted"))?;
     let info = upstream.peer_info().cloned().unwrap_or_default();
-    let handler = HttpProxy { peer: upstream.peer().clone(), info };
+    let handler = HttpProxy {
+        peer: upstream.peer().clone(),
+        info,
+    };
     let service = handler.serve(rmcp::transport::stdio()).await?;
     let result = service.waiting().await;
     let _ = upstream.cancel().await;
@@ -211,7 +241,10 @@ async fn headless(dir: &std::path::Path) -> anyhow::Result<()> {
     use std::sync::Arc;
 
     // Never create database snapshots, recover, rename or reset existing stores.
-    anyhow::ensure!(dir.join("settings.sled").is_dir(), "no existing AeroTab settings; enable MCP in the desktop first");
+    anyhow::ensure!(
+        dir.join("settings.sled").is_dir(),
+        "no existing AeroTab settings; enable MCP in the desktop first"
+    );
     let settings = SettingsStore::open(dir)
         .context("cannot exclusively open settings; close the desktop or use its HTTP endpoint (no recovery attempted)")?;
     let config: McpConfig = serde_json::from_value(settings.get("mcp")?.unwrap_or_default())
@@ -220,8 +253,8 @@ async fn headless(dir: &std::path::Path) -> anyhow::Result<()> {
     config.validate().map_err(anyhow::Error::msg)?;
     let profiles = ProfileStore::open(dir.join("profiles.sled"))
         .context("cannot exclusively open profiles; no database recovery attempted")?;
-    let known_hosts = KnownHosts::open(dir)
-        .context("cannot open known hosts; no database recovery attempted")?;
+    let known_hosts =
+        KnownHosts::open(dir).context("cannot open known hosts; no database recovery attempted")?;
     let vault = VaultStore::open(dir)
         .context("cannot exclusively open vault; no database recovery attempted")?;
     let state = AppState::new();
@@ -232,7 +265,10 @@ async fn headless(dir: &std::path::Path) -> anyhow::Result<()> {
     let dispatcher = Arc::new(Dispatcher::new());
     register_all(&dispatcher, state.clone());
     McpServer::new(state, dispatcher, config)
-        .serve(rmcp::transport::stdio()).await?.waiting().await?;
+        .serve(rmcp::transport::stdio())
+        .await?
+        .waiting()
+        .await?;
     Ok(())
 }
 

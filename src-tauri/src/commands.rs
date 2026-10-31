@@ -228,6 +228,19 @@ pub fn set_app_handle(app: tauri::AppHandle) {
     let _ = APP_HANDLE.set(app);
 }
 
+/// Request the desktop to open one visible SSH tab using its normal connection flow.
+/// No backend session is created here, preventing orphan/duplicate sessions.
+pub fn mcp_open_terminal(profile_id: &str) -> Result<(), String> {
+    let app = APP_HANDLE
+        .get()
+        .ok_or_else(|| "Visible terminals require the AeroTab desktop application".to_string())?;
+    app.emit(
+        "aerotab:mcp-open-terminal",
+        serde_json::json!({ "profileId": profile_id }),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Discriminated union over the channel kinds we know how to drive.
 pub enum SessionChannel {
     Local(LocalPty),
