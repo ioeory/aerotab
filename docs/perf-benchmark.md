@@ -8,7 +8,7 @@
 | Cold startup (P95)           | ≤ 600 ms          |                                 |
 | Idle memory (5 tabs, 30 min) | ≤ 130 MB RSS      | No upward drift                 |
 | SSH connect (key auth)       | ≤ 700 ms          | Localhost loopback              |
-| Terminal throughput          | ≥ 500 lines/s     | xterm corpus, sustained 60fps   |
+| Terminal throughput          | ≥ 500 lines/s     | Native Rust VT + frame encode (default renderer); xterm retained as fallback |
 | Installer size               | < 150 MB          | Signed package, each platform   |
 | Plugin load time             | < 100 ms / plugin | Per priority plugin             |
 
@@ -30,8 +30,13 @@
 - Measure from "connect requested" RPC to "channel ready" event.
 
 ### Terminal throughput
-- Driver replays a fixed ANSI corpus (~5000 sequences) at increasing rates.
-- Pass = sustained interactive responsiveness at 500 lines/s for 60 s.
+- Harness: `cargo run -p aerotab-bench -- term-throughput` feeds a fixed ANSI
+  corpus into [`TerminalEngine`](../src-tauri/src/terminal/engine/mod.rs)
+  (alacritty_terminal VT + damage frames) and reports `lines_per_sec` plus
+  frame-build P50/P95.
+- Pass = ≥ 500 lines/s on the native path (`pass_lines_per_sec: true`).
+- Frontend default renderer is **native** (Rust VT + termgrid). Settings →
+  Terminal → Frontend still offers canvas / webgl / dom (xterm.js) as fallback.
 
 ### Installer size
 - Measure final signed artifact (`.exe` NSIS, `.dmg`, `.AppImage`).

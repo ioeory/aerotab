@@ -3,20 +3,21 @@
 //! On-disk layout inside the working tree:
 //!
 //! ```text
-//! <repo>/<group>/<record-uuid>.bin
+//! <repo>/<group>/<record-uuid>.bin          # legacy SyncBackend records
+//! <repo>/v2/...                            # BlobStore / oplog paths
 //! ```
 //!
-//! Every [`put`](SyncBackend::put) / [`delete`](SyncBackend::delete) creates a
-//! commit. [`sync_remote`](GitBackend::sync_remote) pulls + pushes against the
-//! configured `origin`. Remote auth is provided through a closure so callers
-//! can plug in SSH-agent / HTTPS tokens without this module taking a hard
-//! dependency on either.
+//! Working-tree mutations (`put` / `delete` / [`BlobStore`] writes) only touch
+//! the filesystem and mark the backend dirty. Call [`GitBackend::commit_cycle`]
+//! once per sync cycle so a single commit covers every change (previously each
+//! `put` produced its own commit and remotes grew without bound).
 //!
 //! All git2 calls are blocking; we wrap them in `tokio::task::spawn_blocking`
 //! so the async trait stays honest.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,6 +26,7 @@ use git2::{
 };
 use uuid::Uuid;
 
+use crate::sync::blob::{normalize_blob_path, BlobMeta, BlobStore};
 use crate::sync::{Group, RecordId, SyncBackend, SyncError};
 
 #[derive(Clone)]
@@ -38,6 +40,8 @@ struct GitInner {
     author_email: String,
     /// Optional remote name (e.g. "origin"). Set via [`GitBackend::with_remote`].
     remote: Option<RemoteConfig>,
+    /// Set when the working tree has uncommitted sync writes.
+    pending: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -78,8 +82,105 @@ impl GitBackend {
                 author_name: "Tabby".into(),
                 author_email: "aerotab@localhost".into(),
                 remote: None,
+                pending: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// True when the working tree has writes that have not been committed yet.
+    pub fn has_pending(&self) -> bool {
+        self.inner.pending.load(Ordering::SeqCst)
+    }
+
+    /// Commit every pending working-tree change as a single commit. No-op when
+    /// nothing is dirty. Returns `true` when a commit was created.
+    pub async fn commit_cycle(&self, message: &str) -> Result<bool, SyncError> {
+        if !self.inner.pending.swap(false, Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let me = self.clone();
+        let message = message.to_string();
+        tokio::task::spawn_blocking(move || {
+            me.commit_all(&message)?;
+            Ok(true)
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+    }
+
+    /// Count commits reachable from HEAD (best-effort; `None` on empty repo).
+    pub fn commit_count(&self) -> Result<usize, SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        let Ok(head) = repo.head() else {
+            return Ok(0);
+        };
+        let oid = head
+            .target()
+            .ok_or_else(|| SyncError::Transport("HEAD has no target".into()))?;
+        let mut walk = repo.revwalk().map_err(git_err)?;
+        walk.push(oid).map_err(git_err)?;
+        Ok(walk.count())
+    }
+
+    /// Replace history with a single orphan commit that preserves the current
+    /// tree, then force-with-lease push when a remote is configured.
+    ///
+    /// Peers that diverge after this run hit the existing "align to remote"
+    /// path on their next fetch.
+    pub async fn squash_orphan(&self, message: &str) -> Result<(), SyncError> {
+        let me = self.clone();
+        let message = message.to_string();
+        tokio::task::spawn_blocking(move || me.squash_orphan_blocking(&message))
+            .await
+            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+    }
+
+    fn squash_orphan_blocking(&self, message: &str) -> Result<(), SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        let mut index = repo.index().map_err(git_err)?;
+        index
+            .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
+            .map_err(git_err)?;
+        index.write().map_err(git_err)?;
+        let tree_oid = index.write_tree().map_err(git_err)?;
+        let tree = repo.find_tree(tree_oid).map_err(git_err)?;
+        let sig = self.signature()?;
+        // Orphan: no parents.
+        let oid = repo
+            .commit(None, &sig, &sig, message, &tree, &[])
+            .map_err(git_err)?;
+        let branch = self
+            .inner
+            .remote
+            .as_ref()
+            .map(|r| r.branch.clone())
+            .unwrap_or_else(|| "master".into());
+        let local_ref = format!("refs/heads/{branch}");
+        repo.reference(&local_ref, oid, true, "squash orphan")
+            .map_err(git_err)?;
+        repo.set_head(&local_ref).map_err(git_err)?;
+        self.inner.pending.store(false, Ordering::SeqCst);
+
+        // Force-push when a remote is present. Callers should `fetch_remote`
+        // first so the tip we overwrite is the one we just observed (lease).
+        let Some(remote_cfg) = self.inner.remote.clone() else {
+            return Ok(());
+        };
+        let force_refspec = format!(
+            "+refs/heads/{branch}:refs/heads/{branch}",
+            branch = remote_cfg.branch
+        );
+        self.push_remote_refs(&remote_cfg, &force_refspec)?;
+        Ok(())
+    }
+
+    fn mark_pending(&self) {
+        self.inner.pending.store(true, Ordering::SeqCst);
+    }
+
+    fn abs_blob_path(&self, path: &str) -> Result<PathBuf, SyncError> {
+        let rel = normalize_blob_path(path)?;
+        Ok(self.inner.repo_path.join(rel))
     }
 
     pub fn with_author(mut self, name: impl Into<String>, email: impl Into<String>) -> Self {
@@ -894,6 +995,7 @@ impl Clone for GitInner {
             author_name: self.author_name.clone(),
             author_email: self.author_email.clone(),
             remote: self.remote.clone(),
+            pending: AtomicBool::new(self.pending.load(Ordering::SeqCst)),
         }
     }
 }
@@ -919,14 +1021,13 @@ impl SyncBackend for GitBackend {
         let path = self.record_path(group, id);
         let blob = blob.to_vec();
         let me = self.clone();
-        let msg = format!("put {}/{}", group_segment(group), id.0);
         tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
             std::fs::create_dir_all(&dir).map_err(io_err)?;
             // Atomic write via tmp + rename.
             let tmp = path.with_extension("bin.tmp");
             std::fs::write(&tmp, &blob).map_err(io_err)?;
             std::fs::rename(&tmp, &path).map_err(io_err)?;
-            me.commit_all(&msg)?;
+            me.mark_pending();
             Ok(())
         })
         .await
@@ -936,19 +1037,121 @@ impl SyncBackend for GitBackend {
     async fn delete(&self, group: Group, id: RecordId) -> Result<(), SyncError> {
         let path = self.record_path(group, id);
         let me = self.clone();
-        let msg = format!("delete {}/{}", group_segment(group), id.0);
         tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
             match std::fs::remove_file(&path) {
-                Ok(()) => {}
+                Ok(()) => me.mark_pending(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(io_err(e)),
             }
-            me.commit_all(&msg)?;
             Ok(())
         })
         .await
         .map_err(|e| SyncError::Transport(format!("join: {e}")))?
     }
+}
+
+#[async_trait]
+impl BlobStore for GitBackend {
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<BlobMeta>, SyncError> {
+        let root = self.inner.repo_path.clone();
+        let prefix = prefix.trim_start_matches('/').to_string();
+        tokio::task::spawn_blocking(move || list_blobs_under(&root, &prefix))
+            .await
+            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+    }
+
+    async fn get_blob(&self, path: &str) -> Result<Vec<u8>, SyncError> {
+        let abs = self.abs_blob_path(path)?;
+        tokio::task::spawn_blocking(move || std::fs::read(abs).map_err(io_err))
+            .await
+            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+    }
+
+    async fn put_blob(&self, path: &str, bytes: &[u8]) -> Result<(), SyncError> {
+        let abs = self.abs_blob_path(path)?;
+        let bytes = bytes.to_vec();
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).map_err(io_err)?;
+            }
+            let tmp = abs.with_extension("tmp");
+            std::fs::write(&tmp, &bytes).map_err(io_err)?;
+            std::fs::rename(&tmp, &abs).map_err(io_err)?;
+            me.mark_pending();
+            Ok(())
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+    }
+
+    async fn delete_blob(&self, path: &str) -> Result<(), SyncError> {
+        let abs = self.abs_blob_path(path)?;
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
+            match std::fs::remove_file(&abs) {
+                Ok(()) => me.mark_pending(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(io_err(e)),
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+    }
+}
+
+fn list_blobs_under(root: &Path, prefix: &str) -> Result<Vec<BlobMeta>, SyncError> {
+    let mut out = Vec::new();
+    let start = if prefix.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(prefix)
+    };
+    if !start.exists() {
+        return Ok(out);
+    }
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<BlobMeta>) -> Result<(), SyncError> {
+        let read = std::fs::read_dir(dir).map_err(io_err)?;
+        for entry in read {
+            let entry = entry.map_err(io_err)?;
+            let path = entry.path();
+            // Skip the git metadata directory.
+            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                continue;
+            }
+            let ft = entry.file_type().map_err(io_err)?;
+            if ft.is_dir() {
+                walk(root, &path, out)?;
+            } else if ft.is_file() {
+                let rel = path
+                    .strip_prefix(root)
+                    .map_err(|e| SyncError::Transport(e.to_string()))?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                out.push(BlobMeta { path: rel, size });
+            }
+        }
+        Ok(())
+    }
+    if start.is_file() {
+        let rel = start
+            .strip_prefix(root)
+            .map_err(|e| SyncError::Transport(e.to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let size = std::fs::metadata(&start).map(|m| m.len()).unwrap_or(0);
+        out.push(BlobMeta { path: rel, size });
+        return Ok(out);
+    }
+    walk(root, &start, &mut out)?;
+    // When prefix points at a directory, also include files whose relative
+    // path starts with the prefix string (already true if we walked start).
+    if !prefix.is_empty() && start.is_dir() {
+        out.retain(|m| m.path.starts_with(prefix));
+    }
+    Ok(out)
 }
 
 fn list_records(dir: &Path) -> Result<Vec<RecordId>, SyncError> {
@@ -1022,18 +1225,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_creates_commits() {
+    async fn put_batches_into_one_commit_cycle() {
         let dir = tmpdir();
         let g = GitBackend::open_or_init(&dir).unwrap();
         let id1 = RecordId(Uuid::new_v4());
         let id2 = RecordId(Uuid::new_v4());
         g.put(Group::Appearance, id1, b"a").await.unwrap();
         g.put(Group::Appearance, id2, b"b").await.unwrap();
+        assert!(g.has_pending());
+        assert!(g.commit_cycle("sync: test").await.unwrap());
+        assert!(!g.has_pending());
+        assert!(!g.commit_cycle("sync: noop").await.unwrap());
         let repo = Repository::open(&dir).unwrap();
         let mut walk = repo.revwalk().unwrap();
         walk.push_head().unwrap();
         let count = walk.count();
-        assert_eq!(count, 2, "two commits expected, got {count}");
+        assert_eq!(count, 1, "one commit expected, got {count}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn blob_store_paths_roundtrip() {
+        use crate::sync::BlobStore;
+        let dir = tmpdir();
+        let g = GitBackend::open_or_init(&dir).unwrap();
+        g.put_blob("v2/devices/a/ops/0001.bin", b"op")
+            .await
+            .unwrap();
+        let listed = g.list_blobs("v2/devices/a/ops/").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "v2/devices/a/ops/0001.bin");
+        assert_eq!(
+            g.get_blob("v2/devices/a/ops/0001.bin").await.unwrap(),
+            b"op"
+        );
+        assert!(g.commit_cycle("sync: blob").await.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1050,13 +1276,14 @@ mod tests {
         let bare = bare_remote();
         let url = path_to_file_url(&bare);
 
-        // Workspace A: produce two commits, push.
+        // Workspace A: produce one commit, push.
         let a_dir = tmpdir();
         let a = GitBackend::open_or_init(&a_dir).unwrap();
         // First commit so HEAD exists before we attach a remote.
         a.put(Group::Appearance, RecordId(Uuid::new_v4()), b"first")
             .await
             .unwrap();
+        a.commit_cycle("sync: first").await.unwrap();
         let a = a.with_remote("origin", &url, "master").unwrap();
         a.push_remote().await.unwrap();
 
@@ -1096,6 +1323,7 @@ mod tests {
             .with_remote("origin", &url, "master")
             .unwrap();
         a.put(Group::Appearance, id_a, b"from-a").await.unwrap();
+        a.commit_cycle("sync: a").await.unwrap();
         a.push_remote().await.unwrap();
 
         let b_dir = tmpdir();
@@ -1106,6 +1334,7 @@ mod tests {
             .unwrap();
         b.fetch_remote().await.unwrap();
         b.put(Group::Appearance, id_b, b"from-b").await.unwrap();
+        b.commit_cycle("sync: b").await.unwrap();
 
         let a2 = GitBackend::open_or_init(&a_dir)
             .unwrap()
@@ -1113,6 +1342,7 @@ mod tests {
             .unwrap();
         let id_a2 = RecordId(Uuid::new_v4());
         a2.put(Group::Appearance, id_a2, b"from-a2").await.unwrap();
+        a2.commit_cycle("sync: a2").await.unwrap();
         a2.push_remote().await.unwrap();
 
         // Diverged: B has a local-only commit; remote moved on A.
@@ -1125,6 +1355,48 @@ mod tests {
             "after realign, working tree should reflect remote commits"
         );
 
+        let _ = std::fs::remove_dir_all(&a_dir);
+        let _ = std::fs::remove_dir_all(&b_dir);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[tokio::test]
+    async fn squash_orphan_preserves_tree_and_peer_recovers() {
+        let bare = bare_remote();
+        let url = path_to_file_url(&bare);
+
+        let a_dir = tmpdir();
+        let a = GitBackend::open_or_init(&a_dir).unwrap();
+        for i in 0..3u8 {
+            a.put_blob(&format!("v2/devices/a/ops/{i:012}.bin"), &[i])
+                .await
+                .unwrap();
+            a.commit_cycle(&format!("sync: {i}")).await.unwrap();
+        }
+        assert!(a.commit_count().unwrap() >= 3);
+        let a = a.with_remote("origin", &url, "master").unwrap();
+        a.push_remote().await.unwrap();
+
+        // Peer B clones the pre-squash history.
+        let b_dir = tmpdir();
+        let b = GitBackend::open_or_init(&b_dir)
+            .unwrap()
+            .with_remote("origin", &url, "master")
+            .unwrap();
+        assert!(b.fetch_remote().await.unwrap() >= 1);
+        assert_eq!(b.list_blobs("v2/devices/a/ops/").await.unwrap().len(), 3);
+
+        // A squashes → force-pushes. B's next fetch realigns to remote tip.
+        a.squash_orphan("sync: squash").await.unwrap();
+        assert_eq!(a.commit_count().unwrap(), 1);
+        let _ = b.fetch_remote().await.unwrap();
+        assert_eq!(
+            b.get_blob("v2/devices/a/ops/000000000002.bin")
+                .await
+                .unwrap(),
+            vec![2],
+            "peer recovers tree after orphan squash"
+        );
         let _ = std::fs::remove_dir_all(&a_dir);
         let _ = std::fs::remove_dir_all(&b_dir);
         let _ = std::fs::remove_dir_all(&bare);

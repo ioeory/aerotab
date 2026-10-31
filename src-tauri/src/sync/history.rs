@@ -1,4 +1,4 @@
-//! Persisted sync run log (settings key `syncHistory`).
+//! Persisted sync run log (device-local tree key `syncHistory`; never synced).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -26,7 +26,7 @@ pub struct SyncHistoryEntry {
 }
 
 pub fn load(store: &SettingsStore) -> Result<Vec<SyncHistoryEntry>, SettingsError> {
-    match store.get(SETTINGS_KEY)? {
+    match store.local_get(SETTINGS_KEY)? {
         Some(v) => {
             let list: Vec<SyncHistoryEntry> = serde_json::from_value(v)?;
             Ok(list)
@@ -109,7 +109,7 @@ pub fn append_failure(
 }
 
 pub fn clear(store: &SettingsStore) -> Result<(), SettingsError> {
-    store.set(SETTINGS_KEY, &serde_json::json!([]))
+    store.local_set(SETTINGS_KEY, &serde_json::json!([]))
 }
 
 fn append(store: &SettingsStore, entry: SyncHistoryEntry) -> Result<(), SettingsError> {
@@ -118,7 +118,7 @@ fn append(store: &SettingsStore, entry: SyncHistoryEntry) -> Result<(), Settings
     if list.len() > MAX_ENTRIES {
         list.truncate(MAX_ENTRIES);
     }
-    store.set(SETTINGS_KEY, &serde_json::to_value(&list)?)
+    store.local_set(SETTINGS_KEY, &serde_json::to_value(&list)?)
 }
 
 fn now_ms() -> i64 {

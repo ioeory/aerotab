@@ -7,15 +7,19 @@
 //! Full implementation lands W10-W12 (plan steps 11a, 12).
 
 pub mod backends;
+pub mod blob;
 pub mod bridge;
 pub mod crypto;
 pub mod engine;
 pub mod history;
 pub mod oauth;
+pub mod oplog;
 pub mod persistence;
 pub mod version_vector;
 
+pub use blob::{BlobMeta, BlobStore, MemBlobStore};
 pub use engine::{Clock, LocalRecord, SyncEngine, SyncStats, SystemClock};
+pub use oplog::{CompactConfig, OplogDriver, OplogStats};
 pub use persistence::{SledStore, SyncStore};
 
 use async_trait::async_trait;

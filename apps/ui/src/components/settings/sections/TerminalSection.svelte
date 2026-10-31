@@ -19,7 +19,7 @@
   }
   let { rpc, onError }: Props = $props();
 
-  type Renderer = 'dom' | 'canvas' | 'webgl';
+  type Renderer = 'native' | 'dom' | 'canvas' | 'webgl';
   type BellMode = 'off' | 'visual' | 'audible';
   type RightClick = 'menu' | 'paste' | 'select-word';
   type LinkModifier = 'none' | 'ctrl' | 'alt' | 'meta';
@@ -27,7 +27,7 @@
   // terminal
   let scrollback = $state(2000);
   let cursorBlink = $state(true);
-  let renderer = $state<Renderer>('canvas');
+  let renderer = $state<Renderer>('native');
   let altIsMeta = $state(false);
   let scrollOnInput = $state(true);
   let bell = $state<BellMode>('off');
@@ -56,7 +56,9 @@
         const v = t.value as Record<string, unknown>;
         if (typeof v.scrollback === 'number') scrollback = v.scrollback;
         if (typeof v.cursorBlink === 'boolean') cursorBlink = v.cursorBlink;
-        if (v.renderer === 'dom' || v.renderer === 'canvas' || v.renderer === 'webgl') renderer = v.renderer;
+        if (v.renderer === 'native' || v.renderer === 'dom' || v.renderer === 'canvas' || v.renderer === 'webgl') {
+          renderer = v.renderer;
+        }
         if (typeof v.altIsMeta === 'boolean') altIsMeta = v.altIsMeta;
         if (typeof v.scrollOnInput === 'boolean') scrollOnInput = v.scrollOnInput;
         if (v.bell === 'off' || v.bell === 'visual' || v.bell === 'audible') bell = v.bell;
@@ -127,11 +129,12 @@
     <div class="section-h">Rendering</div>
     <label for="tm-renderer" class="lbl">Frontend</label>
     <select id="tm-renderer" bind:value={renderer} onchange={markDirty} class="select">
-      <option value="dom">DOM (most compatible)</option>
-      <option value="canvas">Canvas (recommended)</option>
-      <option value="webgl">WebGL (GPU-accelerated)</option>
+      <option value="native">Native (Rust VT + WebGL, default)</option>
+      <option value="canvas">xterm Canvas</option>
+      <option value="webgl">xterm WebGL</option>
+      <option value="dom">xterm DOM (most compatible)</option>
     </select>
-    <div class="help">Change takes effect on next pane open.</div>
+    <div class="help">Save 后就地切换前端并尽量保留滚动缓冲。Native 在 Rust 中解析 ANSI 并推送 damage 帧（IME、链接、鼠标上报、trzsz）。窗口半透明时仍走 Native（Canvas2D）；仅 xterm Canvas/WebGL 会降级为 DOM。</div>
   </div>
 
   <div>

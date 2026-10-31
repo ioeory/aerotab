@@ -62,6 +62,7 @@
   import type { LocalUploadTransferRequest, RemoteCrossTransferRequest } from './lib/sftpTransferTypes';
   import { sidebarFocus } from './lib/sidebarFocus.svelte';
   import { sessionEndedGate } from './lib/sessionEndedGate.svelte';
+  import { terminalUi } from './lib/terminalUi.svelte';
   import {
     getSidebarProfileHandlers,
   } from './lib/sidebarProfileBridge';
@@ -74,7 +75,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.19-ui-20261031';
+  const buildId = '0.2.19-ui-20261101h';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -166,6 +167,71 @@
   const activeTab = $derived(tabs.tabs.find((t) => t.id === tabs.activeId));
   const activePane = $derived(activeTab ? tabs.activePane(activeTab) : undefined);
   const broadcastOn = $derived(!!(tabs.activeId && broadcastByTab[tabs.activeId]));
+  /** Actual mounted terminal frontend for the focused pane (footer chip). */
+  const terminalFrontendKind = $derived.by(() => {
+    void terminalUi.revision;
+    const id = activePane?.id;
+    if (!id) return null;
+    return terminalUi.bySession[id] ?? 'pending';
+  });
+  type TerminalRendererPref = 'native' | 'dom' | 'canvas' | 'webgl';
+  const XTERM_FALLBACK: TerminalRendererPref = 'dom';
+  const LAST_XTERM_KEY = 'aerotab.lastXtermRenderer';
+  let lastXtermRenderer: TerminalRendererPref = (() => {
+    try {
+      const v = sessionStorage.getItem(LAST_XTERM_KEY);
+      if (v === 'dom' || v === 'canvas' || v === 'webgl') return v;
+    } catch { /* private mode */ }
+    return XTERM_FALLBACK;
+  })();
+  let togglingTerminalFrontend = $state(false);
+
+  function rememberXtermRenderer(r: TerminalRendererPref) {
+    if (r !== 'dom' && r !== 'canvas' && r !== 'webgl') return;
+    lastXtermRenderer = r;
+    try { sessionStorage.setItem(LAST_XTERM_KEY, r); } catch { /* ignore */ }
+  }
+
+  /** Footer chip: toggle settings.terminal.renderer between native and last xterm. */
+  async function toggleTerminalFrontend() {
+    if (togglingTerminalFrontend) return;
+    togglingTerminalFrontend = true;
+    try {
+      const t = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminal' });
+      const cur = (t.value && typeof t.value === 'object')
+        ? { ...(t.value as Record<string, unknown>) }
+        : {};
+      const stored = cur.renderer;
+      let effective: TerminalRendererPref = 'native';
+      if (stored === 'native' || stored === 'dom' || stored === 'canvas' || stored === 'webgl') {
+        effective = stored;
+      } else if (terminalFrontendKind === 'native') {
+        effective = 'native';
+      } else if (terminalFrontendKind?.startsWith('xterm-')) {
+        const k = terminalFrontendKind.replace('xterm-', '');
+        if (k === 'dom' || k === 'canvas' || k === 'webgl') effective = k;
+      }
+      let next: TerminalRendererPref;
+      if (effective === 'native') {
+        next = lastXtermRenderer;
+      } else {
+        rememberXtermRenderer(effective);
+        next = 'native';
+      }
+      await rpc.call('settings.set', { key: 'terminal', value: { ...cur, renderer: next } });
+      settingsCoord.bumpRev();
+      setStatus(
+        next === 'native'
+          ? i18n.t('app.footer.terminalSwitchedNative')
+          : i18n.t('app.footer.terminalSwitchedXterm', { kind: next }),
+      );
+    } catch (e) {
+      onError(`terminal frontend: ${(e as Error).message}`);
+    } finally {
+      togglingTerminalFrontend = false;
+    }
+  }
+
   const broadcastTargets = $derived(broadcastTargetIds(activeTab));
 
   /** Tabs with an open SFTP dock (kept mounted across tab switches). */
@@ -1645,7 +1711,11 @@
     const profileActionKeyById = Object.fromEntries(
       Object.entries(PROFILE_SIDEBAR_ACTION_IDS).map(([key, id]) => [id, key]),
     ) as Record<string, ProfileSidebarActionKey>;
+    // Only consume profile shortcuts while the sidebar list is focused —
+    // otherwise Ctrl+D / Delete / etc. must reach the terminal PTY.
+    const profileSidebarActive = () => sidebarFocus.isListFocused();
     for (const actionId of Object.values(PROFILE_SIDEBAR_ACTION_IDS)) {
+      hotkeys.registerGuard(actionId, profileSidebarActive);
       hotkeys.registerHandler(actionId, () => {
         if (!sidebarFocus.isListFocused()) return;
         const profileId = sidebarFocus.focusedProfileId;
@@ -2009,6 +2079,30 @@
           onclick={dismissStatus}
         >
           <X size={12} />
+        </button>
+      {/if}
+      {#if terminalFrontendKind}
+        <button
+          type="button"
+          class="px-1.5 py-0.5 rounded text-[10px] shrink-0 font-sans cursor-pointer
+                 hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]
+                 {terminalFrontendKind === 'native'
+                   ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
+                   : terminalFrontendKind === 'pending'
+                     ? 'bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]'
+                     : 'bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]'}"
+          title={i18n.t('app.footer.terminalFrontendToggle', { kind: terminalFrontendKind })}
+          aria-label={i18n.t('app.footer.terminalFrontendToggle', { kind: terminalFrontendKind })}
+          disabled={togglingTerminalFrontend}
+          onclick={() => { void toggleTerminalFrontend(); }}
+        >
+          {#if terminalFrontendKind === 'native'}
+            {i18n.t('app.footer.terminalNative')}
+          {:else if terminalFrontendKind === 'pending'}
+            {i18n.t('app.footer.terminalPending')}
+          {:else}
+            {i18n.t('app.footer.terminalXterm', { kind: terminalFrontendKind.replace('xterm-', '') })}
+          {/if}
         </button>
       {/if}
       {#if hostStatsEnabled && hostStatsStatus === 'ok' && hostStats}

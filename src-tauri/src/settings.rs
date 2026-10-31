@@ -32,8 +32,15 @@ pub struct SettingsStore {
 
 struct Inner {
     tree: sled::Tree,
+    /// Device-local metadata (sync run log, cursors, …). Never returned by
+    /// [`SettingsStore::all`], so it can never leak into config sync.
+    local: sled::Tree,
     read_only: bool,
 }
+
+/// Keys that historically lived in the `settings` tree but are device-local
+/// state; they are moved into the `local` tree on open.
+const LOCAL_MIGRATED_KEYS: &[&str] = &["syncHistory"];
 
 impl SettingsStore {
     /// Opens (or creates) the settings sled tree under `dir`.
@@ -60,9 +67,48 @@ impl SettingsStore {
         };
         let db = sled::open(&open_path)?;
         let tree = db.open_tree("settings")?;
+        let local = db.open_tree("local")?;
+        if !read_only {
+            for key in LOCAL_MIGRATED_KEYS {
+                if let Some(bytes) = tree.get(key)? {
+                    if local.get(key)?.is_none() {
+                        local.insert(*key, bytes)?;
+                    }
+                    tree.remove(key)?;
+                }
+            }
+            tree.flush()?;
+            local.flush()?;
+        }
         Ok(Self {
-            inner: Arc::new(Inner { tree, read_only }),
+            inner: Arc::new(Inner {
+                tree,
+                local,
+                read_only,
+            }),
         })
+    }
+
+    /// Reads a device-local value (not part of the syncable settings set).
+    pub fn local_get(&self, key: &str) -> Result<Option<Value>, SettingsError> {
+        match self.inner.local.get(key)? {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        }
+    }
+
+    /// Writes a device-local value (not part of the syncable settings set).
+    pub fn local_set(&self, key: &str, value: &Value) -> Result<(), SettingsError> {
+        if self.inner.read_only {
+            return Err(SettingsError::Sled(sled::Error::Unsupported(
+                "settings store is read-only (another AeroTab instance holds the database lock)"
+                    .into(),
+            )));
+        }
+        let bytes = serde_json::to_vec(value)?;
+        self.inner.local.insert(key, bytes)?;
+        self.inner.local.flush()?;
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Value>, SettingsError> {
@@ -171,6 +217,27 @@ mod tests {
         s.set("a", &json!(1)).unwrap();
         assert!(s.remove("a").unwrap());
         assert!(s.get("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn local_tree_is_separate_and_migrates_legacy_keys() {
+        let dir = tmpdir();
+        {
+            let s = SettingsStore::open(&dir).unwrap();
+            // Simulate a pre-migration store with syncHistory in the settings tree.
+            s.inner
+                .tree
+                .insert("syncHistory", serde_json::to_vec(&json!([1])).unwrap())
+                .unwrap();
+            s.set("theme", &json!("x")).unwrap();
+        }
+        let s = SettingsStore::open(&dir).unwrap();
+        assert!(s.get("syncHistory").unwrap().is_none());
+        assert_eq!(s.local_get("syncHistory").unwrap().unwrap(), json!([1]));
+        let keys: Vec<_> = s.all().unwrap().into_iter().map(|e| e.key).collect();
+        assert_eq!(keys, vec!["theme"]);
+        s.local_set("cursor", &json!(5)).unwrap();
+        assert_eq!(s.all().unwrap().len(), 1);
     }
 
     #[test]

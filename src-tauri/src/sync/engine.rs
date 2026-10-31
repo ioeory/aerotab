@@ -184,6 +184,83 @@ impl SyncEngine {
         self.device_id
     }
 
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
+    /// True when the in-memory local map is empty (used for cold-start snapshot).
+    pub async fn is_empty(&self) -> bool {
+        self.local.read().await.is_empty()
+    }
+
+    /// Snapshot every local record in `group` (including tombstones).
+    pub async fn snapshot_group(&self, group: Group) -> Vec<(RecordId, LocalRecord)> {
+        let map = self.local.read().await;
+        map.iter()
+            .filter(|((g, _), _)| *g == group)
+            .map(|((_, id), rec)| (*id, rec.clone()))
+            .collect()
+    }
+
+    /// Replace local state for `(group, id)` without bumping the VV (remote adopt).
+    pub async fn adopt_record(
+        &self,
+        group: Group,
+        id: RecordId,
+        rec: LocalRecord,
+    ) -> Result<(), SyncError> {
+        self.local.write().await.insert((group, id), rec.clone());
+        self.persist(group, id, &rec).await
+    }
+
+    /// Apply a remote op with the same VV semantics as [`Self::sync_group`].
+    pub async fn apply_op(&self, op: &crate::sync::oplog::Op) -> Result<(), SyncError> {
+        use crate::sync::oplog::OpKind;
+        let remote = LocalRecord {
+            vv: op.vv.clone(),
+            schema: op.schema,
+            updated_at_ms: op.updated_at_ms,
+            tombstone: matches!(op.kind, OpKind::Delete),
+            payload: match &op.kind {
+                OpKind::Put { payload } => payload.clone(),
+                OpKind::Delete => Vec::new(),
+            },
+            writer: op.writer,
+        };
+        let local = {
+            let map = self.local.read().await;
+            map.get(&(op.group, op.id)).cloned()
+        };
+        match local {
+            None => {
+                self.local
+                    .write()
+                    .await
+                    .insert((op.group, op.id), remote.clone());
+                self.persist(op.group, op.id, &remote).await?;
+            }
+            Some(local) => match local.vv.compare(&remote.vv) {
+                VvOrdering::Equal | VvOrdering::Dominates => {}
+                VvOrdering::DominatedBy => {
+                    self.local
+                        .write()
+                        .await
+                        .insert((op.group, op.id), remote.clone());
+                    self.persist(op.group, op.id, &remote).await?;
+                }
+                VvOrdering::Concurrent => {
+                    let merged = self.merge(local, remote);
+                    self.local
+                        .write()
+                        .await
+                        .insert((op.group, op.id), merged.clone());
+                    self.persist(op.group, op.id, &merged).await?;
+                }
+            },
+        }
+        Ok(())
+    }
+
     /// Local write. Bumps the device counter and stores locally; the new
     /// state will be pushed on the next [`Self::sync_group`].
     pub async fn put_local(

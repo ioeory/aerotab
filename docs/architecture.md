@@ -5,9 +5,10 @@
 ```
 ┌─────────────────────────────────────────────┐
 │  Frontend Shell (apps/ui) - Tauri webview   │
-│  - Terminal renderer (xterm.js compatible)  │
+│  - Terminal: xterm.js (default) or native   │
+│    termgrid (WebGL/Canvas2D) via Channel    │
 │  - Connection manager / settings UI         │
-│  - Sync UI (WebDAV / Git config + state)    │
+│  - Sync UI (WebDAV / Git, protocol 2 oplog) │
 └─────────────────┬───────────────────────────┘
                   │  JSON-RPC 2.0 over Tauri IPC
                   │  (versioned, error-coded)
@@ -16,9 +17,9 @@
 │  - core::session_manager  (tab/pane lifec.) │
 │  - ipc                    (protocol layer)  │
 │  - ssh                    (russh client)    │
-│  - terminal               (PTY bridge)      │
+│  - terminal               (PTY + VT engine) │
 │  - serial                 (serial port)     │
-│  - sync                   (WebDAV + Git)    │
+│  - sync                   (BlobStore oplog) │
 │  - plugins::legacy_bridge (Node child proc) │
 └─────────────────────────────────────────────┘
 ```
@@ -47,18 +48,21 @@ russh-based client. Owns connection pool, jump host chains, known_hosts,
 agent forwarding. Exposes `Channel` handles that wrap streams.
 
 ### `terminal`
-PTY spawning (via `portable-pty`), resize handling, output batching for
-high-throughput streams. Pluggable: backs both local shells and SSH channels.
+PTY spawning (via `portable-pty`), resize handling, and the native engine
+(`terminal::engine` on `alacritty_terminal`) that pushes damage frames over a
+Tauri Channel to `apps/ui` termgrid. Default UI path is native; xterm.js
+(`terminal.renderer = canvas|webgl|dom`) remains as fallback.
 
 ### `serial`
 serialport-rs based channel. Parameter mapping (baud, parity, stop bits,
 flow control, newline conversion) preserves Tabby v1 config schema.
 
 ### `sync`
-- Backend trait + first-party impls: `webdav`, `git`.
-- Snapshot model with version vectors; selective sync groups
-  (connections / appearance / shortcuts / plugin-config).
-- Crypto envelope: Argon2id-derived KEK + ChaCha20-Poly1305 per-record.
+- Protocol 2: `BlobStore` + append-only encrypted oplog (`v2/devices/…/ops`),
+  snapshots with watermarks, one Git commit per cycle. See
+  [sync-protocol.md](sync-protocol.md).
+- Legacy `SyncBackend` per-record blobs kept for purge/migration.
+- Version vectors + selective groups; Argon2id KEK + ChaCha20-Poly1305.
 - Credentials never sync by default; opt-in encrypted upload.
 
 ### `plugins::legacy_bridge`

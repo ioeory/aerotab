@@ -11,8 +11,6 @@
 //! See [`docs/native-terminal-embed-poc.md`](../../../docs/native-terminal-embed-poc.md).
 
 pub mod embed;
-pub mod engine;
-pub use engine::EngineRegistry;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -4,6 +4,10 @@
 //! reader thread runs blocking I/O off the async runtime and forwards bytes
 //! into a [`tokio::sync::mpsc`] channel. Writes go in through an
 //! [`std::io::Write`] handle protected by a [`std::sync::Mutex`].
+//!
+//! [`engine`] hosts the native terminal engine (VT parsing + grid in Rust).
+
+pub mod engine;
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};

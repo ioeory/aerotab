@@ -40,6 +40,14 @@
     sessionReplayBytes.delete(sessionId);
     sessionReplaySeq.delete(sessionId);
   }
+
+  /** Replace the replay ring with plain text (native → xterm handoff). */
+  function replaceReplayWithText(sessionId: string, text: string) {
+    dropReplayChunks(sessionId);
+    if (!text) return;
+    const normalized = text.replace(/\n/g, '\r\n');
+    appendReplayChunk(sessionId, new TextEncoder().encode(normalized));
+  }
 </script>
 
 <script lang="ts">
@@ -91,8 +99,14 @@
   import { focusTerminalAuto, focusTerminalIfAllowed, shouldAutoFocusTerminal } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
-  import { NativeEngineController, spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
+  import { spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
+  import {
+    NativeTerminalController,
+    type ThemeColors as NativeThemeColors,
+  } from '../lib/termgrid';
+  import NativeTerminalView from './NativeTerminalView.svelte';
   import { sessionEndedGate } from '../lib/sessionEndedGate.svelte';
+  import { terminalUi, type TerminalFrontendKind } from '../lib/terminalUi.svelte';
 
   interface Props {
     rpc: RpcClient;
@@ -134,13 +148,28 @@
   }: Props = $props();
 
   let host: HTMLDivElement | null = null;
+  let nativeHost: HTMLDivElement | null = $state(null);
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
   let search: SearchAddon | null = null;
   let rendererAddon: { dispose: () => void } | null = null;
-  let activeRenderer: 'dom' | 'canvas' | 'webgl' = 'dom';
-  let engineController: NativeEngineController | null = null;
-  let engineCanvas: HTMLCanvasElement | null = null;
+  let activeRenderer = $state<'dom' | 'canvas' | 'webgl'>('dom');
+  /** When true, Rust VT engine + termgrid renderer replace xterm.js. */
+  let useNative = $state(false);
+  /** True once onMount finished choosing a frontend (footer leaves "pending"). */
+  let frontendReady = $state(false);
+  let nativeCtl: NativeTerminalController | null = $state(null);
+  let nativeTheme: NativeThemeColors | undefined = $state(undefined);
+  let nativeFontFamily = $state('JetBrains Mono, Menlo, monospace');
+  let nativeFontSize = $state(13);
+  let nativeFontWeight = $state(400);
+  let nativeFontWeightBold = $state(700);
+  let nativeLinePadding = $state(0);
+  let nativeScrollback = $state(10_000);
+  let nativeCursorBlink = $state(true);
+  let nativeAltIsMeta = $state(false);
+  let nativeLigatures = $state(false);
+  let nativeTransferDetect = $state(false);
   let pollHandle: number | null = null;
   let pollIntervalMs = 0;
   let pollInFlight = false;
@@ -275,6 +304,11 @@
 
   /** Skip fit while display:none (maximize hide) — zero-size fit clears canvas terminals. */
   function safeFit(redraw = false) {
+    if (useNative) {
+      if (!layoutVisible || !tabVisible) return;
+      nativeCtl?.fit();
+      return;
+    }
     if (!fit || !term || !layoutVisible || !tabVisible || !hostHasLayout()) return;
     try {
       fit.fit();
@@ -295,7 +329,15 @@
   }
 
   function adjustFontSize(delta: number) {
-    if (!term || !delta) return;
+    if (!delta) return;
+    if (useNative) {
+      sessionFontDelta += delta;
+      nativeFontSize = Math.min(32, Math.max(8, nativeFontSize + delta));
+      nativeCtl?.setFont({ size: nativeFontSize });
+      scheduleSafeFit();
+      return;
+    }
+    if (!term) return;
     sessionFontDelta += delta;
     const next = Math.min(32, Math.max(8, (term.options.fontSize ?? 13) + delta));
     term.options.fontSize = next;
@@ -441,6 +483,11 @@
   }
 
   function syncPolling() {
+    if (useNative) {
+      stopPolling();
+      nativeCtl?.setVisible(tabVisible && layoutVisible && !documentHidden);
+      return;
+    }
     const ms = terminalPollIntervalMs({
       active,
       tabVisible,
@@ -481,7 +528,7 @@
       minContrastRatio: 1,
       linePadding: 0,
       // terminal group (M3)
-      renderer: 'canvas' as 'dom' | 'canvas' | 'webgl',
+      renderer: 'native' as 'native' | 'dom' | 'canvas' | 'webgl',
       altIsMeta: false,
       scrollOnInput: true,
       wordSeparator: ' ()[]{}\'",;:',
@@ -501,7 +548,9 @@
         const v = t.value as Record<string, unknown>;
         if (typeof v.scrollback === 'number') out.scrollback = v.scrollback;
         if (typeof v.cursorBlink === 'boolean') out.cursorBlink = v.cursorBlink;
-        if (v.renderer === 'dom' || v.renderer === 'canvas' || v.renderer === 'webgl') out.renderer = v.renderer;
+        if (v.renderer === 'native' || v.renderer === 'dom' || v.renderer === 'canvas' || v.renderer === 'webgl') {
+          out.renderer = v.renderer;
+        }
         if (typeof v.altIsMeta === 'boolean') out.altIsMeta = v.altIsMeta;
         if (typeof v.scrollOnInput === 'boolean') out.scrollOnInput = v.scrollOnInput;
         if (typeof v.wordSeparator === 'string') out.wordSeparator = v.wordSeparator;
@@ -558,11 +607,13 @@
     if (out.fallbackFont && !out.fontFamily.includes(out.fallbackFont)) {
       out.fontFamily = `${out.fontFamily}, ${out.fallbackFont}`;
     }
-    // Canvas/WebGL renderers clear the glyph surface with an opaque xterm
-    // background. In translucent windows that creates a black terminal slab
-    // even when the app chrome is transparent. DOM renderer keeps cell
-    // backgrounds in CSS/DOM and can honor a transparent theme background.
-    if (isTranslucent()) out.renderer = 'dom';
+    // xterm canvas/webgl paint an opaque glyph surface; under window opacity
+    // <100% that becomes a solid black slab. Demote those to xterm DOM only.
+    // Never override `native` — termgrid already falls back to Canvas2D when
+    // translucent and honors transparent backgrounds.
+    if (isTranslucent() && (out.renderer === 'canvas' || out.renderer === 'webgl')) {
+      out.renderer = 'dom';
+    }
     // Do not mutate per-pane state here — getTerminalSettings() caches this
     // result and skips Fresh for other panes. Callers must applyTransferDetectionFromCfg.
     return out;
@@ -669,18 +720,35 @@
   }
 
   function writeTerminalOutput(output: TrzszTerminalOutput): void {
-    if (!term) return;
-    if (typeof output === 'string' || output instanceof Uint8Array) {
-      term.write(output);
+    const writeBytes = (bytes: Uint8Array) => {
+      if (useNative) {
+        void nativeCtl?.feed(bytes);
+        return;
+      }
+      term?.write(bytes);
+    };
+    const writeText = (text: string) => {
+      if (useNative) {
+        void nativeCtl?.feed(encoder.encode(text));
+        return;
+      }
+      term?.write(text);
+    };
+    if (typeof output === 'string') {
+      writeText(output);
+      return;
+    }
+    if (output instanceof Uint8Array) {
+      writeBytes(output);
       return;
     }
     if (output instanceof ArrayBuffer) {
-      term.write(new Uint8Array(output));
+      writeBytes(new Uint8Array(output));
       return;
     }
     if (output instanceof Blob) {
       void output.arrayBuffer()
-        .then((buffer) => term?.write(new Uint8Array(buffer)))
+        .then((buffer) => writeBytes(new Uint8Array(buffer)))
         .catch((err: unknown) => console.warn('terminal blob write failed', err));
     }
   }
@@ -698,15 +766,20 @@
     }
   }
 
+  function terminalColumnsForTransfer(): number {
+    return term?.cols ?? 80;
+  }
+
   async function configureTransferFilter(enabled: boolean, forceRecreate = false): Promise<void> {
     const generation = ++transferFilterGeneration;
     if (!enabled) {
       if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
       transferFilter = null;
+      void nativeCtl?.setRawBypass(false);
       return;
     }
     if (transferFilter && !forceRecreate) {
-      transferFilter.setTerminalColumns(term?.cols ?? 80);
+      transferFilter.setTerminalColumns(terminalColumnsForTransfer());
       return;
     }
     if (transferFilter) {
@@ -718,7 +791,7 @@
       const filter = await createTrzszFilter({
         writeToTerminal: writeTerminalOutput,
         sendToServer: sendSessionInput,
-        terminalColumns: term?.cols ?? 80,
+        terminalColumns: terminalColumnsForTransfer(),
         isWindowsShell: isLocalWindowsShell(),
         maxDataChunkSize: 1024 * 1024,
         dragInitTimeout: trzszDragInitTimeoutMs(),
@@ -734,8 +807,35 @@
     }
   }
 
-  async function applyRenderer(renderer: 'dom' | 'canvas' | 'webgl') {
-    if (!term) return;
+  function nativeWriteInput(data: string): void {
+    if (transferFilter) transferFilter.processTerminalInput(data);
+    else sendSessionInput(data);
+  }
+
+  function onNativeRaw(bytes: Uint8Array): void {
+    if (!transferFilter) {
+      void nativeCtl?.feed(bytes);
+      void nativeCtl?.setRawBypass(false);
+      return;
+    }
+    try {
+      transferFilter.processServerOutput(bytes);
+    } catch (err) {
+      console.warn('trzsz output processing failed', err);
+      void nativeCtl?.feed(bytes);
+    }
+    if (!transferFilter.isTransferringFiles()) {
+      void nativeCtl?.setRawBypass(false);
+    }
+  }
+
+  function onNativeTrzszDetected(): void {
+    if (!transferDetectionEnabled) return;
+    void configureTransferFilter(true);
+  }
+
+  async function applyRenderer(renderer: 'native' | 'dom' | 'canvas' | 'webgl') {
+    if (!term || renderer === 'native') return;
     const target = isTranslucent() ? 'dom' : renderer;
     if (target === activeRenderer) return;
     try { rendererAddon?.dispose(); } catch { /* ignore renderer teardown */ }
@@ -782,12 +882,92 @@
     refreshCursorBlinkIfFocused(term);
   }
 
-  onMount(async () => {
-    if (!host) return;
-    const cfg = await loadTermSettings();
+  let switchingFrontend = false;
+  /** After xterm → native, feed the replay ring into the new engine once. */
+  let seedNativeFromReplay = false;
+
+  function applyNativeCfg(cfg: Awaited<ReturnType<typeof loadTermSettings>>) {
+    nativeFontFamily = cfg.fontFamily;
+    nativeFontSize = cfg.fontSize + sessionFontDelta;
+    nativeFontWeight = cfg.fontWeight;
+    nativeFontWeightBold = cfg.fontWeightBold;
+    nativeLinePadding = cfg.linePadding;
+    nativeScrollback = cfg.scrollback;
+    nativeCursorBlink = cfg.cursorBlink;
+    nativeAltIsMeta = cfg.altIsMeta;
+    nativeLigatures = cfg.ligatures;
+    nativeTransferDetect = cfg.experimentalTransferDetection;
+    nativeTheme = paletteFromCfg(cfg) as NativeThemeColors;
+  }
+
+  function bindSharedTerminalListeners(opts: { xtermSettingsGate?: boolean } = {}) {
+    const settingsListener = () => {
+      invalidateTerminalSettingsCache();
+      if (opts.xtermSettingsGate && !term && !useNative) return;
+      void reloadSettingsLive();
+    };
+    const searchListener = () => { if (active) openSearch(); };
+    const copyListener = () => { if (active) void doCopy(); };
+    const fontListener = (ev: Event) => {
+      if (!active) return;
+      const delta = (ev as CustomEvent<number>).detail;
+      if (typeof delta === 'number') adjustFontSize(delta);
+    };
+    const focusListener = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId && detail.sessionId !== session.id) return;
+      if (!active) return;
+      if (exited) {
+        focusExitedOverlay();
+        return;
+      }
+      requestAnimationFrame(() => {
+        if (useNative) nativeCtl?.focus();
+        else focusTerminalIfAllowed(term);
+      });
+    };
+    const fitListener = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId && detail.sessionId !== session.id) return;
+      scheduleSafeFit(true);
+    };
+    const endedListener = (ev: Event) => {
+      if (!active || !exited) return;
+      const action = (ev as CustomEvent<'close' | 'reconnect'>).detail;
+      if (action === 'close') onClosePane?.();
+      else if (action === 'reconnect' && canReconnect) void reconnectSession();
+    };
+    document.addEventListener('aerotab:settings-changed', settingsListener);
+    document.addEventListener('aerotab:search', searchListener);
+    document.addEventListener('aerotab:terminal-copy', copyListener);
+    document.addEventListener('aerotab:terminal-font-delta', fontListener);
+    document.addEventListener('aerotab:session-ended-action', endedListener);
+    document.addEventListener('aerotab:focus-pane', focusListener);
+    document.addEventListener('aerotab:fit-pane', fitListener);
+    return () => {
+      document.removeEventListener('aerotab:settings-changed', settingsListener);
+      document.removeEventListener('aerotab:search', searchListener);
+      document.removeEventListener('aerotab:terminal-copy', copyListener);
+      document.removeEventListener('aerotab:terminal-font-delta', fontListener);
+      document.removeEventListener('aerotab:session-ended-action', endedListener);
+      document.removeEventListener('aerotab:focus-pane', focusListener);
+      document.removeEventListener('aerotab:fit-pane', fitListener);
+    };
+  }
+
+  async function bootXterm(
+    cfg: Awaited<ReturnType<typeof loadTermSettings>>,
+    opts: { bindSharedListeners?: boolean } = {},
+  ) {
+    if (!host) {
+      frontendReady = true;
+      reportFrontendKind();
+      return;
+    }
+    const bindShared = opts.bindSharedListeners !== false;
     term = new Terminal({
       fontFamily: cfg.fontFamily,
-      fontSize: cfg.fontSize,
+      fontSize: cfg.fontSize + sessionFontDelta,
       fontWeight: cfg.fontWeight,
       fontWeightBold: cfg.fontWeightBold,
       theme: paletteFromCfg(cfg),
@@ -807,8 +987,6 @@
     search = new SearchAddon();
     term.loadAddon(fit);
     term.loadAddon(search);
-    // Link modifier: if a modifier is required, intercept and only follow
-    // when the matching key is held; otherwise default web-links behaviour.
     const linkHandler = linkModifier === 'none'
       ? undefined
       : (ev: MouseEvent, uri: string) => {
@@ -824,8 +1002,11 @@
       onDragOver: onTransferDragOver,
       onDrop: (ev) => { void onTransferDrop(ev); },
     });
+    replayCursorSeq = 0;
     replayCachedOutput(session.id, true);
-    await applyRenderer(cfg.renderer);
+    await applyRenderer(cfg.renderer === 'native' ? 'dom' : cfg.renderer);
+    frontendReady = true;
+    reportFrontendKind();
     scheduleSafeFit();
 
     const activeTerm = term;
@@ -834,8 +1015,6 @@
     const onTextareaFocus = () => refreshCursorBlinkIfFocused(activeTerm);
     textarea?.addEventListener('focus', onTextareaFocus);
 
-    // Intercept Ctrl+F so the browser doesn't fire its own find-in-page.
-    // macOS WKWebView: after Backspace, filter stray space only — xterm must encode keys (vim/zsh).
     activeTerm.attachCustomKeyEventHandler((ev) => {
       if (ev.type === 'keydown') trackMacBackspaceKeydown(ev);
       if (ev.type !== 'keydown') return true;
@@ -847,70 +1026,12 @@
     });
     macTextareaGuard = installMacTextareaInputGuard(activeTerm.textarea);
 
-    // App-level Ctrl+F also routes here when this pane is active.
-    const searchListener = () => { if (active) openSearch(); };
-    document.addEventListener('aerotab:search', searchListener);
-    // Settings-changed fallback (in addition to the settingsRev prop) — fires
-    // when any settings section calls settingsCoord.bumpRev(). Forces a
-    // palette/font reload directly so live-apply works even if the prop
-    // chain is somehow stale.
-    const settingsListener = () => {
-      invalidateTerminalSettingsCache();
-      // Reload on all mounted panes (including inactive splits) so enabling
-      // experimental transfer detection applies without refocusing each pane.
-      if (!term) return;
-      void reloadSettingsLive();
-    };
-    document.addEventListener('aerotab:settings-changed', settingsListener);
-    const focusListener = (ev: Event) => {
-      const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
-      if (detail?.sessionId && detail.sessionId !== session.id) return;
-      if (!active) return;
-      if (exited) {
-        focusExitedOverlay();
-        return;
-      }
-      requestAnimationFrame(() => focusTerminalIfAllowed(term));
-    };
-    const fitListener = (ev: Event) => {
-      const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
-      if (detail?.sessionId && detail.sessionId !== session.id) return;
-      scheduleSafeFit(true);
-    };
-    const copyListener = () => { if (active) void doCopy(); };
-    const fontListener = (ev: Event) => {
-      if (!active) return;
-      const delta = (ev as CustomEvent<number>).detail;
-      if (typeof delta === 'number') adjustFontSize(delta);
-    };
-    const endedListener = (ev: Event) => {
-      if (!active || !exited) return;
-      const action = (ev as CustomEvent<'close' | 'reconnect'>).detail;
-      if (action === 'close') onClosePane?.();
-      else if (action === 'reconnect' && canReconnect) void reconnectSession();
-    };
-    document.addEventListener('aerotab:terminal-copy', copyListener);
-    document.addEventListener('aerotab:terminal-font-delta', fontListener);
-    document.addEventListener('aerotab:session-ended-action', endedListener);
-    document.addEventListener('aerotab:focus-pane', focusListener);
-    document.addEventListener('aerotab:fit-pane', fitListener);
     const onVis = () => {
       documentHidden = document.hidden;
       syncPolling();
     };
     documentHidden = document.hidden;
     document.addEventListener('visibilitychange', onVis);
-    cleanupSearchListener = () => {
-      textarea?.removeEventListener('focus', onTextareaFocus);
-      document.removeEventListener('aerotab:search', searchListener);
-      document.removeEventListener('aerotab:settings-changed', settingsListener);
-      document.removeEventListener('aerotab:terminal-copy', copyListener);
-      document.removeEventListener('aerotab:terminal-font-delta', fontListener);
-      document.removeEventListener('aerotab:session-ended-action', endedListener);
-      document.removeEventListener('aerotab:focus-pane', focusListener);
-      document.removeEventListener('aerotab:fit-pane', fitListener);
-      document.removeEventListener('visibilitychange', onVis);
-    };
 
     term.onData((data) => {
       if (shouldSuppressMacSpuriousInput(data)) return;
@@ -950,11 +1071,13 @@
         safeFit();
       });
     });
-    if (host) ro.observe(host);
+    ro.observe(host);
 
     applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
     await configureTransferFilter(cfg.experimentalTransferDetection);
     syncPolling();
+    frontendReady = true;
+    reportFrontendKind();
 
     const onSessionsClosing = (ev: Event) => {
       const ids = (ev as CustomEvent<SessionsClosingDetail>).detail?.sessionIds;
@@ -968,7 +1091,34 @@
     cleanupHost = () => {
       ro.disconnect();
       document.removeEventListener(SESSIONS_CLOSING, onSessionsClosing);
+      textarea?.removeEventListener('focus', onTextareaFocus);
+      document.removeEventListener('visibilitychange', onVis);
     };
+
+    if (bindShared) {
+      const unbindShared = bindSharedTerminalListeners({ xtermSettingsGate: true });
+      cleanupSearchListener = () => {
+        cleanupHost?.();
+        cleanupHost = null;
+        unbindShared();
+      };
+    }
+  }
+
+  onMount(async () => {
+    const cfg = await loadTermSettings();
+    if (cfg.renderer === 'native') {
+      useNative = true;
+      applyNativeCfg(cfg);
+      applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
+      void configureTransferFilter(cfg.experimentalTransferDetection);
+      frontendReady = true;
+      reportFrontendKind();
+      // Native path: no session.poll — the engine owns the output receiver.
+      cleanupSearchListener = bindSharedTerminalListeners();
+      return;
+    }
+    await bootXterm(cfg);
   });
 
   let cleanupHost: (() => void) | null = null;
@@ -1025,6 +1175,22 @@
     });
   });
 
+  function reportFrontendKind() {
+    const kind: TerminalFrontendKind = !frontendReady
+      ? 'pending'
+      : useNative
+        ? 'native'
+        : (`xterm-${activeRenderer}` as TerminalFrontendKind);
+    terminalUi.report(session.id, kind);
+  }
+
+  $effect(() => {
+    void useNative;
+    void activeRenderer;
+    void frontendReady;
+    reportFrontendKind();
+  });
+
   let wasActive = false;
   $effect(() => {
     const isActive = active;
@@ -1034,15 +1200,111 @@
     untrack(() => tabs.clearActivity(session.id));
     scheduleTerminalFit(() => {
       safeFit(true);
-      if (!searchOpen) focusTerminalAuto(term, host);
+      if (searchOpen) return;
+      if (useNative) nativeCtl?.focus();
+      else focusTerminalAuto(term, host);
     });
   });
+
+  async function teardownXtermInstance() {
+    cancelPolling();
+    try { rendererAddon?.dispose(); } catch { /* ignore */ }
+    rendererAddon = null;
+    activeRenderer = 'dom';
+    windowsCaretFix?.();
+    windowsCaretFix = null;
+    macTextareaGuard?.();
+    macTextareaGuard = null;
+    try { search?.dispose(); } catch { /* ignore */ }
+    search = null;
+    try { fit?.dispose(); } catch { /* ignore */ }
+    fit = null;
+    try { term?.dispose(); } catch { /* ignore */ }
+    term = null;
+    cleanupHost?.();
+    cleanupHost = null;
+  }
+
+  async function switchToNativeFrontend(
+    cfg: Awaited<ReturnType<typeof loadTermSettings>>,
+  ) {
+    if (switchingFrontend) return;
+    switchingFrontend = true;
+    try {
+      seedNativeFromReplay = cachedReplayChunks(session.id).length > 0;
+      await teardownXtermInstance();
+      applyNativeCfg(cfg);
+      applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
+      await configureTransferFilter(cfg.experimentalTransferDetection);
+      useNative = true;
+      frontendReady = false;
+      reportFrontendKind();
+      await tick();
+      // NativeTerminalView mounts and calls onNativeReady.
+    } finally {
+      switchingFrontend = false;
+    }
+  }
+
+  async function switchToXtermFrontend(
+    cfg: Awaited<ReturnType<typeof loadTermSettings>>,
+  ) {
+    if (switchingFrontend) return;
+    switchingFrontend = true;
+    try {
+      try {
+        const exported = await rpc.call<{ text?: string }>('terminal.exportText', {
+          id: session.id,
+        });
+        if (typeof exported?.text === 'string') {
+          replaceReplayWithText(session.id, exported.text);
+        }
+      } catch (err) {
+        console.warn('native exportText failed', err);
+      }
+      // Must detach so session.poll can feed xterm (engine owns output while attached).
+      await nativeCtl?.dispose({ detachEngine: true });
+      nativeCtl = null;
+      useNative = false;
+      frontendReady = false;
+      reportFrontendKind();
+      await tick();
+      if (!host) {
+        frontendReady = true;
+        reportFrontendKind();
+        return;
+      }
+      // Shared document listeners already bound from the previous frontend.
+      await bootXterm(cfg, { bindSharedListeners: false });
+    } finally {
+      switchingFrontend = false;
+    }
+  }
 
   // Live-apply settings changes (font / theme / scrollback) without re-mounting
   // the terminal. xterm's options object accepts partial updates.
   async function reloadSettingsLive() {
-    if (!term) return;
     const cfg = await loadTermSettings();
+    const wantNative = cfg.renderer === 'native';
+    if (wantNative !== useNative) {
+      if (wantNative) await switchToNativeFrontend(cfg);
+      else await switchToXtermFrontend(cfg);
+      return;
+    }
+    if (useNative) {
+      applyNativeCfg(cfg);
+      nativeCtl?.setFont({
+        family: nativeFontFamily,
+        size: nativeFontSize,
+        weight: nativeFontWeight,
+        weightBold: nativeFontWeightBold,
+        linePadding: nativeLinePadding,
+      });
+      if (nativeTheme) nativeCtl?.setTheme(nativeTheme);
+      applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
+      await configureTransferFilter(cfg.experimentalTransferDetection);
+      return;
+    }
     if (!term) return;
     term.options.fontFamily = cfg.fontFamily;
     term.options.fontSize = cfg.fontSize + sessionFontDelta;
@@ -1072,11 +1334,18 @@
 
   $effect(() => {
     void settingsRev;
+    if (useNative) {
+      void reloadSettingsLive();
+      return;
+    }
     if (!term) return;
     void reloadSettingsLive();
   });
 
   onDestroy(() => {
+    terminalUi.clear(session.id);
+    void nativeCtl?.dispose();
+    nativeCtl = null;
     const termToDispose = term;
     const searchToDispose = search;
     const rendererToDispose = rendererAddon;
@@ -1097,14 +1366,16 @@
     search = null;
     term = null;
     rendererAddon = null;
-    scheduleTerminalTeardown({
-      term: termToDispose,
-      search: searchToDispose,
-      rendererAddon: rendererToDispose,
-      beforeDispose: () => {
-        if (filterToStop?.isTransferringFiles()) filterToStop.stopTransferringFiles();
-      },
-    });
+    if (termToDispose) {
+      scheduleTerminalTeardown({
+        term: termToDispose,
+        search: searchToDispose,
+        rendererAddon: rendererToDispose,
+        beforeDispose: () => {
+          if (filterToStop?.isTransferringFiles()) filterToStop.stopTransferringFiles();
+        },
+      });
+    }
   });
 
   // --- search ---
@@ -1116,6 +1387,15 @@
     });
   }
   function runSearch(direction: 'next' | 'prev') {
+    if (useNative) {
+      if (!searchQuery || !nativeCtl) return;
+      void nativeCtl.search(searchQuery, {
+        caseSensitive: searchCase,
+        regex: searchRegex,
+        direction,
+      });
+      return;
+    }
     if (!search || !searchQuery) return;
     const opts = { caseSensitive: searchCase, regex: searchRegex };
     if (direction === 'next') search.findNext(searchQuery, opts);
@@ -1124,7 +1404,10 @@
   function closeSearch() {
     searchOpen = false;
     search?.clearDecorations();
-    requestAnimationFrame(() => focusTerminalIfAllowed(term));
+    requestAnimationFrame(() => {
+      if (useNative) nativeCtl?.focus();
+      else focusTerminalIfAllowed(term);
+    });
   }
 
   // --- context menu ---
@@ -1153,7 +1436,9 @@
   }
   async function doCopy() {
     menuOpen = false;
-    const sel = term?.getSelection();
+    const sel = useNative
+      ? await nativeCtl?.selectionText()
+      : term?.getSelection();
     if (!sel) return;
     if (copyWithFormatting && navigator.clipboard && 'write' in navigator.clipboard) {
       try {
@@ -1188,6 +1473,10 @@
     if (pasteMultilineWarn && text.includes('\n') && text.length > 200) {
       if (!(await appConfirm(i18n.t('terminal.pasteConfirm', { count: text.length })))) return;
     }
+    if (useNative) {
+      await nativeCtl?.paste(text);
+      return;
+    }
     if (bracketedPaste) {
       term?.paste(text);
     } else {
@@ -1197,12 +1486,16 @@
   }
   async function doPaste() { await doPasteFromClipboard(); }
   function triggerBell() {
-    if (bellMode === 'off' || !host) return;
+    if (bellMode === 'off') return;
+    const surface = host ?? document.querySelector(
+      `.terminal-host`,
+    ) as HTMLElement | null;
     if (bellMode === 'visual') {
-      host.classList.add('bell-flash');
+      if (!surface) return;
+      surface.classList.add('bell-flash');
       if (bellFlashHandle != null) window.clearTimeout(bellFlashHandle);
       bellFlashHandle = window.setTimeout(() => {
-        host?.classList.remove('bell-flash');
+        surface.classList.remove('bell-flash');
         bellFlashHandle = null;
       }, 180);
     } else if (bellMode === 'audible') {
@@ -1223,6 +1516,11 @@
   }
   function doClear() {
     menuOpen = false;
+    if (useNative) {
+      // Clear viewport by scrolling to bottom + feeding form feed; keep scrollback.
+      void nativeCtl?.clearSelection();
+      return;
+    }
     term?.clear();
   }
   function doSearchAction() {
@@ -1231,6 +1529,10 @@
   }
   function doSelectAll() {
     menuOpen = false;
+    if (useNative) {
+      void nativeCtl?.selectAll();
+      return;
+    }
     term?.selectAll();
   }
 
@@ -1308,23 +1610,6 @@
     }
   }
 
-  async function startNativeEngine() {
-    if (!engineCanvas) return;
-    try {
-      engineController = new NativeEngineController(rpc);
-      await engineController.start(engineCanvas, 80, 24);
-      engineCanvas?.focus();
-    } catch (err: any) {
-      console.warn('[native-engine] failed:', err);
-      engineController = null;
-    }
-  }
-
-  function stopNativeEngine() {
-    engineController?.close();
-    engineController = null;
-  }
-
   async function openExternalNativeTerminal() {
     menuOpen = false;
     try {
@@ -1335,40 +1620,97 @@
     }
   }
 
-  function onEngineKeydown(e: KeyboardEvent) {
-    if (!engineController) return;
-    let s = e.key;
-    if (s === 'Enter') s = '\r';
-    if (s === 'Backspace') s = '\x7f';
-    if (s === 'Tab') s = '\t';
-    if (s === 'Escape') s = '\x1b';
-    if (s.length === 1 || s === '\r' || s === '\x7f' || s === '\t' || s === '\x1b') {
-      e.preventDefault();
-      engineController.send(s);
+  function onNativeReady(ctl: NativeTerminalController) {
+    nativeCtl = ctl;
+    frontendReady = true;
+    useNative = true;
+    reportFrontendKind();
+    ctl.setVisible(tabVisible && layoutVisible);
+    ctl.setWriteInput(nativeWriteInput);
+    ctl.setLinkModifier(linkModifier);
+    ctl.setCopyOnSelect(copyOnSelect);
+    ctl.setTransferDetect(nativeTransferDetect);
+    cleanupFileDrag?.();
+    if (nativeHost) {
+      cleanupFileDrag = installTerminalFileDrag(nativeHost, {
+        onDragOver: onTransferDragOver,
+        onDrop: (ev) => { void onTransferDrop(ev); },
+      });
     }
+    if (seedNativeFromReplay) {
+      seedNativeFromReplay = false;
+      const chunks = cachedReplayChunks(session.id);
+      void (async () => {
+        for (const chunk of chunks) {
+          try {
+            await ctl.feed(chunk.bytes);
+          } catch (err) {
+            console.warn('native replay feed failed', err);
+            break;
+          }
+        }
+      })();
+    }
+    if (active) ctl.focus();
+  }
+
+  function onNativeExit() {
+    if (!exited) markExited();
   }
 </script>
 
-<div
-  bind:this={host}
-  role="application"
-  data-aerotab-context-menu=""
-  class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
-         {active ? '' : 'pointer-events-none opacity-[0.92]'}"
-  class:hidden={!!engineController}
-  oncontextmenu={onContextMenu}
-  onpointerup={onPointerUp}
-  ondragover={onTransferDragOver}
-  ondrop={onTransferDrop}
-></div>
-
-{#if engineController}
-  <canvas
-    bind:this={engineCanvas}
-    class="absolute inset-0 w-full h-full outline-none"
-    onkeydown={onEngineKeydown}
-    tabindex="0"
-  ></canvas>
+{#if useNative}
+  <div
+    bind:this={nativeHost}
+    role="application"
+    data-aerotab-context-menu=""
+    class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
+           {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+    oncontextmenu={onContextMenu}
+    onpointerup={onPointerUp}
+    ondragover={onTransferDragOver}
+    ondrop={onTransferDrop}
+  >
+    <NativeTerminalView
+      {rpc}
+      sessionId={session.id}
+      fontFamily={nativeFontFamily}
+      fontSize={nativeFontSize}
+      fontWeight={nativeFontWeight}
+      fontWeightBold={nativeFontWeightBold}
+      linePadding={nativeLinePadding}
+      scrollback={nativeScrollback}
+      cursorBlink={nativeCursorBlink}
+      altIsMeta={nativeAltIsMeta}
+      ligatures={nativeLigatures}
+      theme={nativeTheme}
+      translucent={isTranslucent()}
+      transferDetect={nativeTransferDetect}
+      linkModifier={linkModifier}
+      copyOnSelect={copyOnSelect}
+      writeInput={nativeWriteInput}
+      visible={tabVisible && layoutVisible}
+      onBell={triggerBell}
+      onExit={onNativeExit}
+      onActivity={() => { if (!active) tabs.markActivity(session.id, 'output'); }}
+      onRaw={onNativeRaw}
+      onTrzszDetected={onNativeTrzszDetected}
+      onReady={onNativeReady}
+      onError={onError}
+    />
+  </div>
+{:else}
+  <div
+    bind:this={host}
+    role="application"
+    data-aerotab-context-menu=""
+    class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
+           {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+    oncontextmenu={onContextMenu}
+    onpointerup={onPointerUp}
+    ondragover={onTransferDragOver}
+    ondrop={onTransferDrop}
+  ></div>
 {/if}
 
 {#if exited}
@@ -1557,11 +1899,6 @@
         <button type="button" class="menu-item" onclick={() => { void openExternalNativeTerminal(); }}>
           {i18n.t('terminal.openExternalNative')}
         </button>
-      {/if}
-      {#if !engineController}
-        <button type="button" class="menu-item" onclick={() => { menuOpen = false; void startNativeEngine(); }}>Try Native Engine (Canvas)</button>
-      {:else}
-        <button type="button" class="menu-item" onclick={() => { menuOpen = false; stopNativeEngine(); }}>Stop Native Engine</button>
       {/if}
     </div>
   </div>

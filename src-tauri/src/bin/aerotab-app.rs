@@ -53,6 +53,7 @@ const TRAY_QUIT_ID: &str = "tray-quit";
 
 struct AppRpc {
     dispatcher: Arc<Dispatcher>,
+    state: Arc<AppState>,
 }
 
 struct DesktopWindowState {
@@ -249,6 +250,27 @@ async fn rpc(
     };
     let resp = state.dispatcher.dispatch(req).await;
     serde_json::to_value(resp).map_err(|e| e.to_string())
+}
+
+/// Connect a native terminal engine (created via RPC `terminal.attach`) to a
+/// Tauri channel. Every encoded frame is pushed as raw bytes (`ArrayBuffer`
+/// on the JS side). Passing a new channel replaces the previous sink.
+#[tauri::command]
+async fn terminal_frames(
+    state: tauri::State<'_, AppRpc>,
+    session_id: String,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<(), String> {
+    let id = uuid::Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let engine = state
+        .state
+        .terminal_engines
+        .get(id)
+        .ok_or_else(|| format!("no terminal engine for {id}"))?;
+    engine.set_sink(Some(Arc::new(move |bytes: Vec<u8>| {
+        let _ = on_frame.send(tauri::ipc::InvokeResponseBody::Raw(bytes));
+    })));
+    Ok(())
 }
 
 /// Probe the configured updater endpoint and return a structured status the
@@ -754,7 +776,7 @@ fn main() {
                 .unwrap_or_else(|_| std::env::temp_dir().join("aerotab"));
 
             let rt = tauri::async_runtime::handle();
-            let (dispatcher, settings_store) = rt.block_on(async {
+            let (dispatcher, core_state, settings_store) = rt.block_on(async {
                 aerotab_core::core::init().await?;
                 aerotab_core::ipc::init().await?;
                 aerotab_core::ssh::init().await?;
@@ -837,9 +859,10 @@ fn main() {
                     Err(e) => tracing::warn!(error = %e, "wasm plugin load failed"),
                 }
 
-                register_all(&d, state);
-                Ok::<(Arc<Dispatcher>, Option<SettingsStore>), anyhow::Error>((
+                register_all(&d, state.clone());
+                Ok::<(Arc<Dispatcher>, Arc<AppState>, Option<SettingsStore>), anyhow::Error>((
                     Arc::new(d),
+                    state,
                     desktop_settings_store,
                 ))
             })?;
@@ -861,7 +884,10 @@ fn main() {
                 false
             };
 
-            app.manage(AppRpc { dispatcher });
+            app.manage(AppRpc {
+                dispatcher,
+                state: core_state,
+            });
             app.manage(DesktopWindowState {
                 settings: settings_store,
                 tray_available,
@@ -935,6 +961,7 @@ fn main() {
             open_file_transfer_window,
             close_current_window,
             rpc,
+            terminal_frames,
             check_update,
             install_update,
             pick_open_files,

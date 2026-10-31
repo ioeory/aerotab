@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use reqwest::{header, Client, Method, StatusCode};
 use uuid::Uuid;
 
+use crate::sync::blob::{normalize_blob_path, BlobMeta, BlobStore};
 use crate::sync::{Group, RecordId, SyncBackend, SyncError};
 
 #[derive(Debug, Clone)]
@@ -205,6 +206,188 @@ impl SyncBackend for WebDavBackend {
     }
 }
 
+impl WebDavBackend {
+    fn blob_url(&self, path: &str) -> Result<String, SyncError> {
+        let rel = normalize_blob_path(path)?;
+        Ok(format!("{}{rel}", self.base_url))
+    }
+
+    async fn ensure_blob_parents(&self, path: &str) -> Result<(), SyncError> {
+        let rel = normalize_blob_path(path)?;
+        let mut acc = String::new();
+        let parts: Vec<&str> = rel.split('/').collect();
+        // Create every directory segment except the final file name.
+        for seg in parts.iter().take(parts.len().saturating_sub(1)) {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            let url = format!("{}{acc}/", self.base_url);
+            let rb = self
+                .client
+                .request(Method::from_bytes(b"MKCOL").unwrap(), &url);
+            let resp = self.auth(rb).send().await.map_err(transport)?;
+            match resp.status().as_u16() {
+                201 | 200 | 405 => {}
+                401 | 403 => return Err(SyncError::Auth),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BlobStore for WebDavBackend {
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<BlobMeta>, SyncError> {
+        let prefix = prefix.trim_start_matches('/');
+        let url = if prefix.is_empty() {
+            self.base_url.clone()
+        } else if prefix.ends_with('/') {
+            format!("{}{prefix}", self.base_url)
+        } else {
+            format!("{}{prefix}/", self.base_url)
+        };
+        let rb = self
+            .client
+            .request(Method::from_bytes(b"PROPFIND").unwrap(), &url)
+            .header("Depth", "infinity")
+            .header(header::CONTENT_TYPE, "application/xml")
+            .body(PROPFIND_BODY);
+        let resp = self.auth(rb).send().await.map_err(transport)?;
+        match resp.status().as_u16() {
+            207 => {}
+            404 => return Ok(vec![]),
+            401 | 403 => return Err(SyncError::Auth),
+            code => return Err(SyncError::Transport(format!("PROPFIND blob -> {code}"))),
+        }
+        let body = resp.text().await.map_err(transport)?;
+        Ok(parse_propfind_blobs(&body, &self.base_url, prefix))
+    }
+
+    async fn get_blob(&self, path: &str) -> Result<Vec<u8>, SyncError> {
+        let url = self.blob_url(path)?;
+        let resp = self
+            .auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(transport)?;
+        match resp.status() {
+            StatusCode::OK => Ok(resp.bytes().await.map_err(transport)?.to_vec()),
+            StatusCode::NOT_FOUND => Err(SyncError::Transport(format!("missing: {url}"))),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(SyncError::Auth),
+            code => Err(SyncError::Transport(format!("GET blob -> {code}"))),
+        }
+    }
+
+    async fn put_blob(&self, path: &str, bytes: &[u8]) -> Result<(), SyncError> {
+        let _ = self.ensure_blob_parents(path).await;
+        let url = self.blob_url(path)?;
+        let tmp = format!("{url}.tmp");
+        let resp = self
+            .auth(self.client.put(&tmp))
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(transport)?;
+        match resp.status().as_u16() {
+            200 | 201 | 204 => {}
+            401 | 403 => return Err(SyncError::Auth),
+            code => return Err(SyncError::Transport(format!("PUT blob tmp -> {code}"))),
+        }
+        let move_rb = self
+            .client
+            .request(Method::from_bytes(b"MOVE").unwrap(), &tmp)
+            .header("Destination", &url)
+            .header("Overwrite", "T");
+        let resp = self.auth(move_rb).send().await.map_err(transport)?;
+        match resp.status().as_u16() {
+            200 | 201 | 204 => Ok(()),
+            401 | 403 => Err(SyncError::Auth),
+            405 | 501 => {
+                let resp = self
+                    .auth(self.client.put(&url))
+                    .body(bytes.to_vec())
+                    .send()
+                    .await
+                    .map_err(transport)?;
+                match resp.status().as_u16() {
+                    200 | 201 | 204 => Ok(()),
+                    code => Err(SyncError::Transport(format!("PUT blob fallback -> {code}"))),
+                }
+            }
+            code => Err(SyncError::Transport(format!("MOVE blob -> {code}"))),
+        }
+    }
+
+    async fn delete_blob(&self, path: &str) -> Result<(), SyncError> {
+        let url = self.blob_url(path)?;
+        let resp = self
+            .auth(self.client.delete(&url))
+            .send()
+            .await
+            .map_err(transport)?;
+        match resp.status().as_u16() {
+            200 | 202 | 204 | 404 => Ok(()),
+            401 | 403 => Err(SyncError::Auth),
+            code => Err(SyncError::Transport(format!("DELETE blob -> {code}"))),
+        }
+    }
+}
+
+/// Extract blob paths from a PROPFIND multistatus, filtered by `prefix`.
+fn parse_propfind_blobs(body: &str, base_url: &str, prefix: &str) -> Vec<BlobMeta> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let base_path = {
+        let mut p = base_url.trim_end_matches('/').to_string();
+        if let Some(idx) = p.find("://") {
+            if let Some(slash) = p[idx + 3..].find('/') {
+                p = p[idx + 3 + slash..].to_string();
+            } else {
+                p.clear();
+            }
+        }
+        p.trim_start_matches('/').to_string()
+    };
+    for href_seg in body.split("<d:href>").skip(1) {
+        let Some(end) = href_seg.find("</d:href>") else {
+            continue;
+        };
+        let href = href_seg[..end].trim();
+        if href.ends_with('/') {
+            continue; // collection
+        }
+        let rel = if let Some(rest) = href.strip_prefix('/') {
+            if !base_path.is_empty() {
+                rest.strip_prefix(&base_path)
+                    .map(|s| s.trim_start_matches('/'))
+                    .unwrap_or(rest)
+            } else {
+                rest
+            }
+        } else if let Some(idx) = href.rfind(&base_path) {
+            href[idx + base_path.len()..].trim_start_matches('/')
+        } else {
+            href.rsplit('/').next().unwrap_or(href)
+        };
+        let rel = rel.trim_start_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        if !prefix.is_empty() && !rel.starts_with(prefix) {
+            continue;
+        }
+        if seen.insert(rel.to_string()) {
+            out.push(BlobMeta {
+                path: rel.to_string(),
+                size: 0, // PROPFIND without getcontentlength
+            });
+        }
+    }
+    out
+}
+
 /// Extract `<id>.bin` UUIDs from a `multistatus` PROPFIND response.
 /// Uses a substring scan to avoid pulling in an XML parser.
 fn parse_propfind_ids(body: &str) -> Vec<RecordId> {
@@ -260,5 +443,18 @@ mod tests {
     fn group_segments_stable() {
         assert_eq!(group_segment(Group::Connections), "connections");
         assert_eq!(group_segment(Group::Credentials), "credentials");
+    }
+
+    #[test]
+    fn parse_propfind_blobs_filters_prefix() {
+        let body = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/dav/sync/v2/devices/a/ops/</d:href></d:response>
+  <d:response><d:href>/dav/sync/v2/devices/a/ops/0001.bin</d:href></d:response>
+  <d:response><d:href>/dav/sync/v2/snapshots/latest</d:href></d:response>
+</d:multistatus>"#;
+        let blobs = parse_propfind_blobs(body, "https://dav.example/dav/sync/", "v2/devices/");
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].path, "v2/devices/a/ops/0001.bin");
     }
 }

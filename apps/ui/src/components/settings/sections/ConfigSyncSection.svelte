@@ -112,15 +112,39 @@
   let lastSyncMs = $state<number | null>(null);
   let autoIntervalMs = $state<number | null>(null);
   let kindLive = $state<Backend | null>(null);
+  let protocol = $state<number>(1);
+  let ownSeq = $state<number | null>(null);
+  let cursors = $state<Record<string, number> | null>(null);
+  let lastOplog = $state<{
+    bytesDownloaded?: number;
+    bytesUploaded?: number;
+    opsApplied?: number;
+    snapshotUsed?: boolean;
+    compacted?: boolean;
+  } | null>(null);
   let busy = $state(false);
   let info = $state('');
   let infoTone = $state<'info' | 'ok' | 'err'>('info');
 
   type SyncStatsPayload = { pushed?: number; pulled?: number; merged?: number; unchanged?: number };
+  type OplogStatsPayload = {
+    bytesDownloaded?: number;
+    bytesUploaded?: number;
+    opsApplied?: number;
+    snapshotUsed?: boolean;
+    compacted?: boolean;
+  };
 
   function setSyncInfo(tone: 'info' | 'ok' | 'err', message: string) {
     infoTone = tone;
     info = message;
+  }
+
+  function formatBytes(n: number | undefined): string {
+    if (n == null) return '0 B';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
   }
 
   function formatSyncStats(stats: Record<string, unknown> | null | undefined): string {
@@ -128,8 +152,9 @@
       credentials_skipped_locked?: boolean;
       credentials_skipped_uninitialized?: boolean;
     } | undefined;
-    const entries = Object.entries(stats ?? {}).filter(([k]) => k !== '_bridge');
-    if (entries.length === 0) {
+    const oplog = stats?._oplog as OplogStatsPayload | undefined;
+    const entries = Object.entries(stats ?? {}).filter(([k]) => k !== '_bridge' && k !== '_oplog');
+    if (entries.length === 0 && !oplog) {
       return i18n.t('sync.complete', { count: 0 });
     }
     let pushed = 0;
@@ -151,6 +176,15 @@
       unchanged,
     });
     const notes: string[] = [];
+    if (oplog) {
+      notes.push(i18n.t('sync.oplogBytesLine', {
+        up: formatBytes(oplog.bytesUploaded),
+        down: formatBytes(oplog.bytesDownloaded),
+        ops: oplog.opsApplied ?? 0,
+      }));
+      if (oplog.snapshotUsed) notes.push(i18n.t('sync.oplogSnapshotUsed'));
+      if (oplog.compacted) notes.push(i18n.t('sync.oplogCompacted'));
+    }
     if (bridge?.credentials_skipped_locked) {
       notes.push(i18n.t('sync.credentialsSkippedLocked'));
     }
@@ -347,6 +381,7 @@
         gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
         keyringAccount, vaultKeyringAccount, gitHttpsKeyringAccount: GIT_HTTPS_KEYRING,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
+        protocol: 2,
       },
     });
   }
@@ -359,14 +394,56 @@
         deviceId: string | null;
         lastSyncMs: number | null;
         autoIntervalMs: number | null;
+        protocol?: number;
+        ownSeq?: number | null;
+        cursors?: Record<string, number> | null;
+        lastOplog?: OplogStatsPayload | null;
       }>('sync.status', {});
       configured = s.configured;
       kindLive = s.kind;
       deviceId = s.deviceId;
       lastSyncMs = s.lastSyncMs;
       autoIntervalMs = s.autoIntervalMs;
+      protocol = s.protocol ?? (s.configured ? 2 : 1);
+      ownSeq = s.ownSeq ?? null;
+      cursors = s.cursors ?? null;
+      lastOplog = s.lastOplog ?? null;
     } catch {
       /* engine not configured yet */
+    }
+  }
+
+  async function compactNow() {
+    if (!configured) return;
+    busy = true;
+    setSyncInfo('info', i18n.t('sync.compacting'));
+    try {
+      await rpc.call('sync.compact', { groups: selectedGroups() });
+      setSyncInfo('ok', i18n.t('sync.compactDone'));
+      await refreshStatus();
+    } catch (e) {
+      setSyncInfo('err', i18n.t('sync.compactFailed', { message: (e as Error).message }));
+      onError(`sync compact: ${(e as Error).message}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function purgeV1() {
+    if (!configured) return;
+    if (!(await appConfirm(i18n.t('sync.purgeV1Confirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) {
+      return;
+    }
+    busy = true;
+    try {
+      const r = await rpc.call<{ deleted: number }>('sync.purgeV1', {});
+      setSyncInfo('ok', i18n.t('sync.purgeV1Done', { count: r.deleted }));
+      await refreshStatus();
+    } catch (e) {
+      setSyncInfo('err', (e as Error).message);
+      onError(`sync purgeV1: ${(e as Error).message}`);
+    } finally {
+      busy = false;
     }
   }
 
@@ -890,6 +967,7 @@
     Status:
     {#if configured}
       <span class="text-[var(--color-accent)]">configured</span>
+      &middot; protocol <code>v{protocol}</code>
       &middot; backend <code>{kindLive ?? '?'}</code>
       &middot; device <code class="text-[10px]">{deviceId?.slice(0, 8) ?? '?'}</code>
       &middot; last sync <strong>{fmtTime(lastSyncMs)}</strong>
@@ -900,6 +978,40 @@
       <span class="text-[var(--color-fg-muted)]">not configured</span>
     {/if}
   </div>
+
+  {#if configured && protocol >= 2}
+    <div class="mt-2 text-[12px] text-[var(--color-fg-muted)] space-y-1">
+      <div class="section-h">{i18n.t('sync.oplogSectionTitle')}</div>
+      <div>
+        {i18n.t('sync.oplogOwnSeq')}: <code>{ownSeq ?? 0}</code>
+        {#if lastOplog}
+          &middot; ↑{formatBytes(lastOplog.bytesUploaded)}
+          &middot; ↓{formatBytes(lastOplog.bytesDownloaded)}
+          &middot; ops {lastOplog.opsApplied ?? 0}
+          {#if lastOplog.snapshotUsed}&middot; {i18n.t('sync.oplogSnapshotUsed')}{/if}
+          {#if lastOplog.compacted}&middot; {i18n.t('sync.oplogCompacted')}{/if}
+        {/if}
+      </div>
+      {#if cursors && Object.keys(cursors).length > 0}
+        <div class="font-mono text-[11px] max-h-24 overflow-auto border border-[var(--color-border-soft)] rounded px-2 py-1">
+          {#each Object.entries(cursors) as [id, seq] (id)}
+            <div>{id.slice(0, 8)}… → {seq}</div>
+          {/each}
+        </div>
+      {/if}
+      <div class="flex gap-2 flex-wrap pt-1">
+        <button type="button" class="btn-secondary text-[11px] py-1 px-2" disabled={busy}
+          onclick={() => void compactNow()}>
+          {i18n.t('sync.compactNow')}
+        </button>
+        <button type="button" class="btn-secondary text-[11px] py-1 px-2" disabled={busy}
+          onclick={() => void purgeV1()}>
+          {i18n.t('sync.purgeV1')}
+        </button>
+      </div>
+      <div class="help">{i18n.t('sync.oplogHelp')}</div>
+    </div>
+  {/if}
 
   <div>
     <div class="section-h">Backend</div>

@@ -1,23 +1,15 @@
 <script lang="ts">
-  import { GripVertical, Maximize2, Minimize2, X } from '@lucide/svelte';
   import PaneNodeView from './PaneNodeView.svelte';
-  import TerminalPane from './TerminalPane.svelte';
-  import { tabs, type PaneDropSide, type PaneNode, type Tab } from '../lib/tabs.svelte';
-  import { dispatchFitAllPanes, dispatchFocusPane } from '../lib/focusPane';
-  import {
-    endPaneDrag,
-    getPaneDragHit,
-    isPaneDragActive,
-    startPointerPaneDrag,
-    subscribePaneDragHit,
-    type PaneDropHit,
-  } from '../lib/paneDrag';
-  import { onMount } from 'svelte';
+  import { tabs, type PaneNode, type Tab } from '../lib/tabs.svelte';
+  import { isPaneDragActive } from '../lib/paneDrag';
   import { i18n } from '../lib/i18n.svelte';
   import type { RpcClient } from '../lib/rpc';
-  import { closeSessionsInBackground } from '../lib/sessionClose';
-  import { notifySessionsClosing } from '../lib/sessionLifecycle';
 
+  /**
+   * Layout chrome only (flex splitters + measure slots).
+   * TerminalPane + pane buttons live in PaneGrid, keyed by session id, so
+   * leaf→split reparenting never remounts / clears VT state.
+   */
   interface Props {
     rpc: RpcClient;
     tab: Tab;
@@ -36,63 +28,20 @@
     rpc,
     tab,
     node,
-    settingsRev,
-    onOpenSftp,
-    onSplitRight,
-    onSplitDown,
-    broadcastEnabled = false,
-    broadcastTargetIds = [],
-    tabVisible = true,
-    onError,
+    settingsRev: _settingsRev,
+    onOpenSftp: _onOpenSftp,
+    onSplitRight: _onSplitRight,
+    onSplitDown: _onSplitDown,
+    broadcastEnabled: _broadcastEnabled = false,
+    broadcastTargetIds: _broadcastTargetIds = [],
+    tabVisible: _tabVisible = true,
+    onError: _onError,
   }: Props = $props();
   let host: HTMLDivElement | null = $state(null);
-  let dragHandle: HTMLDivElement | null = $state(null);
   let dragging: { idx: number; startPx: number; startRatios: number[] } | null = null;
-  let dragHit = $state<PaneDropHit | null>(null);
-
-  onMount(() => subscribePaneDragHit(() => {
-    dragHit = getPaneDragHit();
-  }));
 
   const maximized = $derived(tab.maximizedPaneId ?? null);
   const hiddenByMaximize = $derived(!!maximized && !tabs.nodeContains(node, maximized));
-
-  function closePane(sessionId: string, ev: Event) {
-    ev.stopPropagation();
-    const result = tabs.removePane(tab.id, sessionId);
-    if (!result) return;
-    notifySessionsClosing([sessionId]);
-    closeSessionsInBackground(rpc, [sessionId]);
-  }
-
-  function focusPane(sessionId: string) {
-    tabs.focusPane(tab.id, sessionId);
-    requestAnimationFrame(() => dispatchFocusPane(sessionId));
-  }
-
-  function toggleMaximize(sessionId: string, ev: Event) {
-    ev.stopPropagation();
-    focusPane(sessionId);
-    tabs.toggleMaximize(tab.id, sessionId);
-    dispatchFitAllPanes(tab.panes.map((p) => p.id));
-  }
-
-  const dropSide = $derived(
-    node.type === 'leaf'
-      && dragHit?.kind === 'pane'
-      && dragHit.paneId === node.pane.id
-      ? dragHit.side
-      : null,
-  );
-
-  function dropBandStyle(side: PaneDropSide): string {
-    switch (side) {
-      case 'left': return 'left: 0; top: 0; width: 34%; height: 100%;';
-      case 'right': return 'right: 0; top: 0; width: 34%; height: 100%;';
-      case 'up': return 'left: 0; top: 0; width: 100%; height: 34%;';
-      case 'down': return 'left: 0; bottom: 0; width: 100%; height: 34%;';
-    }
-  }
 
   function onResize(idx: number, ev: PointerEvent) {
     if (!host || node.type !== 'split') return;
@@ -131,94 +80,18 @@
 </script>
 
 {#if node.type === 'leaf'}
-  {@const focused = tab.activePaneId === node.pane.id}
   <div
-    role="group"
-    tabindex="-1"
+    role="presentation"
     style="display: {hiddenByMaximize ? 'none' : 'block'};"
-    class="relative group h-full w-full min-w-0 min-h-0 bg-[var(--color-bg)] {focused ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
-    data-pane-drop-tab={tab.id}
-    data-pane-drop-pane={node.pane.id}
-    onpointerdown={() => focusPane(node.pane.id)}
-  >
-    {#if tab.panes.length > 1}
-      <div
-        bind:this={dragHandle}
-        class="pane-drag-handle absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[10px]
-               bg-[var(--color-panel)]/80 backdrop-blur border border-[var(--color-border-soft)]
-               cursor-grab active:cursor-grabbing select-none touch-none
-               opacity-0 pointer-events-none transition-opacity
-               group-hover:opacity-100 group-hover:pointer-events-auto
-               group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
-        title={i18n.t('pane.movePane')}
-        aria-label={i18n.t('pane.movePane')}
-        onpointerdown={(e) => {
-          e.stopPropagation();
-          if (dragHandle) startPointerPaneDrag(tab.id, node.pane.id, e, dragHandle);
-        }}
-        onlostpointercapture={() => endPaneDrag()}
-      >
-        <GripVertical size={11} />
-        <span>{tabs.paneIndex(tab, node.pane.id) + 1}</span>
-      </div>
-    {/if}
-    {#key node.pane.id}
-      <TerminalPane
-        {rpc}
-        session={node.pane}
-        active={focused}
-        layoutVisible={!hiddenByMaximize}
-        {tabVisible}
-        {settingsRev}
-        onClosePane={() => closePane(node.pane.id, new Event('close'))}
-        {onOpenSftp}
-        {onSplitRight}
-        {onSplitDown}
-        onMaximize={() => toggleMaximize(node.pane.id, new Event('click'))}
-        {broadcastEnabled}
-        {broadcastTargetIds}
-        {onError}
-      />
-    {/key}
-    {#if tab.panes.length > 1}
-      <button
-        type="button"
-        title={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
-        aria-label={tab.maximizedPaneId === node.pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
-        class="btn-ghost absolute top-1 right-7 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)]
-               opacity-0 pointer-events-none transition-opacity
-               group-hover:opacity-100 group-hover:pointer-events-auto
-               group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
-        onclick={(e) => toggleMaximize(node.pane.id, e)}
-        onpointerdown={(e) => e.stopPropagation()}
-      >
-        {#if tab.maximizedPaneId === node.pane.id}<Minimize2 size={12} />{:else}<Maximize2 size={12} />{/if}
-      </button>
-      <button
-        type="button"
-        title={i18n.t('pane.closePaneShortcut')}
-        aria-label={i18n.t('pane.closePane')}
-        class="btn-ghost absolute top-1 right-1 z-10 p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)] hover:!text-[var(--color-danger)]
-               opacity-0 pointer-events-none transition-opacity
-               group-hover:opacity-100 group-hover:pointer-events-auto
-               group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
-        onclick={(e) => closePane(node.pane.id, e)}
-        onpointerdown={(e) => e.stopPropagation()}
-      >
-        <X size={12} />
-      </button>
-    {/if}
-    {#if dropSide}
-      <div class="absolute inset-0 z-20 pointer-events-none border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10">
-        <div class="absolute bg-[var(--color-accent)]/25" style={dropBandStyle(dropSide)}></div>
-      </div>
-    {/if}
-  </div>
+    class="relative h-full w-full min-w-0 min-h-0 pointer-events-none"
+    data-pane-slot={node.pane.id}
+  ></div>
 {:else}
   <div
     bind:this={host}
+    role="presentation"
     style="display: {hiddenByMaximize ? 'none' : 'flex'};"
-    class="h-full w-full min-w-0 min-h-0 {maximized ? 'flex-1' : ''} {node.direction === 'col' ? 'flex-col' : 'flex-row'}"
+    class="h-full w-full min-w-0 min-h-0 pointer-events-none {maximized ? 'flex-1' : ''} {node.direction === 'col' ? 'flex-col' : 'flex-row'}"
     ondragover={(e) => {
       if (isPaneDragActive()) e.preventDefault();
     }}
@@ -238,14 +111,14 @@
           {rpc}
           {tab}
           node={child}
-          {settingsRev}
-          {tabVisible}
-          {onOpenSftp}
-          {onSplitRight}
-          {onSplitDown}
-          {broadcastEnabled}
-          {broadcastTargetIds}
-          {onError}
+          settingsRev={_settingsRev}
+          tabVisible={_tabVisible}
+          onOpenSftp={_onOpenSftp}
+          onSplitRight={_onSplitRight}
+          onSplitDown={_onSplitDown}
+          broadcastEnabled={_broadcastEnabled}
+          broadcastTargetIds={_broadcastTargetIds}
+          onError={_onError}
         />
       </div>
       {#if idx < node.children.length - 1 && !maximized}
@@ -253,7 +126,7 @@
           type="button"
           aria-label={i18n.t('pane.resizePane')}
           onpointerdown={(e) => onResize(idx, e)}
-          class="bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] transition-colors
+          class="pointer-events-auto z-20 bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] transition-colors
                  {node.direction === 'col' ? 'h-[3px] w-full cursor-row-resize' : 'w-[3px] h-full cursor-col-resize'}"
         ></button>
       {/if}

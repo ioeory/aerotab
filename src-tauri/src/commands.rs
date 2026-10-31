@@ -65,7 +65,7 @@ use uuid::Uuid;
 
 use crate::core::session_manager::{SessionId, SessionKind, SessionManager, SessionMeta};
 use crate::ipc::{Dispatcher, ErrorCode, RpcError};
-use crate::native_terminal::{EmbedRectDip, EmbeddedTerminalRegistry, EngineRegistry};
+use crate::native_terminal::{EmbedRectDip, EmbeddedTerminalRegistry};
 use crate::plugins::wasm_host::WasmHost;
 use crate::profile::{Profile, ProfileKind, ProfileStore, RemoteDesktopSpec};
 use crate::remote;
@@ -81,7 +81,7 @@ use crate::sync::backends::webdav::WebDavBackend;
 use crate::sync::crypto::KdfParams;
 use crate::sync::oauth::{self, OAuthProvider};
 use crate::sync::persistence::SledStore;
-use crate::sync::{Group, RecordId, SyncEngine, SyncStats};
+use crate::sync::{BlobStore, Group, OplogDriver, OplogStats, RecordId, SyncEngine, SyncStats};
 use crate::terminal::{PtyChannel, PtySize};
 
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
@@ -188,6 +188,11 @@ pub struct AppState {
     /// can call `fetch_remote` / `push_remote` outside the abstract
     /// SyncBackend trait.
     pub git_backend: Mutex<Option<GitBackend>>,
+    /// Protocol-2 oplog driver (incremental BlobStore sync). When set,
+    /// `sync.now` uses append-only ops instead of per-record GET.
+    pub oplog: Mutex<Option<Arc<OplogDriver>>>,
+    /// Stats from the most recent oplog cycle (bytes / ops / snapshot).
+    pub oplog_last: Mutex<Option<OplogStats>>,
     /// Open SFTP sessions, keyed by an opaque per-session id.
     pub sftp_sessions: Mutex<HashMap<Uuid, Arc<Sftp>>>,
     /// Resolved SSH profile for each SFTP session, stored so transfer RPCs
@@ -207,8 +212,8 @@ pub struct AppState {
     pub embedded_terminals: EmbeddedTerminalRegistry,
     /// Detached native terminal windows (Alacritty / Kitty / Ghostty).
     pub native_terminals: crate::native_terminal::NativeTerminalRegistry,
-    /// Native terminal engines (alacritty_terminal + PTY, renders cell grids).
-    pub native_engine: EngineRegistry,
+    /// Native terminal engines (VT state in Rust, binary frames to the webview).
+    pub terminal_engines: crate::terminal::engine::TerminalEngineRegistry,
 }
 
 /// Set the parent window HWND. Called once from the Tauri desktop shell after
@@ -577,6 +582,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: IdParam =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let id = SessionId(p.id);
+                st.terminal_engines.remove(p.id);
                 let removed = st.channels.lock().await.remove(&id);
                 if let Some(chan) = removed {
                     match chan {
@@ -642,6 +648,15 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let id = SessionId(p.id);
                 let max = p.max_chunks.unwrap_or(16);
+                // Output owned by a native engine: frames go through the
+                // terminal channel instead; never block on the shared receiver.
+                if let Some(engine) = st.terminal_engines.get(p.id) {
+                    return Ok(json!({
+                        "chunks": Value::Array(vec![]),
+                        "alive": engine.is_alive(),
+                        "native": true,
+                    }));
+                }
                 let (rx, mut alive) = {
                     let mut chans = st.channels.lock().await;
                     let Some(chan) = chans.get_mut(&id) else {
@@ -2896,18 +2911,15 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: ConfigureWebDavParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let backend = Arc::new(WebDavBackend::with_auth(p.base_url, p.user, p.password));
+                let blobs: Arc<dyn BlobStore> = backend.clone();
                 let params_kdf = if p.test_cheap_kdf {
                     KdfParams::test_cheap()
                 } else {
                     KdfParams::DEFAULT
                 };
                 let device_id = p.device_id.unwrap_or_else(Uuid::new_v4);
-                let mut engine = SyncEngine::new(
-                    device_id,
-                    p.master_password.into_bytes(),
-                    params_kdf,
-                    backend,
-                );
+                let password = p.master_password.into_bytes();
+                let mut engine = SyncEngine::new(device_id, password.clone(), params_kdf, backend);
                 if let Some(dir) = p.state_dir {
                     let store =
                         Arc::new(SledStore::open(&dir).map_err(|e| internal(e.to_string()))?);
@@ -2916,11 +2928,23 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         .await
                         .map_err(|e| internal(e.to_string()))?;
                 }
+                let oplog = Arc::new(OplogDriver::new(
+                    blobs,
+                    device_id,
+                    password.clone(),
+                    params_kdf,
+                ));
+                // Local sled already holding v1 records → seed a protocol-2 snapshot.
+                if !engine.is_empty().await {
+                    let _ = oplog.compact_now(&engine, &Group::ALL).await;
+                }
                 stop_auto(&st).await;
                 *st.sync.lock().await = Some(Arc::new(engine));
                 *st.sync_kind.lock().await = Some("webdav");
                 *st.git_backend.lock().await = None;
-                Ok(json!({ "device_id": device_id }))
+                *st.oplog.lock().await = Some(oplog);
+                *st.oplog_last.lock().await = None;
+                Ok(json!({ "device_id": device_id, "protocol": 2 }))
             }
         });
     }
@@ -2979,6 +3003,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     }
                 }
                 *st.git_backend.lock().await = Some(backend.clone());
+                let blobs: Arc<dyn BlobStore> = Arc::new(backend.clone());
                 let backend_dyn: Arc<dyn crate::sync::SyncBackend> = Arc::new(backend);
                 let params_kdf = if p.test_cheap_kdf {
                     KdfParams::test_cheap()
@@ -2986,12 +3011,9 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     KdfParams::DEFAULT
                 };
                 let device_id = p.device_id.unwrap_or_else(Uuid::new_v4);
-                let mut engine = SyncEngine::new(
-                    device_id,
-                    p.master_password.into_bytes(),
-                    params_kdf,
-                    backend_dyn,
-                );
+                let password = p.master_password.into_bytes();
+                let mut engine =
+                    SyncEngine::new(device_id, password.clone(), params_kdf, backend_dyn);
                 if let Some(dir) = p.state_dir {
                     let store =
                         Arc::new(SledStore::open(&dir).map_err(|e| internal(e.to_string()))?);
@@ -3000,10 +3022,21 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         .await
                         .map_err(|e| internal(e.to_string()))?;
                 }
+                let oplog = Arc::new(OplogDriver::new(
+                    blobs,
+                    device_id,
+                    password.clone(),
+                    params_kdf,
+                ));
+                if !engine.is_empty().await {
+                    let _ = oplog.compact_now(&engine, &Group::ALL).await;
+                }
                 stop_auto(&st).await;
                 *st.sync.lock().await = Some(Arc::new(engine));
                 *st.sync_kind.lock().await = Some("git");
-                Ok(json!({ "device_id": device_id }))
+                *st.oplog.lock().await = Some(oplog);
+                *st.oplog_last.lock().await = None;
+                Ok(json!({ "device_id": device_id, "protocol": 2 }))
             }
         });
     }
@@ -3163,6 +3196,12 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     "_bridge".into(),
                     serde_json::to_value(bridge_notes).unwrap_or(Value::Null),
                 );
+                if let Some(meta) = *st.oplog_last.lock().await {
+                    obj.insert(
+                        "_oplog".into(),
+                        serde_json::to_value(meta).unwrap_or(Value::Null),
+                    );
+                }
                 Ok(Value::Object(obj))
             }
         });
@@ -3252,6 +3291,25 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let last_sync_ms = latest_successful_sync_ms(&st).await;
                 let auto_interval_ms = *st.sync_auto_interval_ms.lock().await;
                 let auto_running = st.sync_auto.lock().await.is_some();
+                let protocol = if st.oplog.lock().await.is_some() {
+                    2
+                } else {
+                    1
+                };
+                let cursors = if let Some(oplog) = st.oplog.lock().await.as_ref() {
+                    Some(
+                        oplog
+                            .cursors_snapshot()
+                            .await
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect::<std::collections::BTreeMap<_, _>>(),
+                    )
+                } else {
+                    None
+                };
+                let own_seq = st.oplog.lock().await.as_ref().map(|o| o.own_seq());
+                let last_oplog = *st.oplog_last.lock().await;
                 Ok(json!({
                     "configured": configured,
                     "kind": kind,
@@ -3259,7 +3317,117 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     "lastSyncMs": last_sync_ms,
                     "autoIntervalMs": auto_interval_ms,
                     "autoRunning": auto_running,
+                    "protocol": protocol,
+                    "cursors": cursors,
+                    "ownSeq": own_seq,
+                    "lastOplog": last_oplog,
                 }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sync.compact", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize, Default)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    #[serde(default)]
+                    groups: Option<Vec<String>>,
+                }
+                let p: P = if params.is_null() {
+                    P::default()
+                } else {
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?
+                };
+                let eng = require_engine(&st).await?;
+                let oplog = st
+                    .oplog
+                    .lock()
+                    .await
+                    .clone()
+                    .ok_or_else(|| invalid_params("oplog not configured"))?;
+                let groups = match p.groups {
+                    Some(names) => names
+                        .into_iter()
+                        .filter_map(|n| {
+                            Group::from_slug(&n.to_ascii_lowercase()).or(match n.as_str() {
+                                "Connections" => Some(Group::Connections),
+                                "Appearance" => Some(Group::Appearance),
+                                "Shortcuts" => Some(Group::Shortcuts),
+                                "PluginCfg" => Some(Group::PluginCfg),
+                                "Credentials" => Some(Group::Credentials),
+                                _ => None,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    None => Group::ALL.to_vec(),
+                };
+                if groups.is_empty() {
+                    return Err(invalid_params("no valid groups"));
+                }
+                let ok = oplog
+                    .compact_now(&eng, &groups)
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+                if let Some(g) = st.git_backend.lock().await.clone() {
+                    let msg = format!("sync({}): compact", eng.device_id());
+                    g.commit_cycle(&msg)
+                        .await
+                        .map_err(|e| internal(e.to_string()))?;
+                    g.push_remote().await.map_err(|e| internal(e.to_string()))?;
+                }
+                Ok(json!({ "compacted": ok }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sync.purgeV1", move |_params| {
+            let st = st.clone();
+            async move {
+                // Delete legacy per-record SyncBackend blobs (`<group>/<uuid>.bin`).
+                // Protocol-2 data lives under `v2/` and is left untouched.
+                let blobs = st
+                    .oplog
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|o| o.blobs())
+                    .ok_or_else(|| invalid_params("oplog not configured"))?;
+                let mut deleted = 0usize;
+                for group in Group::ALL {
+                    let prefix = format!("{}/", group.as_str());
+                    let listed = blobs
+                        .list_blobs(&prefix)
+                        .await
+                        .map_err(|e| internal(e.to_string()))?;
+                    for meta in listed {
+                        if !meta.path.ends_with(".bin") || meta.path.starts_with("v2/") {
+                            continue;
+                        }
+                        // Only delete direct children of the group dir.
+                        let rest = meta.path.strip_prefix(&prefix).unwrap_or("");
+                        if rest.contains('/') {
+                            continue;
+                        }
+                        blobs
+                            .delete_blob(&meta.path)
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                        deleted += 1;
+                    }
+                }
+                if let Some(g) = st.git_backend.lock().await.clone() {
+                    if deleted > 0 {
+                        g.commit_cycle("sync: purge legacy v1 records")
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                        g.push_remote().await.map_err(|e| internal(e.to_string()))?;
+                    }
+                }
+                Ok(json!({ "deleted": deleted }))
             }
         });
     }
@@ -3370,16 +3538,31 @@ async fn run_sync_now_cycle(
             .await
             .map_err(|e| internal(e.to_string()))?;
     }
-    let results = eng
-        .sync_groups(groups.to_vec())
-        .await
-        .map_err(|e| internal(e.to_string()))?;
+    let results = if let Some(oplog) = st.oplog.lock().await.clone() {
+        let (results, meta) = oplog
+            .cycle(eng, groups)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        *st.oplog_last.lock().await = Some(meta);
+        results
+    } else {
+        *st.oplog_last.lock().await = None;
+        eng.sync_groups(groups.to_vec())
+            .await
+            .map_err(|e| internal(e.to_string()))?
+    };
     if let (Some(profiles), Some(settings)) = (&profiles, &settings) {
         crate::sync::bridge::import_locals(profiles, settings, vault.as_ref(), eng, groups)
             .await
             .map_err(|e| internal(e.to_string()))?;
     }
     if let Some(g) = &git {
+        // One commit per cycle covering every record put/delete in this tick.
+        let device = eng.device_id();
+        let msg = format!("sync({device}): cycle");
+        g.commit_cycle(&msg)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
         g.push_remote().await.map_err(|e| internal(e.to_string()))?;
     }
     Ok((results, bridge_notes))
@@ -3732,113 +3915,440 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
             }
         });
     }
-    // Native engine RPCs — alacritty_terminal cell-based renderer
+    // -----------------------------------------------------------
+    // terminal.* — native terminal engine (alacritty_terminal in Rust)
+    // -----------------------------------------------------------
+    register_terminal_engine(dispatcher, state.clone());
+}
+
+/// Session output receiver + a writer for engine replies (DA / CPR …).
+async fn session_output_and_writer(
+    st: &Arc<AppState>,
+    id: SessionId,
+) -> Result<
+    (
+        crate::terminal::engine::SharedOutput,
+        mpsc::UnboundedSender<Vec<u8>>,
+    ),
+    RpcError,
+> {
+    let rx = {
+        let chans = st.channels.lock().await;
+        let chan = chans.get(&id).ok_or_else(|| session_not_found(id))?;
+        match chan {
+            SessionChannel::Local(pty) => pty.rx.clone(),
+            SessionChannel::Ssh(s) => s.rx.clone(),
+            SessionChannel::Serial(s) => s.rx.clone(),
+        }
+    };
+    let (tx, mut reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        while let Some(bytes) = reply_rx.recv().await {
+            let chans = st2.channels.lock().await;
+            let Some(chan) = chans.get(&id) else { break };
+            let ok = match chan {
+                SessionChannel::Local(pty) => pty.channel.write(&bytes).is_ok(),
+                SessionChannel::Ssh(s) => s.shell.write(&bytes).await.is_ok(),
+                SessionChannel::Serial(s) => s.channel.write(&bytes).is_ok(),
+            };
+            if !ok {
+                break;
+            }
+        }
+    });
+    Ok((rx, tx))
+}
+
+fn require_term_engine(
+    st: &AppState,
+    id: Uuid,
+) -> Result<Arc<crate::terminal::engine::TerminalEngine>, RpcError> {
+    st.terminal_engines
+        .get(id)
+        .ok_or_else(|| RpcError::new(ErrorCode::SessionNotFound, format!("no engine for {id}")))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineIdParam {
+    id: Uuid,
+}
+
+fn register_terminal_engine(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    use crate::terminal::engine::{
+        CellSide, EngineConfig, ScrollCmd, SearchDirection, SelectionKind, TerminalEngine,
+    };
     {
         let st = state.clone();
-        dispatcher.register("nativeEngine.create", move |params| {
+        dispatcher.register("terminal.attach", move |params| {
             let st = st.clone();
             async move {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct P {
-                    #[serde(default = "default_rows")]
-                    rows: u16,
-                    #[serde(default = "default_cols")]
-                    cols: u16,
+                    id: Uuid,
                     #[serde(default)]
-                    shell_command: Option<Vec<String>>,
-                }
-                fn default_rows() -> u16 {
-                    24
-                }
-                fn default_cols() -> u16 {
-                    80
+                    cols: Option<u16>,
+                    #[serde(default)]
+                    rows: Option<u16>,
+                    #[serde(default)]
+                    scrollback: Option<usize>,
+                    #[serde(default)]
+                    transfer_detect: bool,
                 }
                 let p: P =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let result = st
-                    .native_engine
-                    .create_local(p.rows, p.cols, p.shell_command.as_deref())
-                    .map_err(internal)?;
-                serde_json::to_value(result).map_err(|e| internal(e.to_string()))
+                let sid = SessionId(p.id);
+                if let Some(existing) = st.terminal_engines.get(p.id) {
+                    if let (Some(c), Some(r)) = (p.cols, p.rows) {
+                        existing.resize(c, r, 0, 0);
+                    }
+                    existing.set_transfer_detect(p.transfer_detect);
+                    return Ok(
+                        json!({ "attached": true, "alive": existing.is_alive(), "reused": true }),
+                    );
+                }
+                let (rx, tx) = session_output_and_writer(&st, sid).await?;
+                let engine = TerminalEngine::new(
+                    EngineConfig {
+                        cols: p.cols.unwrap_or(80),
+                        rows: p.rows.unwrap_or(24),
+                        scrollback: p.scrollback.unwrap_or(10_000).clamp(0, 200_000),
+                    },
+                    tx,
+                );
+                engine.set_transfer_detect(p.transfer_detect);
+                engine.start(rx);
+                st.terminal_engines.insert(p.id, engine.clone());
+                Ok(json!({ "attached": true, "alive": engine.is_alive(), "reused": false }))
             }
         });
     }
     {
         let st = state.clone();
-        dispatcher.register("nativeEngine.write", move |params| {
+        dispatcher.register("terminal.detach", move |params| {
             let st = st.clone();
             async move {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    engine_id: String,
-                    data: String, // base64-encoded bytes
-                }
-                let p: P =
+                let p: EngineIdParam =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let data = BASE64
-                    .decode(&p.data)
-                    .map_err(|e| invalid_params(format!("base64 decode: {e}")))?;
-                st.native_engine
-                    .write(&p.engine_id, &data)
-                    .map_err(internal)?;
-                Ok(Value::Null)
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        dispatcher.register("nativeEngine.snapshot", move |params| {
-            let st = st.clone();
-            async move {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    engine_id: String,
-                }
-                let p: P =
-                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let frame = st.native_engine.snapshot(&p.engine_id).map_err(internal)?;
-                serde_json::to_value(frame).map_err(|e| internal(e.to_string()))
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        dispatcher.register("nativeEngine.resize", move |params| {
-            let st = st.clone();
-            async move {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    engine_id: String,
-                    rows: u16,
-                    cols: u16,
-                }
-                let p: P =
-                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                st.native_engine
-                    .resize(&p.engine_id, p.rows, p.cols)
-                    .map_err(internal)?;
-                Ok(Value::Null)
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        dispatcher.register("nativeEngine.close", move |params| {
-            let st = st.clone();
-            async move {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    engine_id: String,
-                }
-                let p: P =
-                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let removed = st.native_engine.close(&p.engine_id);
+                let removed = st.terminal_engines.remove(p.id).is_some();
                 Ok(json!({ "removed": removed }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.resize", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    cols: u16,
+                    rows: u16,
+                    #[serde(default)]
+                    cell_width: u16,
+                    #[serde(default)]
+                    cell_height: u16,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let engine = require_term_engine(&st, p.id)?;
+                engine.resize(p.cols, p.rows, p.cell_width, p.cell_height);
+                let id = SessionId(p.id);
+                let chans = st.channels.lock().await;
+                if let Some(chan) = chans.get(&id) {
+                    match chan {
+                        SessionChannel::Local(pty) => {
+                            let _ = pty.channel.resize(PtySize {
+                                rows: p.rows,
+                                cols: p.cols,
+                            });
+                        }
+                        SessionChannel::Ssh(s) => {
+                            let _ = s.shell.resize(p.cols as u32, p.rows as u32).await;
+                        }
+                        SessionChannel::Serial(_) => {}
+                    }
+                }
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.scroll", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    cmd: ScrollCmd,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.scroll(p.cmd);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.snapshot", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let engine = require_term_engine(&st, p.id)?;
+                engine.request_full();
+                Ok(json!({ "alive": engine.is_alive() }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.exportText", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let engine = require_term_engine(&st, p.id)?;
+                Ok(json!({ "text": engine.buffer_text(), "alive": engine.is_alive() }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.setVisible", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    visible: bool,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.set_visible(p.visible);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.selectionStart", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    col: usize,
+                    line: i32,
+                    #[serde(default = "default_sel_kind")]
+                    kind: SelectionKind,
+                    #[serde(default = "default_side")]
+                    side: CellSide,
+                }
+                fn default_sel_kind() -> SelectionKind {
+                    SelectionKind::Simple
+                }
+                fn default_side() -> CellSide {
+                    CellSide::Left
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.selection_start(p.col, p.line, p.kind, p.side);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.selectionUpdate", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    col: usize,
+                    line: i32,
+                    #[serde(default = "default_side")]
+                    side: CellSide,
+                }
+                fn default_side() -> CellSide {
+                    CellSide::Right
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.selection_update(p.col, p.line, p.side);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.selectionClear", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.selection_clear();
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.selectAll", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.select_all();
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.selectionText", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let text = require_term_engine(&st, p.id)?.selection_text();
+                Ok(json!({ "text": text }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.search", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    query: String,
+                    #[serde(default)]
+                    regex: bool,
+                    #[serde(default)]
+                    case_sensitive: bool,
+                    #[serde(default = "default_dir")]
+                    direction: SearchDirection,
+                }
+                fn default_dir() -> SearchDirection {
+                    SearchDirection::Next
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let hit = require_term_engine(&st, p.id)?
+                    .search(&p.query, p.regex, p.case_sensitive, p.direction)
+                    .map_err(invalid_params)?;
+                Ok(json!({ "hit": hit }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.hyperlinkAt", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    col: usize,
+                    line: i32,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let url = require_term_engine(&st, p.id)?.hyperlink_at(p.col, p.line);
+                Ok(json!({ "url": url }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.setRawBypass", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    on: bool,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.set_raw_bypass(p.on);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.setTransferDetect", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    on: bool,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                require_term_engine(&st, p.id)?.set_transfer_detect(p.on);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.feed", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    data: String, // base64
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let bytes = BASE64
+                    .decode(p.data.as_bytes())
+                    .map_err(|e| invalid_params(format!("bad base64: {e}")))?;
+                require_term_engine(&st, p.id)?.feed(&bytes);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.text", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let engine = require_term_engine(&st, p.id)?;
+                let (cols, rows) = engine.dims();
+                Ok(json!({
+                    "text": engine.viewport_text(),
+                    "cols": cols,
+                    "rows": rows,
+                    "alive": engine.is_alive(),
+                    "mode": engine.mode_bits(),
+                    "title": engine.title(),
+                }))
             }
         });
     }
@@ -3989,7 +4499,24 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         let r = d.dispatch(req("sync.now", json!(null))).await;
         assert!(r.error.is_none(), "{:?}", r.error);
-        assert!(dir.join("connections").join(format!("{rid}.bin")).exists());
+        // Protocol 2 writes encrypted ops under v2/devices/<id>/ops/, not
+        // legacy <group>/<uuid>.bin blobs.
+        let v2 = dir.join("v2").join("devices");
+        assert!(
+            v2.is_dir(),
+            "expected protocol-2 oplog layout under {}",
+            v2.display()
+        );
+        let mut ops = 0usize;
+        if let Ok(devs) = std::fs::read_dir(&v2) {
+            for dev in devs.flatten() {
+                let ops_dir = dev.path().join("ops");
+                if let Ok(files) = std::fs::read_dir(ops_dir) {
+                    ops += files.count();
+                }
+            }
+        }
+        assert!(ops >= 1, "expected at least one op batch for {rid}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4063,32 +4590,31 @@ mod tests {
         settings_dir.push(format!("aerotab-cmd-settings-{}", Uuid::new_v4()));
         let history_ms = 1_789_123_456_000_i64;
 
+        // Seed local-only syncHistory before the settings store is opened by RPC.
+        {
+            let store = crate::settings::SettingsStore::open(&settings_dir).unwrap();
+            crate::sync::history::append_success_at(
+                &store,
+                "manual",
+                &[Group::Connections],
+                &[(
+                    Group::Connections,
+                    crate::sync::SyncStats {
+                        pushed: 1,
+                        ..Default::default()
+                    },
+                )],
+                history_ms,
+            )
+            .unwrap();
+        }
+
         let d = Dispatcher::new();
         register_all(&d, AppState::new());
         let r = d
             .dispatch(req(
                 "settings.configure",
                 json!({ "path": settings_dir.to_str().unwrap() }),
-            ))
-            .await;
-        assert!(r.error.is_none(), "{:?}", r.error);
-        let r = d
-            .dispatch(req(
-                "settings.set",
-                json!({
-                    "key": "syncHistory",
-                    "value": [{
-                        "id": Uuid::new_v4(),
-                        "at_ms": history_ms,
-                        "trigger": "manual",
-                        "ok": true,
-                        "groups": ["Connections"],
-                        "pushed": 1,
-                        "pulled": 0,
-                        "merged": 0,
-                        "unchanged": 0,
-                    }],
-                }),
             ))
             .await;
         assert!(r.error.is_none(), "{:?}", r.error);
@@ -4222,6 +4748,72 @@ mod tests {
         // Close.
         let r = d.dispatch(req("session.close", json!({"id": id}))).await;
         assert!(r.error.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_engine_attach_renders_output_and_blocks_poll() {
+        let d = Dispatcher::new();
+        let state = AppState::new();
+        register_all(&d, state.clone());
+        let r = d
+            .dispatch(req(
+                "session.openLocal",
+                json!({"title": "t", "rows": 10, "cols": 60}),
+            ))
+            .await;
+        let id = r.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let r = d
+            .dispatch(req(
+                "terminal.attach",
+                json!({"id": id, "cols": 60, "rows": 10, "scrollback": 500}),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["reused"], json!(false));
+
+        let cmd = BASE64.encode("echo native-engine-ok\n".as_bytes());
+        let _ = d
+            .dispatch(req("session.write", json!({"id": id, "data": cmd})))
+            .await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut text = String::new();
+        while std::time::Instant::now() < deadline {
+            let r = d.dispatch(req("terminal.text", json!({"id": id}))).await;
+            text = r.result.unwrap()["text"].as_str().unwrap().to_string();
+            if text.contains("native-engine-ok") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(text.contains("native-engine-ok"), "viewport: {text:?}");
+
+        // Legacy poll must not block or drain the engine's receiver.
+        let r = d
+            .dispatch(req("session.poll", json!({"id": id, "max_chunks": 4})))
+            .await;
+        let v = r.result.unwrap();
+        assert_eq!(v["native"], json!(true));
+        assert_eq!(v["chunks"], json!([]));
+
+        // Search + selection round-trip through RPC.
+        let r = d
+            .dispatch(req(
+                "terminal.search",
+                json!({"id": id, "query": "engine-ok", "direction": "next"}),
+            ))
+            .await;
+        assert!(r.result.unwrap()["hit"].is_object());
+        let r = d
+            .dispatch(req("terminal.selectionText", json!({"id": id})))
+            .await;
+        assert_eq!(r.result.unwrap()["text"], json!("engine-ok"));
+
+        let r = d.dispatch(req("session.close", json!({"id": id}))).await;
+        assert!(r.error.is_none());
+        assert!(state.terminal_engines.is_empty());
     }
 
     #[test]

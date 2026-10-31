@@ -45,6 +45,10 @@ export interface PersistedSyncSettings {
   vaultKeyringAccount?: string;
   /** OS keyring account for Git HTTPS PAT (not stored in settings.sled). */
   gitHttpsKeyringAccount?: string;
+  /** Sync wire protocol: 2 = oplog/BlobStore (current default after configure). */
+  protocol?: number;
+  /** Optional oplog compaction thresholds (files / bytes). */
+  compact?: { maxOpFiles?: number; maxOpBytes?: number };
 }
 
 /** Keyring account for Git HTTPS personal access token. */

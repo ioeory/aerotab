@@ -2,23 +2,28 @@
 //!
 //! Sub-commands:
 //!
-//! - `cold-start`   : spawns `aerotab` N times, records time from process spawn
+//! - `cold-start`       : spawns `aerotab` N times, records time from process spawn
 //!   to first byte of the `core.version` response on stdout.
-//! - `rpc-loopback` : spawns `aerotab` once, fires N `core.version` calls back
+//! - `rpc-loopback`     : spawns `aerotab` once, fires N `core.version` calls back
 //!   to back, reports median + p95 latency.
-//! - `local-shell`  : opens N local-shell sessions sequentially, measures
+//! - `local-shell`      : opens N local-shell sessions sequentially, measures
 //!   `session.openLocal` latency.
+//! - `term-throughput`  : feeds a fixed ANSI corpus into the native Rust VT
+//!   engine and reports lines/s + frame build latency (xterm path is UI-only;
+//!   compare manually — default renderer remains canvas/xterm until parity).
 //!
 //! All metrics print as JSON so CI can parse them.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use aerotab_core::terminal::engine::{EngineConfig, TerminalEngine};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(version, about = "AeroTab benchmark harness")]
@@ -44,6 +49,19 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
     },
+    /// Native Rust VT engine throughput (feed + frame encode).
+    TermThroughput {
+        /// How many times to replay the ANSI corpus.
+        #[arg(long, default_value_t = 50)]
+        iterations: usize,
+        /// Lines per corpus replay (each line is a short coloured ANSI sequence).
+        #[arg(long, default_value_t = 500)]
+        lines: usize,
+        #[arg(long, default_value_t = 120)]
+        cols: u16,
+        #[arg(long, default_value_t = 40)]
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +73,22 @@ struct Stats {
     p95_ms: f64,
     max_ms: f64,
     mean_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TermThroughputReport {
+    name: &'static str,
+    path: &'static str,
+    iterations: usize,
+    lines_per_iter: usize,
+    cols: u16,
+    rows: u16,
+    total_lines: usize,
+    elapsed_ms: f64,
+    lines_per_sec: f64,
+    frame_build: Stats,
+    /// Pass gate from docs/perf-benchmark.md (≥ 500 lines/s).
+    pass_lines_per_sec: bool,
 }
 
 fn stats(name: &'static str, mut samples: Vec<Duration>) -> Stats {
@@ -74,6 +108,58 @@ fn stats(name: &'static str, mut samples: Vec<Duration>) -> Stats {
         p95_ms: p95,
         max_ms: max,
         mean_ms: mean,
+    }
+}
+
+fn ansi_corpus(lines: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(lines * 48);
+    for i in 0..lines {
+        let color = (i % 7) + 1;
+        out.extend_from_slice(format!("\x1b[3{color}mline-{i:05}\x1b[0m\r\n").as_bytes());
+    }
+    out
+}
+
+fn term_throughput(iters: usize, lines: usize, cols: u16, rows: u16) -> TermThroughputReport {
+    let corpus = ansi_corpus(lines);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let engine = TerminalEngine::new(
+        EngineConfig {
+            cols,
+            rows,
+            scrollback: 10_000,
+        },
+        tx,
+    );
+
+    let mut frame_samples = Vec::with_capacity(iters);
+    let started = Instant::now();
+    for _ in 0..iters {
+        engine.feed(&corpus);
+        let t0 = Instant::now();
+        let _frame = engine.snapshot_frame();
+        frame_samples.push(t0.elapsed());
+    }
+    let elapsed = started.elapsed();
+    let total_lines = iters.saturating_mul(lines);
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    let lines_per_sec = if elapsed.as_secs_f64() > 0.0 {
+        total_lines as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    TermThroughputReport {
+        name: "term_throughput",
+        path: "native-rust-vt",
+        iterations: iters,
+        lines_per_iter: lines,
+        cols,
+        rows,
+        total_lines,
+        elapsed_ms,
+        lines_per_sec,
+        frame_build: stats("frame_build", frame_samples),
+        pass_lines_per_sec: lines_per_sec >= 500.0,
     }
 }
 
@@ -162,11 +248,34 @@ async fn local_shell(aerotab: &str, iters: usize) -> Result<Stats> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let s = match cli.cmd {
-        Cmd::ColdStart { iterations } => cold_start(&cli.aerotab, iterations).await?,
-        Cmd::RpcLoopback { iterations } => rpc_loopback(&cli.aerotab, iterations).await?,
-        Cmd::LocalShell { iterations } => local_shell(&cli.aerotab, iterations).await?,
-    };
-    println!("{}", serde_json::to_string_pretty(&s)?);
+    match cli.cmd {
+        Cmd::ColdStart { iterations } => {
+            let s = cold_start(&cli.aerotab, iterations).await?;
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        }
+        Cmd::RpcLoopback { iterations } => {
+            let s = rpc_loopback(&cli.aerotab, iterations).await?;
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        }
+        Cmd::LocalShell { iterations } => {
+            let s = local_shell(&cli.aerotab, iterations).await?;
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        }
+        Cmd::TermThroughput {
+            iterations,
+            lines,
+            cols,
+            rows,
+        } => {
+            let report = term_throughput(iterations, lines, cols, rows);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass_lines_per_sec {
+                anyhow::bail!(
+                    "term-throughput below 500 lines/s (got {:.1})",
+                    report.lines_per_sec
+                );
+            }
+        }
+    }
     Ok(())
 }
