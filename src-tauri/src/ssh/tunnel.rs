@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use super::known_hosts::KnownHosts;
 use super::{
-    connect_authenticated_custom, SshError, SshProfile, SshTransportSettings, TrustingClient,
+    connect_authenticated_custom, AgentSource, SshError, SshProfile, SshTransportSettings,
+    TrustingClient,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -243,7 +244,7 @@ async fn spawn_local_tunnel(
                 false,
                 None,
                 false,
-                None,
+                AgentSource::System,
             )
         },
     )
@@ -311,7 +312,7 @@ async fn spawn_remote_tunnel(
                 false,
                 None,
                 false,
-                None,
+                AgentSource::System,
             );
             ForwardingClient {
                 trusting,
@@ -364,7 +365,7 @@ async fn spawn_dynamic_tunnel(
                 false,
                 None,
                 false,
-                None,
+                AgentSource::System,
             )
         },
     )

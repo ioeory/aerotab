@@ -43,7 +43,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { SESSIONS_CLOSING, type SessionsClosingDetail } from '../lib/sessionLifecycle';
   import { scheduleTerminalTeardown } from '../lib/terminalTeardown';
   import { Terminal } from '@xterm/xterm';
@@ -88,7 +88,7 @@
     shouldSuppressMacSpuriousInput,
     trackMacBackspaceKeydown,
   } from '../lib/terminalInputMac';
-  import { focusTerminalIfAllowed } from '../lib/modalFocus';
+  import { focusTerminalAuto, focusTerminalIfAllowed, shouldAutoFocusTerminal } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
   import { NativeEngineController, spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
@@ -248,7 +248,7 @@
     exited = true;
     term?.write('\r\n\x1b[31m[session ended]\x1b[0m The process exited or the connection was closed.\r\n');
     tabs.markActivity(session.id, 'bell');
-    focusExitedOverlay();
+    if (active) focusExitedOverlay(true);
   }
 
   $effect(() => {
@@ -258,8 +258,11 @@
     };
   });
 
-  function focusExitedOverlay() {
-    requestAnimationFrame(() => exitedOverlayEl?.focus());
+  function focusExitedOverlay(auto = false) {
+    requestAnimationFrame(() => {
+      if (auto && !shouldAutoFocusTerminal(host)) return;
+      exitedOverlayEl?.focus();
+    });
   }
 
   function bindingLabel(actionId: string): string {
@@ -1022,12 +1025,16 @@
     });
   });
 
+  let wasActive = false;
   $effect(() => {
-    if (!active) return;
-    tabs.clearActivity(session.id);
+    const isActive = active;
+    const becameActive = isActive && !wasActive;
+    wasActive = isActive;
+    if (!becameActive) return;
+    untrack(() => tabs.clearActivity(session.id));
     scheduleTerminalFit(() => {
       safeFit(true);
-      if (!searchOpen) focusTerminalIfAllowed(term);
+      if (!searchOpen) focusTerminalAuto(term, host);
     });
   });
 

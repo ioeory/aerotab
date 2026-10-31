@@ -482,8 +482,22 @@
     return withTransferStallCancel(id, promise, 'sftp.cancelDirectTransfer');
   }
 
+  /** Backend `SessionNotFound` (-32000): the referenced SFTP session was closed. */
+  function isSessionClosedError(err: unknown): boolean {
+    return err instanceof Error && err.message.startsWith('-32000:');
+  }
+
   async function retryOrFailTask(task: TransferTask, err: unknown) {
     const message = (err as Error).message;
+    if (isSessionClosedError(err)) {
+      updateTask(task.id, {
+        status: 'error',
+        message: i18n.t('transfer.sessionClosed'),
+        finishedAt: Date.now(),
+      });
+      onError(i18n.t('sftp.crossTransferFailed', { message: i18n.t('transfer.sessionClosed') }));
+      return;
+    }
     if (task.attempts < MAX_AUTO_ATTEMPTS && !isCanceled(task.id)) {
       const nextAttempt = task.attempts + 1;
       updateTask(task.id, {
@@ -736,6 +750,7 @@
         TRANSFER_RPC_TIMEOUT_MS,
       );
     } catch (e) {
+      if (isSessionClosedError(e)) throw e;
       updateTask(id, {
         message: i18n.t('transfer.directPreflightFailed', { message: (e as Error).message }),
       });
@@ -804,15 +819,16 @@
           consent_granted: true,
         }),
       );
-      await verifyDirectTransferTarget(task);
+      const verified = await verifyDirectTransferTarget(task);
       updateTask(id, {
         method: 'direct',
         transferred: Math.max(task.size, task.sourceKind === 'File' ? task.sourceSize : task.size),
-        message: i18n.t('transfer.directDone'),
+        message: i18n.t(verified ? 'transfer.directDone' : 'transfer.directDoneUnverified'),
       });
       return true;
     } catch (e) {
       if (isCanceled(id)) return false;
+      if (isSessionClosedError(e)) throw e;
       updateTask(id, { message: `${i18n.t('transfer.directFallback', { message: (e as Error).message })}` });
       return false;
     } finally {
@@ -821,16 +837,24 @@
     }
   }
 
-  async function verifyDirectTransferTarget(task: TransferTask) {
-    if (!task.destSessionId) return;
-    const entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: task.destSessionId, path: task.destPath }));
+  /** Returns false when the destination session closed before the check could run. */
+  async function verifyDirectTransferTarget(task: TransferTask): Promise<boolean> {
+    if (!task.destSessionId) return false;
+    let entry: SftpEntry;
+    try {
+      entry = await withTransferTimeout('sftp.stat', rpc.call<SftpEntry>('sftp.stat', { id: task.destSessionId, path: task.destPath }));
+    } catch (e) {
+      if (isSessionClosedError(e)) return false;
+      throw e;
+    }
     if (task.sourceKind === 'Dir') {
       if (entry.kind !== 'Dir') throw new Error(i18n.t('transfer.directVerifyFailed'));
-      return;
+      return true;
     }
     if (entry.kind !== 'File' || entry.size < task.sourceSize) {
       throw new Error(i18n.t('transfer.directVerifyFailed'));
     }
+    return true;
   }
 
   async function tryBackendRelayTransfer(id: string, task: TransferTask): Promise<boolean> {
@@ -870,6 +894,7 @@
         dest_path: task.destPath,
       }));
     } catch (e) {
+      if (isSessionClosedError(e)) throw e;
       updateTask(id, { message: `Relay error: ${(e as Error).message}` });
       return false;
     } finally {
@@ -1302,6 +1327,7 @@
   class="transfer-window-shell h-full w-full text-[var(--color-fg)] flex flex-col overflow-hidden"
   role="region"
   aria-label={i18n.t('transfer.windowTitle')}
+  data-aerotab-focus-zone=""
 >
   <div class="transfer-window-surface w-full h-full flex flex-col overflow-hidden">
     <header class="transfer-window-bar flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border-soft)]">

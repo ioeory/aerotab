@@ -10,3 +10,6 @@
 - **Relay transfer** — Copy via AeroTab (backend SFTP read/write preferred; frontend chunk fallback). Traffic flows through the client machine.
 - **Transfer mode** — User choice for remote↔remote: `auto` (direct then relay), `direct`, or `relay`.
 - **Agent forward consent** — Per-source-host permission to forward the local/ephemeral SSH agent during Direct transfer; first use prompts, can be remembered.
+- **Auto-focus** — The terminal taking keyboard focus by itself when its pane becomes the active pane. Never pulls focus away from another input, the SFTP dock, or the Transfer center.
+- **Explicit focus** — Focus moved to a terminal because the user asked for it (switching tabs, opening a session, closing a dialog). Always wins over other inputs; only blocked while a modal dialog is open.
+- **Session closed** (transfer) — A transfer's source or destination SFTP connection has gone away. In-flight copies finish; queued or retrying copies fail immediately instead of retrying.

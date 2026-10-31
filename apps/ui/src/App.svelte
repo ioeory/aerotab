@@ -74,7 +74,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.18-ui-20260802';
+  const buildId = '0.2.19-ui-20261031';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -933,6 +933,7 @@
       }
       tabs.add(session);
       recordRestore(meta.id, { kind: 'local' });
+      requestAnimationFrame(() => focusActivePane());
       return meta.id;
     } catch (e) {
       onError(`open local: ${(e as Error).message}`);
@@ -1375,6 +1376,7 @@
       );
       tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, profileId: p.id, sshProfile: p.ssh });
       recordRestore(meta.id, { kind: 'ssh-profile', id: p.id });
+      requestAnimationFrame(() => focusActivePane());
     } catch (e) {
       onError(`connect ${p.name} (${profileEndpointLabel(p)}): ${(e as Error).message}`);
     }

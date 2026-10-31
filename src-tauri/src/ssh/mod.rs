@@ -48,6 +48,23 @@ pub enum AuthMethod {
         #[serde(default)]
         passphrase_entry_id: Option<String>,
     },
+    /// Private key material resolved from the vault; lives only in memory and
+    /// must never be persisted or synced.
+    #[serde(skip)]
+    PrivateKeyMemory {
+        pem: String,
+        passphrase: Option<String>,
+    },
+}
+
+/// Where forwarded agent channels are bridged to.
+#[derive(Clone, Default)]
+pub enum AgentSource {
+    /// The user's system agent (`SSH_AUTH_SOCK` / OpenSSH named pipe).
+    #[default]
+    System,
+    /// A per-transfer in-process agent holding only the destination key.
+    InMemory(ephemeral_agent::InMemoryAgent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,8 +133,7 @@ pub struct TrustingClient {
     x11_display: Option<String>,
     /// When true, accept OpenSSH agent forwarding channels and bridge them to the local agent.
     agent_forward: bool,
-    /// Optional `SSH_AUTH_SOCK` override (ephemeral agent for Direct transfer).
-    agent_sock: Option<String>,
+    agent_source: AgentSource,
     agent_channels: HashMap<ChannelId, AgentForwardChannel>,
 }
 
@@ -137,7 +153,7 @@ impl TrustingClient {
         x11_forward: bool,
         x11_display: Option<String>,
         agent_forward: bool,
-        agent_sock: Option<String>,
+        agent_source: AgentSource,
     ) -> Self {
         Self {
             host_port,
@@ -146,7 +162,7 @@ impl TrustingClient {
             x11_forward,
             x11_display,
             agent_forward,
-            agent_sock,
+            agent_source,
             agent_channels: HashMap::new(),
         }
     }
@@ -219,7 +235,7 @@ impl client::Handler for TrustingClient {
             session.close(channel);
             return Ok(());
         }
-        match connect_local_agent_stream(self.agent_sock.as_deref()).await {
+        match connect_local_agent_stream(&self.agent_source).await {
             Ok(agent) => {
                 self.agent_channels.insert(
                     channel,
@@ -406,34 +422,34 @@ async fn read_agent_packet(agent: &mut dyn LocalAgentStream) -> std::io::Result<
 }
 
 async fn connect_local_agent_stream(
-    sock_override: Option<&str>,
+    source: &AgentSource,
 ) -> std::io::Result<Box<dyn LocalAgentStream>> {
+    if let AgentSource::InMemory(agent) = source {
+        let stream = agent
+            .connect()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        return Ok(Box::new(stream));
+    }
+
     #[cfg(unix)]
     {
-        let path = match sock_override {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => std::env::var("SSH_AUTH_SOCK").map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
-            })?,
-        };
+        let path = std::env::var("SSH_AUTH_SOCK").map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "SSH_AUTH_SOCK is not set")
+        })?;
         let stream = tokio::net::UnixStream::connect(path).await?;
         Ok(Box::new(stream))
     }
 
     #[cfg(windows)]
     {
-        let pipe = match sock_override {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => std::env::var("SSH_AUTH_SOCK")
-                .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string()),
-        };
+        let pipe = std::env::var("SSH_AUTH_SOCK")
+            .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
         let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe)?;
         Ok(Box::new(stream))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = sock_override;
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "system ssh-agent is unavailable on this platform",
@@ -577,6 +593,13 @@ where
             }
             Err(e) => return Err(e),
         },
+        AuthMethod::PrivateKeyMemory { pem, passphrase } => {
+            let loaded = Some(
+                russh::keys::decode_secret_key(pem, passphrase.as_deref())
+                    .map_err(|e| e.to_string()),
+            );
+            authenticate_loaded_key_with_fallback(handle, profile, loaded, "vault key").await?
+        }
         AuthMethod::VaultRef { .. } => {
             return Err(SshError::Connect(
                 "vault auth was not resolved before connect".into(),
@@ -600,36 +623,47 @@ where
     H: client::Handler,
     H::Error: From<russh::Error>,
 {
-    if key_path.is_file() {
-        match load_secret_key(key_path, passphrase) {
-            Ok(key) => {
-                match handle
-                    .authenticate_publickey(&profile.user, Arc::new(key))
-                    .await
-                    .map_err(SshError::from)
-                {
-                    Ok(true) => return Ok(true),
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::debug!(
-                            "configured key {} failed: {e}; trying fallbacks",
-                            key_path.display()
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "load configured key {}: {e}; trying fallbacks",
-                    key_path.display()
-                );
-            }
-        }
+    let loaded = if key_path.is_file() {
+        Some(load_secret_key(key_path, passphrase).map_err(|e| e.to_string()))
     } else {
         tracing::debug!(
             "configured key missing: {}; trying default keys and ssh-agent",
             key_path.display()
         );
+        None
+    };
+    let label = key_path.display().to_string();
+    authenticate_loaded_key_with_fallback(handle, profile, loaded, &label).await
+}
+
+async fn authenticate_loaded_key_with_fallback<H>(
+    handle: &mut client::Handle<H>,
+    profile: &SshProfile,
+    loaded: Option<Result<key::KeyPair, String>>,
+    label: &str,
+) -> Result<bool, SshError>
+where
+    H: client::Handler,
+    H::Error: From<russh::Error>,
+{
+    match loaded {
+        Some(Ok(key)) => {
+            match handle
+                .authenticate_publickey(&profile.user, Arc::new(key))
+                .await
+                .map_err(SshError::from)
+            {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!("configured key {label} failed: {e}; trying fallbacks");
+                }
+            }
+        }
+        Some(Err(e)) => {
+            tracing::debug!("load configured key {label}: {e}; trying fallbacks");
+        }
+        None => {}
     }
 
     match authenticate_default_public_keys(handle, &profile.user).await {
@@ -816,30 +850,21 @@ pub async fn connect_authenticated(
             false,
             None,
             false,
-            None,
+            AgentSource::System,
         )
     })
     .await
 }
 
+/// Connect with agent forwarding accepted on the final hop; forwarded agent
+/// channels are bridged to `agent_source`.
 pub async fn connect_authenticated_with_agent_forwarding(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
     transport: SshTransportSettings,
-) -> Result<client::Handle<TrustingClient>, SshError> {
-    connect_authenticated_with_agent_forwarding_sock(profile, known_hosts, transport, None).await
-}
-
-/// Like [`connect_authenticated_with_agent_forwarding`], but bridges forwarded
-/// agent channels to `agent_sock` (ephemeral agent) when set.
-pub async fn connect_authenticated_with_agent_forwarding_sock(
-    profile: &SshProfile,
-    known_hosts: Option<KnownHosts>,
-    transport: SshTransportSettings,
-    agent_sock: Option<String>,
+    agent_source: AgentSource,
 ) -> Result<client::Handle<TrustingClient>, SshError> {
     let kh = known_hosts.clone();
-    let sock = agent_sock.clone();
     connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
         TrustingClient::new(
             format!("{}:{}", hop.host, hop.port),
@@ -847,7 +872,11 @@ pub async fn connect_authenticated_with_agent_forwarding_sock(
             false,
             None,
             is_final,
-            if is_final { sock.clone() } else { None },
+            if is_final {
+                agent_source.clone()
+            } else {
+                AgentSource::System
+            },
         )
     })
     .await
@@ -875,7 +904,7 @@ pub async fn connect_shell_with_known_hosts(
                 is_final && x11_enabled,
                 if is_final { x11_display.clone() } else { None },
                 false,
-                None,
+                AgentSource::System,
             )
         })
         .await?;

@@ -180,6 +180,14 @@ fn inspect_auth(label: &str, auth: &AuthMethod, checks: &mut Vec<ProfileHealthCh
                 "agent auth configured; live availability is checked during connection probing",
             );
         }
+        AuthMethod::PrivateKeyMemory { .. } => {
+            push_check(
+                checks,
+                format!("{label} key"),
+                HealthStatus::Ok,
+                "vault private key loaded in memory",
+            );
+        }
         AuthMethod::VaultRef { entry_id, .. } => {
             if entry_id.trim().is_empty() {
                 push_check(

@@ -34,6 +34,35 @@ export function focusTerminalIfAllowed(term: { focus: () => void } | null | unde
   term.focus();
 }
 
+function isEditableElement(el: Element): boolean {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+    return true;
+  }
+  return el instanceof HTMLElement && el.isContentEditable;
+}
+
+/**
+ * Auto-focus (not user-initiated) must not pull focus away from other inputs or
+ * from focus zones such as the SFTP dock and transfer center.
+ */
+export function shouldAutoFocusTerminal(host: Element | null | undefined): boolean {
+  if (!shouldFocusTerminal()) return false;
+  if (typeof document === 'undefined') return true;
+  const activeEl = document.activeElement;
+  if (!activeEl || activeEl === document.body) return true;
+  if (host?.contains(activeEl)) return true;
+  if (activeEl.closest('[data-aerotab-focus-zone]')) return false;
+  return !isEditableElement(activeEl);
+}
+
+export function focusTerminalAuto(
+  term: { focus: () => void } | null | undefined,
+  host: Element | null | undefined,
+): void {
+  if (!term || !shouldAutoFocusTerminal(host)) return;
+  term.focus();
+}
+
 /** Re-assert focus on a modal field after xterm delayed fit/focus runs. */
 export function scheduleModalFieldFocus(focus: () => void): void {
   if (typeof window === 'undefined') {

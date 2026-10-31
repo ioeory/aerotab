@@ -1605,43 +1605,26 @@ fn remember_direct_consent_host(
         .map_err(|e| internal(e.to_string()))
 }
 
-async fn prepare_direct_agent_sock(
+async fn prepare_direct_agent_source(
     dest_profile: &SshProfile,
-) -> Result<
-    (
-        Option<String>,
-        Option<crate::ssh::ephemeral_agent::EphemeralAgent>,
-    ),
-    RpcError,
-> {
-    use crate::ssh::ephemeral_agent::dest_auth_supports_direct;
-    use crate::ssh::AuthMethod;
+) -> Result<crate::ssh::AgentSource, RpcError> {
+    use crate::ssh::ephemeral_agent::{
+        dest_auth_supports_direct, dest_key_for_direct, InMemoryAgent,
+    };
+    use crate::ssh::AgentSource;
 
     if !dest_auth_supports_direct(&dest_profile.auth) {
         return Err(invalid_params(
             "destination auth does not support Direct (agent-forward); use Relay",
         ));
     }
-    match &dest_profile.auth {
-        AuthMethod::Agent => Ok((None, None)),
-        AuthMethod::PublicKey {
-            key_path,
-            passphrase,
-        } => {
-            let agent = crate::ssh::ephemeral_agent::EphemeralAgent::spawn_with_key(
-                key_path,
-                passphrase.as_deref(),
-            )
-            .await
-            .map_err(|e| internal(e.to_string()))?;
-            let sock = agent.sock().to_string();
-            Ok((Some(sock), Some(agent)))
-        }
-        AuthMethod::VaultRef { .. } => Err(internal(
-            "destination vault auth was not resolved; reopen SFTP session",
-        )),
-        AuthMethod::Password { .. } => {
-            Err(invalid_params("destination password auth requires Relay"))
+    match dest_key_for_direct(&dest_profile.auth).map_err(|e| internal(e.to_string()))? {
+        None => Ok(AgentSource::System),
+        Some(key) => {
+            let agent = InMemoryAgent::with_key(&key)
+                .await
+                .map_err(|e| internal(e.to_string()))?;
+            Ok(AgentSource::InMemory(agent))
         }
     }
 }
@@ -2124,7 +2107,7 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 };
                 let kh = st.known_hosts.lock().await.clone();
                 let transport = load_ssh_transport_settings(&st).await;
-                let (agent_sock, _ephemeral) = prepare_direct_agent_sock(&dest_profile).await?;
+                let agent_source = prepare_direct_agent_source(&dest_profile).await?;
                 let cancel = Arc::new(AtomicBool::new(false));
                 st.relay_cancel
                     .lock()
@@ -2148,7 +2131,7 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     &target,
                     kh,
                     transport,
-                    agent_sock,
+                    agent_source,
                     Some(cancel),
                     Some(on_heartbeat),
                     Some(on_progress),

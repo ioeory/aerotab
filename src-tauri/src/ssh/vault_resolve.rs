@@ -1,9 +1,5 @@
 //! Resolve [`AuthMethod::VaultRef`] into inline credentials using the vault.
 
-use std::path::PathBuf;
-
-use uuid::Uuid;
-
 use crate::ssh::SshError;
 use crate::ssh::{AuthMethod, SshProfile};
 use crate::vault::{EntryKind, VaultError, VaultStore};
@@ -60,13 +56,10 @@ async fn resolve_auth(vault: Option<&VaultStore>, auth: &mut AuthMethod) -> Resu
         EntryKind::Password | EntryKind::Token => AuthMethod::Password {
             secret: entry.secret,
         },
-        EntryKind::Key => {
-            let key_path = write_temp_key(&entry.secret)?;
-            AuthMethod::PublicKey {
-                key_path,
-                passphrase,
-            }
-        }
+        EntryKind::Key => AuthMethod::PrivateKeyMemory {
+            pem: normalize_vault_private_key(&entry.secret),
+            passphrase,
+        },
         EntryKind::Note => {
             return Err(SshError::Connect(format!(
                 "vault entry \"{}\" is a note, not usable for SSH auth",
@@ -101,19 +94,6 @@ fn normalize_vault_private_key(raw: &str) -> String {
     }
 }
 
-fn write_temp_key(pem: &str) -> Result<PathBuf, SshError> {
-    let path = std::env::temp_dir().join(format!("aerotab-vault-key-{}", Uuid::new_v4()));
-    let normalized = normalize_vault_private_key(pem);
-    std::fs::write(&path, normalized.as_bytes()).map_err(|e| SshError::Io(e.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| SshError::Io(e.to_string()))?;
-    }
-    Ok(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +112,32 @@ mod tests {
         let raw = "-----BEGIN OPENSSH PRIVATE KEY-----\nLINE\n-----END OPENSSH PRIVATE KEY-----\n";
         let out = normalize_vault_private_key(raw);
         assert_eq!(out.matches('\n').count(), 3);
+    }
+
+    #[test]
+    fn decodes_in_memory_key_with_passphrase() {
+        let key = russh::keys::key::KeyPair::generate_ed25519().expect("ed25519 key");
+        let mut pem = Vec::new();
+        russh::keys::encode_pkcs8_pem_encrypted(&key, b"s3cret", 16, &mut pem).expect("encode");
+        let pem = normalize_vault_private_key(&String::from_utf8(pem).expect("utf8"));
+        assert!(russh::keys::decode_secret_key(&pem, Some("s3cret")).is_ok());
+        assert!(russh::keys::decode_secret_key(&pem, Some("wrong")).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_without_vault_reference_writes_nothing() {
+        let mut auth = AuthMethod::Agent;
+        resolve_auth(None, &mut auth).await.expect("noop");
+        assert!(matches!(auth, AuthMethod::Agent));
+    }
+
+    #[test]
+    fn in_memory_key_is_never_serialized() {
+        let auth = AuthMethod::PrivateKeyMemory {
+            pem: "secret".into(),
+            passphrase: None,
+        };
+        assert!(serde_json::to_string(&auth).is_err());
     }
 
     #[test]

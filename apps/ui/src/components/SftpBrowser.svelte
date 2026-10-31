@@ -1724,6 +1724,7 @@
     ? 'fixed inset-0 bg-black/60 z-50 grid place-items-center p-6'
     : 'h-full w-full min-w-0 bg-[var(--color-panel)]'}
   data-aerotab-modal={mode === 'modal' ? '' : undefined}
+  data-aerotab-focus-zone=""
   role={mode === 'modal' ? 'dialog' : 'complementary'}
   aria-modal={mode === 'modal'}
   aria-label={i18n.t('sftp.aria')}

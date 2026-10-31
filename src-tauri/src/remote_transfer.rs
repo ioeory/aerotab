@@ -8,7 +8,8 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::ssh::known_hosts::KnownHosts;
 use crate::ssh::{
-    connect_authenticated_with_agent_forwarding_sock, SshError, SshProfile, SshTransportSettings,
+    connect_authenticated, connect_authenticated_with_agent_forwarding, AgentSource, SshError,
+    SshProfile, SshTransportSettings,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,8 +46,8 @@ pub type DirectHeartbeatFn = Arc<dyn Fn() + Send + Sync>;
 
 /// Run source-exec Direct transfer with agent forwarding (no key file on source).
 ///
-/// `agent_sock`: when set, forwarded agent channels use this socket (ephemeral
-/// agent holding the destination key). When `None`, the system agent is used.
+/// Forwarded agent channels are served by `agent_source` (the system agent, or an
+/// in-process agent holding only the destination key).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_direct_transfer(
     source_profile: &SshProfile,
@@ -55,16 +56,16 @@ pub async fn run_direct_transfer(
     target: &DirectTransferTarget,
     known_hosts: Option<KnownHosts>,
     transport: SshTransportSettings,
-    agent_sock: Option<String>,
+    agent_source: AgentSource,
     cancel: Option<Arc<AtomicBool>>,
     on_heartbeat: Option<DirectHeartbeatFn>,
     on_progress: Option<DirectProgressFn>,
 ) -> Result<DirectTransferOutput, SshError> {
-    let handle = connect_authenticated_with_agent_forwarding_sock(
+    let handle = connect_authenticated_with_agent_forwarding(
         source_profile,
         known_hosts,
         transport,
-        agent_sock,
+        agent_source,
     )
     .await?;
 
@@ -233,13 +234,7 @@ pub async fn probe_source_transfer_tools(
     known_hosts: Option<KnownHosts>,
     transport: SshTransportSettings,
 ) -> Result<(bool, bool), SshError> {
-    let handle = connect_authenticated_with_agent_forwarding_sock(
-        source_profile,
-        known_hosts,
-        transport,
-        None,
-    )
-    .await?;
+    let handle = connect_authenticated(source_profile, known_hosts, transport).await?;
     let mut channel = handle
         .channel_open_session()
         .await
