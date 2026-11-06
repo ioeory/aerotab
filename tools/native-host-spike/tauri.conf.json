@@ -1,0 +1,13 @@
+{
+  "productName": "NativeHostSpike",
+  "version": "0.1.0",
+  "identifier": "local.native-host-spike",
+  "build": { "frontendDist": "dist" },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["../../src-tauri/icons/32x32.png"]
+  }
+}

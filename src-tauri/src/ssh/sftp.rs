@@ -192,6 +192,24 @@ impl Sftp {
         Ok(buf)
     }
 
+    /// Create a remote file exclusively; never truncate an existing path.
+    pub async fn create_file_exclusive(&self, path: &str, data: &[u8]) -> Result<(), SshError> {
+        let mut file = self
+            .inner
+            .open_with_flags(
+                path,
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+            )
+            .await
+            .map_err(|error| SshError::Channel(format!("exclusive create: {error}")))?;
+        file.write_all(data)
+            .await
+            .map_err(|error| SshError::Channel(error.to_string()))?;
+        file.shutdown()
+            .await
+            .map_err(|error| SshError::Channel(error.to_string()))
+    }
+
     pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<(), SshError> {
         self.inner
             .write(path, data)

@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><style>
+body{margin:0;background:#202631;color:#eee;font:15px sans-serif}header{height:64px;display:flex;gap:16px;align-items:center;padding:0 20px}button,input{padding:8px}.panes{display:flex;gap:20px;padding:20px}.pane{height:400px;flex:1;background:#181c24;border:1px solid #777}.modal{position:fixed;inset:80px;background:#445;z-index:10;padding:40px;display:none}
+</style><header><button onclick="business()">Business button</button><input placeholder="Business UI stays interactive"><span id="count">0</span></header><div class="panes"><div class="pane" id="native">Native child pane</div><div class="pane">WebView business pane (not terminal canvas)</div></div><div id="modal" class="modal">DOM modal over native pane</div><script>
+let seq=0,active=true,modal=false,count=0;
+function business(){count++;document.querySelector('#count').textContent=count;report()}
+function report(){let r=document.querySelector('#native').getBoundingClientRect();window.ipc.postMessage(JSON.stringify({seq,x:r.x,y:r.y,width:r.width,height:r.height,scale:devicePixelRatio,active,modal,count}))}
+window.step=function(n){seq=n;active=n!==1;modal=n===3;document.querySelector('#modal').style.display=modal?'block':'none';if(n===4){document.querySelector('.panes').style.padding='30px';business()}report()};
+new ResizeObserver(report).observe(document.querySelector('#native'));window.addEventListener('resize',report);report();
+</script>

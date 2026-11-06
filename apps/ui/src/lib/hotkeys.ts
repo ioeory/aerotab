@@ -207,6 +207,7 @@ export class HotkeyManager {
 
   /** Returns true if the event was consumed. */
   dispatch(ev: KeyboardEvent): boolean {
+    if (ev.isComposing || ev.getModifierState?.('AltGraph')) return false;
     for (const [actionId, list] of this.bindings) {
       for (const b of list) {
         if (matches(ev, b)) {

@@ -1,0 +1,32 @@
+{
+  "productionReady": false,
+  "newDifferentialBlockers": "See differential-findings.json: strict C1/parser-policy and valid mixed cell foreground discrepancies remain failing, not expected-success negative controls.",
+  "unicodeScalarTable": {
+    "crate": "unicode-width=0.2.3",
+    "unicode": "18.0.0",
+    "rangesSha256": "9eb0bd591fd4530561a2ec49eec4b57063e4dc64f1aca07644854158c6a519b3",
+    "policy": "Native Term::input uses per-scalar UnicodeWidthChar, not grapheme folding."
+  },
+  "rawUpstreamBug": {
+    "id": "xterm-5.5-byte-chunk-zero-payload-continuation",
+    "input": "👩‍💻X",
+    "delivery": "Each UTF-8 byte is a separate write(Uint8Array, callback).",
+    "rawNativeFirstCell": "👩‍",
+    "rawXtermFirstCell": "👩",
+    "sourceEvidence": "Installed _utf8Decoder constructor: for (; (n=63&this.interim[++a]) && a<4;) reconstructs stored continuation bytes using their 6-bit payload as termination condition. For E2 80 8D, stored 0x80 has zero payload and terminates reconstruction early; resumed length expects an extra continuation and drops U+200D. Direct decoder instrumentation and raw write negative controls reproduce this. Source inspection only; no private implementation patch.",
+    "bridgeStatus": "Strict native comparison now uses public xterm.write(string, actual callback), full native width provider, and a bounded per-session scalar framer plus persistent TextDecoder. Raw bug remains explicitly tested as a negative control."
+  },
+  "bridgePolicy": {
+    "pendingBytesMaximum": 3,
+    "decoder": "TextDecoder utf-8 fatal=false ignoreBOM=true with stream=true; only completed scalar frames are passed to it",
+    "reasonForScalarFramer": "Plain WHATWG TextDecoder differs from native vte0.15 on raw C1 handling and incomplete EOF. Framer applies native replacement/C1 policy without buffering ANSI sequences. Surrogate, out-of-range, malformed continuation and EOF fixtures are compared exactly.",
+    "ack": "Real string-write callback precedes consumption ACK; pending UTF8 bytes forbid first_frame and commit despite log reclamation. EOF drops incomplete scalar like native vte, then uses real flush-write callback.",
+    "limitations": "Not a proof of every invalid-byte/ANSI-state interaction; native VTE parsing is stateful and this bridge does not replicate the entire VT parser."
+  },
+  "unproven": [
+    "DOM/GPU first-frame presentation (host_frame_model is not a frame)",
+    "Arbitrary ANSI/protocol equivalence or all malformed-byte interactions inside control strings",
+    "Crash/reconnect exactly-once I/O",
+    "Manual visual vim/tmux validation; only automated isolated real PTY sessions"
+  ]
+}

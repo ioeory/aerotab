@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 default-run = "aerotab-app"
-
 [lib]
 name = "aerotab_core"
 path = "src/lib.rs"
@@ -53,7 +52,7 @@ wasmi = { workspace = true }
 encoding_rs = "0.8"
 
 # Official MCP SDK, Streamable HTTP and authenticated TLS listener.
-rmcp = { version = "=0.8.5", default-features = false, features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "=0.8.5", features = ["base64", "macros", "server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 axum = "0.8"
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -73,6 +72,10 @@ tauri-build = { version = "2", optional = true , features = [] }
 wat = "1"
 
 [target.'cfg(windows)'.dependencies]
+wgpu = { version = "=30.0.0", optional = true, default-features = false, features = ["std", "dx12", "wgsl"] }
+glyphon = { version = "=0.12.0", optional = true }
+pollster = { version = "0.4", optional = true }
+windows-sys = { version = "0.59", optional = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Ime", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
 windows = { version = "0.58", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_Foundation",
@@ -81,8 +84,21 @@ windows = { version = "0.58", features = [
   "Win32_System_DataExchange",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# crates.io objc2 bindings and wgpu Metal backend; no external Apple SDK vendoring.
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-app-kit = { version = "0.3", optional = true }
+wgpu = { version = "=30.0.0", optional = true, default-features = false, features = ["std", "metal", "wgsl"] }
+glyphon = { version = "=0.12.0", optional = true }
+pollster = { version = "0.4", optional = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+gtk = { version = "0.18.2", optional = true }
+glib = { version = "0.18.5", optional = true }
+glow = { version = "0.17.0", optional = true }
+webkit2gtk = { version = "2.0.2", features = ["v2_40"], optional = true }
 
 [features]
 default = ["desktop"]
@@ -94,3 +110,5 @@ serial = []
 sync = []
 plugins = []
 native-embed = []
+# Opt-in GTK native view. Unsupported platforms return an explicit error.
+native-view = ["desktop", "tauri/unstable", "dep:gtk", "dep:glib", "dep:glow", "dep:webkit2gtk", "dep:wgpu", "dep:glyphon", "dep:pollster", "dep:windows-sys", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]

@@ -1,0 +1,18 @@
+{
+  "api":{
+    "transport":"import {FrameTransport} from tools/terminal-handoff-spike/node/frame-transport.mjs; new FrameTransport({session,view,epoch,ack}); apply(frame); drawTicket(); drawComplete(ticket,evidence)",
+    "canvas":"import {mountCanvasView} from tools/terminal-handoff-spike/node/canvas-view.mjs; mountCanvasView(realCanvas,{session,epoch,onAck}).receive(frame); dispose()",
+    "fixture":"cargo run --locked --bin view-fixture emits full + damage from actual singleton canonical alacritty Snapshot, with structured Unicode/width/fg/bg/flags cells, no byte parsing in views."
+  },
+  "frame":{"version":1,"session":"decimal u64 string","view":"native|webview","epoch":"decimal u64 string","revision":"decimal u64 string","output_seq":"decimal u64 string","wire_seq":"u32 wraps; not ordering authority","full":"boolean","base_revision":"null for full, exact acknowledged revision string for damage","cols":"2..512","lines":"1..256","cursor":"{col,line,visible}","mode":"u32","history":"line count","ended":"boolean","rows":"[{y,cells:[{text,width:0|1|2,fg:{kind:named|indexed|rgb,value},bg,flags:u16}]}]"},
+  "ack":{"version":1,"session":"same string","view":"same","epoch":"same string","revision":"same string","output_seq":"same string","wire_seq":"same u32","phase":"applied|drawn","evidence":"null|canvas-raf|native-draw-callback","physical_present":false},
+  "hostRules":[
+    "Apply frame atomically only after validation. Missing base, stale epoch, dropped/out-of-order revision => reject/request full. Never redraw old ticket after newer revision applied.",
+    "Native host must send applied after GPU scene update and drawn only after actual native draw callback for EXACT epoch+revision; callback is not guaranteed compositor/scanout presentation.",
+    "WebView onAck must be delivered over host IPC; JavaScript cannot attest physical present. Do not reinterpret phase=drawn as physical presentation. First-frame gate must document accepted evidence level explicitly.",
+    "No private xterm hooks, no xterm parser; view is canonical state Canvas2D. Production feature parity (selection, IME, full flags, history paging, scaling and accessibility) remains separate work.",
+    "Fixture resolves OSC palette overrides to RGB before frame emission; production native-core worker can use same structured cell contract without importing this test session core."
+  ],
+  "realSmoke":{"command":"npm run smoke:webkit","engine":"installed WebKitGTK 2.52.3 via minimal ctypes GTK host and loopback module server","observed":"real requestAnimationFrame draw callbacks for full revision1 + damage revision2; real Canvas getImageData bright pixel check","notProven":["physical presentation","compositor timing","hardware GPU rendering","production host IPC integration","native draw callback path"]},
+  "ownership":"No files in native-host-spike or native-terminal-core edited. This module/fixture is available for the other worker to import."
+}

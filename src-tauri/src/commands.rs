@@ -2300,7 +2300,17 @@ async fn load_ssh_transport_settings(st: &AppState) -> ssh::SshTransportSettings
     let Ok(v) = serde_json::from_value::<serde_json::Value>(value) else {
         return ssh::SshTransportSettings::default();
     };
-    let mut out = ssh::SshTransportSettings::default();
+    let mut out = ssh::SshTransportSettings {
+        // Missing legacy settings retain auto; malformed values fail closed.
+        agent: v
+            .get("agent")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .unwrap_or(Some(ssh::AgentPreference::None))
+            .unwrap_or_default(),
+        ..Default::default()
+    };
     let interval_secs = v
         .get("keepaliveInterval")
         .and_then(|x| x.as_u64())
@@ -2325,6 +2335,27 @@ async fn load_ssh_transport_settings(st: &AppState) -> ssh::SshTransportSettings
     // Allow long idle SFTP browsing sessions on high-latency links.
     out.inactivity_timeout = std::time::Duration::from_secs(60 * 60 * 6);
     out
+}
+
+#[cfg(test)]
+mod ssh_agent_settings_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn saved_agent_preference_reaches_transport() {
+        let dir = std::env::temp_dir().join(format!("aerotab-agent-settings-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let store = SettingsStore::open(&dir).unwrap();
+        *state.settings.lock().await = Some(store.clone());
+        for preference in ["auto", "system", "pageant", "none"] {
+            store.set("ssh", &json!({"agent":preference})).unwrap();
+            let transport = load_ssh_transport_settings(&state).await;
+            assert_eq!(serde_json::to_value(transport.agent).unwrap(), preference);
+        }
+        drop(state);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 async fn load_ssh_x11_options(st: &AppState) -> X11ForwardOptions {
@@ -4123,6 +4154,19 @@ fn register_terminal_engine(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
     {
         let st = state.clone();
+        dispatcher.register("terminal.snapshotEnvelope", move |params| {
+            let st = st.clone();
+            async move {
+                let p: EngineIdParam =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let snapshot = require_term_engine(&st, p.id)?.native_snapshot_envelope();
+                // Out-of-band envelope v1; embedded binary frame remains v1.
+                Ok(json!({ "version": 1, "frameVersion": 1, "outputSeq": snapshot.output_seq.to_string(), "bytes": snapshot.bytes }))
+            }
+        });
+    }
+    {
+        let st = state.clone();
         dispatcher.register("terminal.exportText", move |params| {
             let st = st.clone();
             async move {
@@ -4367,7 +4411,9 @@ fn register_terminal_engine(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
 }
 
+// MCP adapter is appended below to avoid overlapping concurrent command edits.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::ipc::Request;
@@ -4803,6 +4849,29 @@ mod tests {
         }
         assert!(text.contains("native-engine-ok"), "viewport: {text:?}");
 
+        let snapshot = d
+            .dispatch(req("terminal.snapshotEnvelope", json!({"id": id})))
+            .await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        let snapshot = snapshot.result.unwrap();
+        assert_eq!(snapshot["version"], json!(1));
+        assert_eq!(snapshot["frameVersion"], json!(1));
+        assert!(
+            snapshot["outputSeq"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(snapshot["bytes"][0], json!(1));
+        assert_eq!(snapshot["bytes"][1], json!(0));
+        // Read-only envelope leaves the singleton attached and legacy poll blocked.
+        assert!(state
+            .terminal_engines
+            .get(Uuid::parse_str(&id).unwrap())
+            .is_some());
+
         // Legacy poll must not block or drain the engine's receiver.
         let r = d
             .dispatch(req("session.poll", json!({"id": id, "max_chunks": 4})))
@@ -4906,4 +4975,79 @@ mod tests {
         assert!(matches!(item.auth, Some(AuthMethod::VaultRef { .. })));
         assert!(item.profile.is_some());
     }
+}
+
+/// MCP uses a separate authenticated SSH exec connection; it never writes into
+/// a shell or consumes session output. Dropping the channel cancels collection.
+pub async fn mcp_run_command(
+    state: &AppState,
+    profile_id: Uuid,
+    command: &str,
+    timeout_ms: u64,
+    max_bytes: usize,
+) -> Result<Value, String> {
+    if command.is_empty()
+        || command.len() > 16384
+        || command.contains('\0')
+        || !(1..=120000).contains(&timeout_ms)
+        || !(1..=1048576).contains(&max_bytes)
+    {
+        return Err("invalid command, timeout or output limit".into());
+    }
+    let profile = resolve_ssh_profile(state, profile_id)
+        .await
+        .map_err(|_| "unable to resolve SSH profile".to_string())?;
+    let known_hosts = state.known_hosts.lock().await.clone();
+    if known_hosts.is_none() {
+        return Err("known-hosts store must be configured before MCP exec".into());
+    }
+    let transport = load_ssh_transport_settings(state).await;
+    let operation = async {
+        let handle = ssh::connect_authenticated(&profile, known_hosts, transport)
+            .await
+            .map_err(|_| "SSH connection or authentication failed".to_string())?;
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|_| "unable to open SSH exec channel".to_string())?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|_| "SSH exec request failed".to_string())?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut status = None;
+        let mut truncated = false;
+        while let Some(message) = channel.wait().await {
+            match message {
+                russh::ChannelMsg::Data { ref data }
+                | russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                    let available = max_bytes.saturating_sub(stdout.len() + stderr.len());
+                    let take = available.min(data.len());
+                    if matches!(message, russh::ChannelMsg::Data { .. }) {
+                        stdout.extend_from_slice(&data[..take]);
+                    } else {
+                        stderr.extend_from_slice(&data[..take]);
+                    }
+                    if take < data.len() {
+                        truncated = true;
+                        break;
+                    }
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                russh::ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        let _ = channel.close().await;
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "MCP exec complete", "en")
+            .await;
+        Ok(
+            json!({"stdout": String::from_utf8_lossy(&stdout), "stderr": String::from_utf8_lossy(&stderr), "exit_status":status,"truncated":truncated}),
+        )
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), operation)
+        .await
+        .map_err(|_| "SSH exec timed out; remote command may still be running".to_string())?
 }

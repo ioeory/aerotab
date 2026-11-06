@@ -184,6 +184,7 @@ export class WebGLRenderer implements GridRenderer {
   render(scene: RenderScene) {
     const { grid, palette, cursor } = scene;
     const gl = this.gl;
+    if (gl.isContextLost()) throw new Error('termgrid: WebGL context lost');
     const cw = this.metrics.width;
     const ch = this.metrics.height;
     const [br, bg, bb] = rgba(palette.background);
@@ -272,6 +273,7 @@ export class WebGLRenderer implements GridRenderer {
       gl.drawArrays(gl.TRIANGLES, 0, glyphVerts.length / 8);
     }
 
+    if (gl.isContextLost() || gl.getError() !== gl.NO_ERROR) throw new Error('termgrid: WebGL draw failed');
     grid.clearDirty();
   }
 

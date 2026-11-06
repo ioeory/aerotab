@@ -119,7 +119,10 @@ fn validate_url(raw: &str, explicit: bool) -> anyhow::Result<reqwest::Url> {
 fn process_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        std::path::Path::new("/proc").join(pid.to_string()).exists()
+        match std::fs::metadata(std::path::Path::new("/proc").join(pid.to_string())) {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
@@ -291,8 +294,12 @@ async fn run() -> anyhow::Result<()> {
     if let Some(url) = args.url {
         return proxy(validate_url(&url, true)?).await;
     }
-    let dir = resolve_data_dir(args.data_dir, std::env::var_os, std::env::consts::OS)
-        .map_err(anyhow::Error::msg)?;
+    let dir = resolve_data_dir(
+        args.data_dir,
+        |key| std::env::var_os(key),
+        std::env::consts::OS,
+    )
+    .map_err(anyhow::Error::msg)?;
     if let Some(endpoint) = read_endpoint(&dir)? {
         if process_alive(endpoint.pid) {
             return proxy(validate_url(&endpoint.url, false)?).await;
@@ -309,6 +316,45 @@ mod tests {
 
     fn args(values: &[&str]) -> Result<Args, String> {
         parse_args(values.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn endpoint_urls_never_accept_credentials_or_insecure_remote_hosts() {
+        for url in [
+            "http://example.com/mcp",
+            "https://user:secret@example.com/mcp",
+            "https://example.com/mcp?token=secret",
+            "https://example.com/mcp#secret",
+            "file:///tmp/mcp",
+        ] {
+            assert!(validate_url(url, true).is_err());
+        }
+        assert!(validate_url("https://example.com/mcp", true).is_ok());
+        assert!(validate_url("https://example.com/mcp", false).is_err());
+        assert!(validate_url("http://127.0.0.1:23890/mcp", false).is_ok());
+        assert!(validate_url("http://[::1]:23890/mcp", false).is_ok());
+    }
+
+    #[test]
+    fn descriptor_read_is_bounded_and_missing_is_not_enabled() {
+        let dir = std::env::temp_dir().join(format!("aerotab-mcp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_endpoint(&dir).unwrap().is_none());
+        std::fs::write(dir.join("mcp-endpoint.json"), vec![b' '; 8193]).unwrap();
+        assert!(read_endpoint(&dir).is_err());
+        std::fs::write(
+            dir.join("mcp-endpoint.json"),
+            br#"{"url":"http://127.0.0.1:23890/mcp","pid":1}"#,
+        )
+        .unwrap();
+        assert_eq!(read_endpoint(&dir).unwrap().unwrap().pid, 1);
+        std::fs::write(
+            dir.join("mcp-endpoint.json"),
+            br#"{"url":"https://example.com/mcp","pid":1}"#,
+        )
+        .unwrap();
+        assert!(read_endpoint(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

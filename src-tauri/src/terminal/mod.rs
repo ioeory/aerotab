@@ -8,6 +8,10 @@
 //! [`engine`] hosts the native terminal engine (VT parsing + grid in Rust).
 
 pub mod engine;
+#[cfg(feature = "native-view")]
+pub mod native_host;
+#[path = "native_host/capabilities.rs"]
+pub mod native_view_capabilities;
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};

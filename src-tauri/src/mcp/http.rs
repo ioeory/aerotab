@@ -3,7 +3,7 @@ use super::{McpConfig, McpServer};
 use axum::{
     body::{to_bytes, Body},
     http::{uri::Authority, HeaderMap, Request, StatusCode},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::any,
     Router,
 };
@@ -89,7 +89,7 @@ pub(crate) async fn prepare(
     ),
     String,
 > {
-    let config = server.config();
+    let mut config = server.config();
     config.validate()?;
     let addr = SocketAddr::new(config.bind_ip()?, config.port);
     let tls = if config.tls_enabled() {
@@ -109,19 +109,12 @@ pub(crate) async fn prepare(
         std::net::TcpListener::bind(addr).map_err(|e| format!("MCP bind failed: {e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
-    // Stateless Streamable HTTP avoids server-side session workers surviving
-    // reconfiguration and guarantees each invocation passes the auth middleware.
-    let service = StreamableHttpService::new(
-        move || Ok(server.clone()),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig {
-            stateful_mode: false,
-            ..Default::default()
-        },
-    );
+    config.port = bound.port();
+    // Stateless Streamable HTTP avoids persistent session workers; handlers
+    // bind to the token generation authenticated by this exact request.
     let app = Router::new().route("/mcp", any(move |request: Request<Body>| {
         let config = config.clone();
-        let service = service.clone();
+        let mut server = server.clone();
         let token = token.clone();
         let cancel = cancel.clone();
         async move {
@@ -130,10 +123,22 @@ pub(crate) async fn prepare(
                 if let Err(code) = validate_headers(request.headers(), &config, &auth.token) { return code.into_response(); }
                 auth.cancel.clone()
             };
+            server.cancellation = request_cancel.clone();
+            server.shutdown = cancel.clone();
+            let service = StreamableHttpService::new(
+                move || Ok(server.clone()), Arc::new(LocalSessionManager::default()),
+                StreamableHttpServerConfig { stateful_mode: false, ..Default::default() },
+            );
             let (parts, body) = request.into_parts();
-            let bytes = match to_bytes(body, MAX_BODY_BYTES).await {
-                Ok(bytes) => bytes,
-                Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            let bytes = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                _ = request_cancel.cancelled() => return StatusCode::UNAUTHORIZED.into_response(),
+                result = tokio::time::timeout(std::time::Duration::from_secs(30), to_bytes(body, MAX_BODY_BYTES)) => match result {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                    Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+                },
             };
             // Authentication is checked again after reading a potentially slow
             // body, so token rotation cannot authorize a stale in-flight upload.
@@ -144,7 +149,7 @@ pub(crate) async fn prepare(
             tokio::select! {
                 _ = cancel.cancelled() => StatusCode::SERVICE_UNAVAILABLE.into_response(),
                 _ = request_cancel.cancelled() => StatusCode::UNAUTHORIZED.into_response(),
-                response = service.handle(Request::from_parts(parts, Body::from(bytes))) => Response::new(Body::new(response.into_body())),
+                response = service.handle(Request::from_parts(parts, Body::from(bytes))) => response.map(Body::new),
             }
         }
     }));
@@ -174,8 +179,39 @@ mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};
     #[test]
+    fn duplicate_authorization_and_wrong_ports_are_rejected() {
+        let config = McpConfig {
+            port: 23890,
+            ..Default::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("localhost:23890"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer token"));
+        headers.append("authorization", HeaderValue::from_static("Bearer token"));
+        assert_eq!(
+            validate_headers(&headers, &config, "token"),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        headers.remove("authorization");
+        headers.insert("authorization", HeaderValue::from_static("Bearer token"));
+        headers.insert("host", HeaderValue::from_static("localhost:80"));
+        assert_eq!(
+            validate_headers(&headers, &config, "token"),
+            Err(StatusCode::FORBIDDEN)
+        );
+        headers.insert("host", HeaderValue::from_static("localhost:23890"));
+        assert_eq!(
+            validate_headers(&headers, &config, ""),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
     fn auth_and_host_checks_fail_closed() {
-        let config = McpConfig::default();
+        let config = McpConfig {
+            port: 23890,
+            ..Default::default()
+        };
         let mut headers = HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("localhost:23890"));
         headers.insert(

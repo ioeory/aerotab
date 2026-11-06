@@ -54,7 +54,7 @@ The server is disabled by default. A permission is checked again when each tool 
 - **RPC bridge:** `call_rpc` accepts an explicit method allowlist, not the complete internal command registry.
 - **Help:** `help` describes the tools and operation categories.
 
-Local file access is restricted to roots configured by the user. Remote files are accessed through SFTP. File and command outputs are bounded; inspect truncation indicators instead of assuming a returned fragment is complete.
+Local file access is restricted to roots configured by the user. Use `open_sftp` with a saved `profile_id` to obtain an `sftp_id` for remote file tools; close it with `close_sftp` when finished. Opening requires session-management permission plus either file-read or file-write permission. This also supports headless stdio operation. File and command outputs are bounded; inspect truncation indicators instead of assuming a returned fragment is complete.
 
 There are no MCP tools for exporting vault entries or keyring secrets. This is not a general data-loss-prevention boundary: a permitted shell command or file read can still access secrets available to its OS user. Use a dedicated restricted SSH account for sensitive environments.
 

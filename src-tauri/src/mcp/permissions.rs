@@ -7,6 +7,9 @@ pub fn authorize(config: &McpConfig, name: &str, args: &Value) -> Result<(), Str
     if !config.permitted(category) {
         return Err(format!("Permission denied: {category}"));
     }
+    if name == "open_sftp" && !config.permitted("readFiles") && !config.permitted("writeFiles") {
+        return Err("Permission denied: SFTP requires readFiles or writeFiles".into());
+    }
     if name == "call_rpc" {
         let method = args
             .get("method")
@@ -31,8 +34,43 @@ mod tests {
         let cfg = McpConfig::default();
         assert!(cfg.permitted("listProfiles"));
         assert!(cfg.permitted("readTerminal"));
-        assert!(!cfg.permitted("executeCommand"));
+        for permission in [
+            "runCommand",
+            "readFiles",
+            "writeFiles",
+            "openSession",
+            "manageProfiles",
+            "remoteDesktop",
+            "tunnels",
+            "callRpc",
+        ] {
+            assert!(!cfg.permitted(permission));
+        }
         assert!(!cfg.permitted("unknown"));
+    }
+
+    #[test]
+    fn rpc_requires_both_outer_and_underlying_permissions() {
+        let mut cfg = McpConfig::default();
+        assert!(authorize(&cfg, "call_rpc", &json!({"method":"profile.list"})).is_err());
+        cfg.permissions.insert("callRpc".into(), true);
+        assert!(authorize(&cfg, "call_rpc", &json!({"method":"profile.list"})).is_ok());
+        assert!(authorize(&cfg, "call_rpc", &json!({"method":"tunnel.list"})).is_err());
+        cfg.permissions.insert("tunnels".into(), true);
+        assert!(authorize(&cfg, "call_rpc", &json!({"method":"tunnel.list"})).is_ok());
+        cfg.permissions.insert("tunnels".into(), false);
+        assert!(authorize(&cfg, "call_rpc", &json!({"method":"tunnel.list"})).is_err());
+    }
+
+    #[test]
+    fn sftp_open_requires_session_and_file_grants() {
+        let mut config = McpConfig::default();
+        let args = json!({"profile_id":"00000000-0000-0000-0000-000000000000"});
+        assert!(authorize(&config, "open_sftp", &args).is_err());
+        config.permissions.insert("openSession".into(), true);
+        assert!(authorize(&config, "open_sftp", &args).is_err());
+        config.permissions.insert("readFiles".into(), true);
+        assert!(authorize(&config, "open_sftp", &args).is_ok());
     }
 
     #[test]
@@ -43,5 +81,11 @@ mod tests {
         assert!(authorize(&cfg, "call_rpc", &json!({"method":"secret.getMaster"})).is_err());
         assert!(authorize(&cfg, "call_rpc", &json!({"method":"mcp.getToken"})).is_err());
         assert!(authorize(&cfg, "call_rpc", &json!({"method":"session.write"})).is_err());
+        assert!(authorize(
+            &cfg,
+            "call_rpc",
+            &json!({"method":"terminal.snapshotEnvelope"})
+        )
+        .is_err());
     }
 }

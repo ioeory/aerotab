@@ -141,9 +141,9 @@ pub struct TrustingClient {
     agent_channels: HashMap<ChannelId, AgentForwardChannel>,
 }
 
-trait LocalAgentStream: AsyncRead + AsyncWrite + Unpin + Send {}
+trait LocalAgentStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 
-impl<T> LocalAgentStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> LocalAgentStream for T where T: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 
 struct AgentForwardChannel {
     agent: Box<dyn LocalAgentStream>,
@@ -725,6 +725,45 @@ where
     })))
 }
 
+// Keep the Signer transport concrete: passing Box<dyn LocalAgentStream> directly
+// through russh's generic async authentication leaks its object lifetime into
+// callers' Send obligations.
+struct AuthAgentStream(Box<dyn LocalAgentStream>);
+
+impl AsyncRead for AuthAgentStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AuthAgentStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
 async fn authenticate_agent_generic<H>(
     handle: &mut client::Handle<H>,
     profile: &SshProfile,
@@ -737,7 +776,7 @@ where
     let stream = agent::connect(preference)
         .await
         .map_err(|e| SshError::Agent(e.to_string()))?;
-    let agent = AgentClient::connect(stream);
+    let agent = AgentClient::connect(AuthAgentStream(stream));
     authenticate_agent_client_generic(handle, &profile.user, agent).await
 }
 
@@ -855,6 +894,12 @@ pub async fn connect_authenticated_with_agent_forwarding(
     transport: SshTransportSettings,
     agent_source: AgentSource,
 ) -> Result<client::Handle<TrustingClient>, SshError> {
+    // Existing callers use System to request the user's external agent. Route
+    // those through the saved preference, while preserving per-transfer keys.
+    let agent_source = match agent_source {
+        AgentSource::System => AgentSource::Configured(transport.agent),
+        source => source,
+    };
     let kh = known_hosts.clone();
     connect_authenticated_custom(profile, known_hosts, transport, move |hop, is_final| {
         TrustingClient::new(

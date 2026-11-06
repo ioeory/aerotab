@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Canonical state Canvas smoke — not xterm</title><canvas id="terminal"></canvas><script type="module">
+import {mountCanvasView} from './canvas-view.mjs';
+const frames=await (await fetch('/frames')).json();
+const canvas=document.querySelector('canvas');
+let index=0;const acks=[];
+const view=mountCanvasView(canvas,{session:frames[0].session,epoch:frames[0].epoch,onAck(ack){
+ acks.push(ack);if(ack.phase!=='drawn')return;
+ if(++index<frames.length){view.receive(frames[index]);return;}
+ const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+ let bright=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>100||pixels[i+1]>100||pixels[i+2]>100)bright++;
+ const evidence={ok:bright>20,engine:'real-WebKitGTK',renderer:'canonical-state-Canvas2D-not-xterm',acks,brightPixels:bright,physical_present:false};
+ document.body.dataset.evidence=JSON.stringify(evidence);
+ window.webkit?.messageHandlers?.evidence?.postMessage(JSON.stringify(evidence));
+}});
+view.receive(frames[0]);
+</script>

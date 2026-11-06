@@ -1,5 +1,13 @@
 // Shared data types mirroring the Rust IPC surface.
 
+/** Atomic read-only canonical snapshot. Decimal u64 is never a JSON number. */
+export interface TerminalSnapshotEnvelope {
+  version: 1;
+  frameVersion: 1;
+  outputSeq: string;
+  bytes: number[];
+}
+
 export interface SessionMeta {
   id: string;
   kind: 'LocalShell' | 'Ssh' | 'Serial' | string;

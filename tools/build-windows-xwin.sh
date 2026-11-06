@@ -24,5 +24,6 @@ rustup target add "$target" >/dev/null
     --runner cargo-xwin \
     --target "$target" \
     --bundles "$bundles" \
+    --features native-view \
     "$@"
 )

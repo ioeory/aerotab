@@ -1,0 +1,17 @@
+{
+  "name": "terminal-handoff-cross-core-spike",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:unicode": "cargo run --locked --bin unicode-table",
+    "test": "npm run test:single-core && npm run test:frame-transport",
+    "test:frame-transport": "cargo build --locked --bin view-fixture && node --test node/frame-transport.test.mjs",
+    "smoke:webkit": "cargo build --locked --bin view-fixture && WEBKIT_DISABLE_DMABUF_RENDERER=1 python3 node/webkit-smoke.py",
+    "test:single-core": "cargo test --locked --test single_core --test single_core_limits",
+    "diagnostic:historical-cross-core": "cargo run --locked --bin unicode-table -- --check && cargo build --locked --manifest-path Cargo.toml --bin cross-core && node --test --test-concurrency=1 node/*.test.mjs"
+  },
+  "dependencies": {
+    "@xterm/headless": "5.5.0"
+  }
+}

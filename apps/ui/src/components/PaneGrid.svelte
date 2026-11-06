@@ -1,6 +1,7 @@
 <script lang="ts">
   import { GripVertical, Maximize2, Minimize2, X } from '@lucide/svelte';
   import { onDestroy, onMount, tick } from 'svelte';
+  import { registerPaneLayoutBarrier } from '../lib/paneLayoutBarrier';
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import { tabs, type Tab } from '../lib/tabs.svelte';
@@ -33,6 +34,8 @@
     rpc: RpcClient;
     tab: Tab;
     settingsRev: number;
+    terminalViewChoices?: import('../lib/terminalViewChoice').TerminalViewChoices;
+    nativeSurfaceOccluded?: boolean;
     onOpenSftp?: () => void;
     onSplitRight?: () => void;
     onSplitDown?: () => void;
@@ -46,6 +49,8 @@
     rpc,
     tab,
     settingsRev,
+    terminalViewChoices = {},
+    nativeSurfaceOccluded = false,
     onOpenSftp,
     onSplitRight,
     onSplitDown,
@@ -70,12 +75,17 @@
     }
   }
 
-  function syncPaneBoxes() {
+  function syncPaneBoxes(onlyPane?: string) {
     if (!gridEl) return;
     const gridRect = gridEl.getBoundingClientRect();
     if (gridRect.width < 2 || gridRect.height < 2) return;
-    const next: Record<string, { left: number; top: number; width: number; height: number }> = {};
+    // DOMRects include ancestor CSS zoom; absolute pane styles use local CSS pixels.
+    const scaleX = gridRect.width / gridEl.offsetWidth;
+    const scaleY = gridRect.height / gridEl.offsetHeight;
+    if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) return;
+    const next: Record<string, { left: number; top: number; width: number; height: number }> = onlyPane ? { ...paneBox } : {};
     for (const pane of tab.panes) {
+      if (onlyPane && pane.id !== onlyPane) continue;
       const slot = gridEl.querySelector(`[data-pane-slot="${CSS.escape(pane.id)}"]`) as HTMLElement | null;
       if (!slot) continue;
       const style = getComputedStyle(slot);
@@ -83,10 +93,10 @@
       const r = slot.getBoundingClientRect();
       if (r.width < 2 || r.height < 2) continue;
       next[pane.id] = {
-        left: r.left - gridRect.left,
-        top: r.top - gridRect.top,
-        width: r.width,
-        height: r.height,
+        left: (r.left - gridRect.left) / scaleX,
+        top: (r.top - gridRect.top) / scaleY,
+        width: r.width / scaleX,
+        height: r.height / scaleY,
       };
     }
     paneBox = next;
@@ -121,6 +131,17 @@
 
   onMount(() => {
     installPaneDragGlobalHandlers();
+    const unregisterLayout = gridEl ? registerPaneLayoutBarrier(gridEl, async source => {
+      const pane = (source as HTMLElement).closest<HTMLElement>('[data-pane-drop-pane]');
+      const id = pane?.dataset.paneDropPane;
+      const slot = id && gridEl?.querySelector<HTMLElement>(`[data-pane-slot="${CSS.escape(id)}"]`);
+      if (!pane || !id || !slot || !gridEl?.contains(pane)) throw new Error('pane layout owner unavailable');
+      syncPaneBoxes(id); // Update only the requested pane, not every pane on every frame.
+      await tick(); // Explicit Svelte cache -> DOM commit, not an arbitrary paint delay.
+      // WebView2 may need a frame after style commit before getBoundingClientRect matches.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return { pane: pane.getBoundingClientRect(), slot: slot.getBoundingClientRect() };
+    }) : () => {};
     const unsubHit = subscribePaneDragHit(() => {
       dragHit = getPaneDragHit();
     });
@@ -130,6 +151,7 @@
     window.addEventListener('resize', onWin);
     scheduleSync();
     return () => {
+      unregisterLayout();
       unsubHit();
       window.removeEventListener('resize', onWin);
     };
@@ -164,7 +186,7 @@
 
 <div
   bind:this={gridEl}
-  class="absolute inset-0 min-w-0 min-h-0"
+  class="absolute inset-0 min-w-0 min-h-0 overflow-hidden"
   role="presentation"
   ondragover={(e) => {
     if (isPaneDragActive()) e.preventDefault();
@@ -240,7 +262,9 @@
         <TerminalPane
           {rpc}
           session={pane}
-          active={focused}
+          active={focused && tabVisible}
+          rendererOverride={terminalViewChoices[pane.id]}
+          {nativeSurfaceOccluded}
           layoutVisible={!hidden}
           {tabVisible}
           {settingsRev}

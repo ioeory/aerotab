@@ -15,6 +15,8 @@
 //! [`TerminalEngine::feed`]. The frontend clears bypass when the transfer
 //! finishes.
 
+#[cfg(debug_assertions)]
+mod debug_ticks;
 pub mod frame;
 
 use std::collections::HashMap;
@@ -132,6 +134,8 @@ struct Inner {
     events: EventQueue,
     processor: Processor,
     seq: u32,
+    /// Bytes actually committed to the canonical parser, including incomplete sequences.
+    output_seq: u64,
     /// Grid content changed since the last frame.
     dirty: bool,
     /// Next frame must carry every row.
@@ -154,7 +158,18 @@ struct Inner {
     search_cache: Option<(String, RegexSearch)>,
 }
 
+/// Out-of-band native snapshot envelope; inner frame stays the existing v1 codec.
+/// Both fields are captured under the same canonical engine lock.
+pub struct NativeSnapshotEnvelope {
+    pub bytes: Vec<u8>,
+    pub output_seq: u64,
+}
+
 pub struct TerminalEngine {
+    #[cfg(debug_assertions)]
+    debug_ticks: StdMutex<debug_ticks::Observer>,
+    #[cfg(debug_assertions)]
+    debug_clock: std::time::Instant,
     inner: StdMutex<Inner>,
     redraw: Notify,
     sink: StdMutex<Option<FrameSink>>,
@@ -174,11 +189,16 @@ impl TerminalEngine {
         let size = TermSize::new(cfg.cols.max(1) as usize, cfg.rows.max(1) as usize);
         let term = Term::new(config, &size, events.clone());
         Arc::new(Self {
+            #[cfg(debug_assertions)]
+            debug_ticks: StdMutex::new(Default::default()),
+            #[cfg(debug_assertions)]
+            debug_clock: std::time::Instant::now(),
             inner: StdMutex::new(Inner {
                 term,
                 events,
                 processor: Processor::new(),
                 seq: 0,
+                output_seq: 0,
                 dirty: true,
                 full_pending: true,
                 title: None,
@@ -214,7 +234,7 @@ impl TerminalEngine {
             loop {
                 tokio::select! {
                     chunk = rx.recv(), if !closed => match chunk {
-                        Some(bytes) => me.ingest(&bytes),
+                        Some(bytes) => me.ingest_observed(&bytes),
                         None => { closed = true; me.mark_exited(); }
                     },
                     _ = me.redraw.notified() => {}
@@ -225,7 +245,7 @@ impl TerminalEngine {
                         tokio::select! {
                             biased;
                             chunk = rx.recv() => match chunk {
-                                Some(bytes) => me.ingest(&bytes),
+                                Some(bytes) => me.ingest_observed(&bytes),
                                 None => { closed = true; me.mark_exited(); break; }
                             },
                             _ = tokio::time::sleep_until(deadline) => break,
@@ -294,6 +314,28 @@ impl TerminalEngine {
         self.redraw.notify_one();
     }
 
+    #[cfg(debug_assertions)]
+    pub fn arm_debug_ticks(&self, session: uuid::Uuid) {
+        self.debug_ticks
+            .lock()
+            .unwrap()
+            .arm(session, std::env::var_os("AEROTAB_NATIVE_UI_E2E").is_some());
+    }
+    #[cfg(debug_assertions)]
+    pub fn debug_tick_records(&self) -> serde_json::Value {
+        serde_json::to_value(&self.debug_ticks.lock().unwrap().records).unwrap()
+    }
+    fn ingest_observed(&self, bytes: &[u8]) {
+        #[cfg(debug_assertions)]
+        let before = self.debug_clock.elapsed().as_micros() as u64;
+        self.ingest(bytes);
+        #[cfg(debug_assertions)]
+        self.debug_ticks.lock().unwrap().observe(
+            bytes,
+            before,
+            self.debug_clock.elapsed().as_micros() as u64,
+        );
+    }
     fn ingest(&self, bytes: &[u8]) {
         let mut g = self.inner.lock().unwrap();
         if g.raw_bypass {
@@ -332,6 +374,12 @@ impl TerminalEngine {
     }
 
     fn advance(g: &mut Inner, bytes: &[u8]) {
+        // Never wrap into a false older watermark. Exhaustion is fatal rather
+        // than silently acknowledging output that has no unique commit token.
+        g.output_seq = g
+            .output_seq
+            .checked_add(bytes.len() as u64)
+            .expect("canonical output watermark exhausted");
         let Inner {
             term, processor, ..
         } = g;
@@ -403,8 +451,46 @@ impl TerminalEngine {
         Self::build_frame(&mut g).unwrap_or_default()
     }
 
+    /// Read the singleton's full visible grid under one lock, without parsing,
+    /// consuming raw output/events/damage, notifying a sink, or advancing seq.
+    /// `seq` is the latest emitted stream sequence, NOT a content revision:
+    /// feed/resize/scroll/selection can change these bytes at the same seq.
+    /// Hosts MUST compare frame bytes (or their hash), never deduplicate by seq.
+    /// Title is persistent snapshot metadata. Clipboard payload and one-shot
+    /// action flags are excluded; this API must never trigger clipboard/bell
+    /// actions. Pending actions remain available to the normal WebView sink.
+    pub fn native_snapshot_frame(&self) -> Vec<u8> {
+        self.native_snapshot_envelope().bytes
+    }
+
+    pub fn native_snapshot_envelope(&self) -> NativeSnapshotEnvelope {
+        let g = self.inner.lock().unwrap();
+        let mut header = Self::read_header(&g, frame::KIND_FULL);
+        header.title = g.title.clone();
+        header.clipboard = None;
+        header.flags &= !(frame::FLAG_BELL | frame::FLAG_ZMODEM_HINT | frame::FLAG_TRZSZ_DETECTED);
+        let lines: Vec<usize> = (0..g.term.screen_lines()).collect();
+        let rows = Self::encode_rows(&g.term, &lines);
+        NativeSnapshotEnvelope {
+            bytes: FrameWriter::new(&header).rows(&rows),
+            output_seq: g.output_seq,
+        }
+    }
+
     fn header(g: &mut Inner, kind: u8) -> FrameHeader {
         g.seq = g.seq.wrapping_add(1);
+        let mut header = Self::read_header(g, kind);
+        header.clipboard = g.clipboard.take();
+        g.bell = false;
+        g.title_dirty = false;
+        g.exit_pending = false;
+        g.zmodem_hint = false;
+        g.trzsz_detected = false;
+        header
+    }
+
+    /// Pure header encoding shared by consuming WebView and read-only Native.
+    fn read_header(g: &Inner, kind: u8) -> FrameHeader {
         let content = g.term.renderable_content();
         let display_offset = content.display_offset;
         let cursor_line = content.cursor.point.line.0 + display_offset as i32;
@@ -432,7 +518,7 @@ impl TerminalEngine {
         if g.trzsz_detected {
             flags |= frame::FLAG_TRZSZ_DETECTED;
         }
-        let header = FrameHeader {
+        FrameHeader {
             kind,
             cols: g.term.columns() as u16,
             rows: g.term.screen_lines() as u16,
@@ -445,14 +531,8 @@ impl TerminalEngine {
             history_size: g.term.grid().history_size() as u32,
             mode,
             title: if g.title_dirty { g.title.clone() } else { None },
-            clipboard: g.clipboard.take(),
-        };
-        g.bell = false;
-        g.title_dirty = false;
-        g.exit_pending = false;
-        g.zmodem_hint = false;
-        g.trzsz_detected = false;
-        header
+            clipboard: None,
+        }
     }
 
     fn build_frame(g: &mut Inner) -> Option<Vec<u8>> {
@@ -1056,6 +1136,226 @@ mod tests {
                     .collect::<String>()
             })
             .unwrap_or_default()
+    }
+
+    // damage() itself mutates cursor bookkeeping; compare future damage frames
+    // against an untouched twin instead of probing damage before the native read.
+    fn pending_state(e: &TerminalEngine) -> String {
+        let g = e.inner.lock().unwrap();
+        format!(
+            "{:?}",
+            (
+                (
+                    g.seq,
+                    g.dirty,
+                    g.full_pending,
+                    g.bell,
+                    g.title_dirty,
+                    g.exit_pending,
+                    &g.clipboard,
+                    &g.raw_pending
+                ),
+                (
+                    g.raw_bypass,
+                    g.trzsz_detected,
+                    g.zmodem_hint,
+                    &g.title,
+                    g.last_activity_emit,
+                    format!("{:?}", *g.events.0.lock().unwrap())
+                )
+            )
+        )
+    }
+
+    #[test]
+    fn native_output_watermark_counts_partial_parser_commits_without_touching_damage() {
+        let (e, _rx) = engine(12, 3);
+        let before = e.native_snapshot_envelope();
+        e.feed(&[0xe4]);
+        let partial = e.native_snapshot_envelope();
+        assert_eq!(partial.output_seq, 1);
+        e.feed(&[0xb8, 0xad]);
+        e.feed(b"\x1b[");
+        let pending = pending_state(&e);
+        let snapshot = e.native_snapshot_envelope();
+        assert_eq!(snapshot.output_seq, 5);
+        assert_eq!(
+            decode(&before.bytes).header.seq,
+            decode(&snapshot.bytes).header.seq
+        );
+        assert_eq!(pending_state(&e), pending);
+        e.feed(b"31m");
+        assert_eq!(e.native_snapshot_envelope().output_seq, 8);
+        assert_eq!(snapshot.output_seq, 5); // immutable capture, not a moving target
+        e.inner.lock().unwrap().output_seq = 9_007_199_254_740_993;
+        assert_eq!(
+            e.native_snapshot_envelope().output_seq.to_string(),
+            "9007199254740993"
+        );
+    }
+    #[test]
+    fn output_watermark_is_core_parser_commit_not_renderer_or_raw_delivery_count() {
+        let (e, _rx) = engine(12, 3);
+        e.ingest(b"ab");
+        assert_eq!(e.native_snapshot_envelope().output_seq, 2);
+        e.set_raw_bypass(true);
+        e.ingest(b"raw");
+        assert_eq!(e.native_snapshot_envelope().output_seq, 2);
+        // Only the filter's actual display feed commits those bytes to the core.
+        e.feed(b"raw");
+        assert_eq!(e.native_snapshot_envelope().output_seq, 5);
+        let pending = pending_state(&e);
+        for _ in 0..3 {
+            assert_eq!(e.native_snapshot_envelope().output_seq, 5);
+        }
+        assert_eq!(pending_state(&e), pending);
+    }
+
+    #[test]
+    fn native_snapshot_preserves_pending_metadata_events_and_webview_frame() {
+        let (e, mut rx) = engine(12, 3);
+        let (control, _rx) = engine(12, 3);
+        for target in [&e, &control] {
+            target.feed(b"text\x1b]0;pending title\x07\x07\x1b]52;c;c2VjcmV0\x07\x1b[6n");
+            target.mark_exited();
+            target.inner.lock().unwrap().events.send_event(Event::Bell);
+        }
+        let reply = rx.try_recv().expect("one original CPR response");
+        assert!(!reply.is_empty());
+        let before = pending_state(&e);
+        let a = e.native_snapshot_frame();
+        assert_eq!(a, e.native_snapshot_frame());
+        assert_eq!(pending_state(&e), before);
+        assert_eq!(e.seq(), 0);
+        let d = decode(&a);
+        assert_eq!(d.header.kind, frame::KIND_FULL);
+        assert_eq!(d.header.title.as_deref(), Some("pending title"));
+        assert!(
+            d.header.clipboard.is_none(),
+            "native codec must not dispatch clipboard actions"
+        );
+        assert_eq!(d.header.flags & frame::FLAG_CLIPBOARD, 0);
+        assert_eq!(
+            d.header.flags & frame::FLAG_BELL,
+            0,
+            "read-only native snapshot has no one-shot actions"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "snapshot must not parse or drain events"
+        );
+        assert_eq!(
+            e.snapshot_frame_any_for_test(),
+            control.snapshot_frame_any_for_test()
+        );
+    }
+
+    #[test]
+    fn native_snapshot_preserves_partial_damage_and_raw_payload() {
+        let (e, _rx) = engine(12, 3);
+        let (control, _rx) = engine(12, 3);
+        for target in [&e, &control] {
+            target.feed(b"a\r\nb\r\nc");
+            target.snapshot_frame();
+            target.feed(b"\x1b[1;1Hz");
+        }
+        let before = pending_state(&e);
+        e.native_snapshot_frame();
+        assert_eq!(before, pending_state(&e));
+        let a = e.snapshot_frame_any_for_test();
+        assert_eq!(a, control.snapshot_frame_any_for_test());
+        assert_eq!(decode(&a).header.kind, frame::KIND_PARTIAL);
+        for target in [&e, &control] {
+            target.set_transfer_detect(true);
+            target.ingest(b"::TRZSZ:TRANSFER:S:1.1.0:1234\r\n");
+        }
+        let before = pending_state(&e);
+        let d = decode(&e.native_snapshot_frame());
+        assert_eq!(d.header.kind, frame::KIND_FULL);
+        assert!(d.raw.is_empty());
+        assert_eq!(before, pending_state(&e));
+        assert_eq!(
+            e.snapshot_frame_any_for_test(),
+            control.snapshot_frame_any_for_test()
+        );
+    }
+
+    #[test]
+    fn native_snapshot_hidden_and_clean_reads_do_not_schedule_webview_frames() {
+        let (e, _rx) = engine(10, 2);
+        e.feed(b"\x1b]0;persistent title\x07text");
+        e.snapshot_frame();
+        assert!(e.snapshot_frame_any_for_test().is_empty());
+        let before = pending_state(&e);
+        let native = e.native_snapshot_frame();
+        assert_eq!(before, pending_state(&e));
+        assert_eq!(
+            decode(&native).header.title.as_deref(),
+            Some("persistent title")
+        );
+        assert!(e.snapshot_frame_any_for_test().is_empty());
+        let seq = e.seq();
+        e.feed(b"new");
+        let updated = e.native_snapshot_frame();
+        assert_ne!(native, updated);
+        assert_eq!(seq, decode(&updated).header.seq);
+        e.set_visible(false);
+        let before = pending_state(&e);
+        assert_eq!(
+            decode(&e.native_snapshot_frame()).header.kind,
+            frame::KIND_FULL
+        );
+        assert_eq!(before, pending_state(&e));
+        assert_eq!(
+            decode(&e.snapshot_frame_any_for_test()).header.kind,
+            frame::KIND_ACTIVITY
+        );
+    }
+
+    #[test]
+    fn native_snapshot_tracks_mutations_without_advancing_seq_and_reuses_cell_codec() {
+        let (e, _rx) = engine(12, 2);
+        e.feed("中e\u{301}  \r\nnext\r\nlast".as_bytes());
+        let initial = e.native_snapshot_frame();
+        let seq = e.seq();
+        e.scroll(ScrollCmd::Top);
+        let scrolled = e.native_snapshot_frame();
+        assert_ne!(initial, scrolled);
+        assert!(decode(&scrolled).header.display_offset > 0);
+        e.selection_start(0, 0, SelectionKind::Simple, CellSide::Left);
+        e.selection_update(3, 0, CellSide::Right);
+        let selected = e.native_snapshot_frame();
+        assert_ne!(selected, scrolled);
+        assert!(decode(&selected).rows[0]
+            .runs
+            .iter()
+            .any(|r| r.flags & frame::CELL_SELECTED != 0));
+        e.selection_clear();
+        assert_eq!(scrolled, e.native_snapshot_frame());
+        e.resize(14, 3, 8, 16);
+        assert_ne!(scrolled, e.native_snapshot_frame());
+        assert_eq!(seq, e.seq());
+        // Existing v1 wire codec only encodes base codepoints, not zerowidth
+        // combining scalars. Native reads must match it, not invent new cells.
+        let native = e.native_snapshot_frame();
+        let webview = e.snapshot_frame();
+        assert_eq!(&native[10..], &webview[10..]);
+        let d = decode(&native);
+        assert!(d
+            .rows
+            .iter()
+            .flat_map(|r| &r.runs)
+            .any(|r| r.flags & Flags::WIDE_CHAR_SPACER.bits() != 0));
+        assert!(d
+            .rows
+            .iter()
+            .flat_map(|r| &r.runs)
+            .any(|r| r.chars.contains(&('e' as u32))));
+        assert!(d
+            .rows
+            .iter()
+            .flat_map(|r| &r.runs)
+            .any(|r| r.chars.iter().all(|c| *c == ' ' as u32)));
     }
 
     #[test]

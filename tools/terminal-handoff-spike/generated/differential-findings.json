@@ -1,0 +1,36 @@
+{
+  "productionReady": false,
+  "suite": "Finite xorshift32 differential seeds, exact snapshot equality, no expected-failure skips",
+  "randomBytes": {
+    "seeds": [20903, 12648430, 8205],
+    "maxStepsPerSeed": 80,
+    "maxBytesPerStep": 9,
+    "firstCounterexamples": [
+      {"seed":20903,"step":8,"bytesHex":"766a843bcb6f","classification":"ANSI/C1 execution policy","reason":"Raw C1 0x84 reaches xterm as IND, while native vte ansi Processor::execute handles only listed C0 and ignores C1. Minimal [0x84] also fails with native cursor row 0 vs xterm row 1."},
+      {"seed":12648430,"step":2,"bytesHex":"b392bbfadf","classification":"ANSI/C1 parser-state policy","prefixChunksHex":["9a0e","ab40d5139bde"],"reason":"0x9b starts CSI in xterm, but native VTE execute ignores raw C1. Subsequent valid scalar U+07B3 is therefore consumed differently, not a width-table discrepancy."},
+      {"seed":8205,"step":5,"bytesHex":"9d136cc5e5fa2c0d","classification":"ANSI/C1 parser-state policy","reason":"Raw 0x9d starts OSC in xterm and swallows following bytes; native ignores C1 then prints following content."}
+    ],
+    "status":"Strict tests intentionally remain failing; no deleting C1 bytes or normalizing snapshots to claim equivalence. Need explicit state-aware native-policy adapter or shared canonical parser before production."
+  },
+  "validMixed": {
+    "seeds":[2748,4660],
+    "maxStepsPerSeed":60,
+    "status":"Seed 2748 passes. Seed 4660 step 48 fails exact cell foreground: xterm palette 1 vs native default at row 1 column 11.",
+    "classification":"Terminal cell/ANSI attribute semantics, not UTF8 decoder",
+    "evidence":"Artifacts include complete exact snapshots plus mixed-seed-4660-events.json; deterministic rerun uses same seed and event/chunk/resize schedule.",
+    "nextStep":"Minimization completed: see architecture-decision.json. Original target is a width-1 blank left after overwriting wide leading cell, not width-0 spacer. Resize is unnecessary. No public execute hook exists; five strict failures remain blocking."
+  },
+  "inputContract": {
+    "module":"node/input-router.mjs",
+    "secondary":"real xterm disableStdin=true suppresses both input and DSR onData; native parser remains fixed reply authority",
+    "routing":"DOM/IME/paste/raw binary route through explicit session router, not secondary onData. Native authority must encode mode-dependent keys/mouse. Transfer/broadcast filters attach at send seam.",
+    "freeze":"Freeze only user input during pending switch; continue protocol replies and session output ingestion, allowing pending UTF8 completion. Reject rather than buffer user input; caller retries after cancel/commit.",
+    "unproven":"Actual DOM/IME and native key encoding integration; input router readiness comes from caller and must be tied to broker + real renderer presentation."
+  },
+  "memoryBounds": {
+    "eventLogBudget":4096,
+    "utf8PendingMaximum":3,
+    "producerMaxAcceptedPayload":"budget minus per-event overhead; oversize rejected",
+    "scope":"Log accounting only; parser scrollback, JSONL line buffers and caller-owned records are separate bounded/test-fixture concerns, not a global RSS guarantee."
+  }
+}

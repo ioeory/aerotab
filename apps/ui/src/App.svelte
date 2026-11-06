@@ -63,6 +63,9 @@
   import { sidebarFocus } from './lib/sidebarFocus.svelte';
   import { sessionEndedGate } from './lib/sessionEndedGate.svelte';
   import { terminalUi } from './lib/terminalUi.svelte';
+  import { chooseTerminalView, type TerminalViewChoices } from './lib/terminalViewChoice';
+  import { NATIVE_VIEW_OCCLUSION_EVENT, type NativeViewCapabilities } from './lib/nativeViewHost';
+  import { tauriInvoke } from './lib/termgrid/tauriChannel';
   import {
     getSidebarProfileHandlers,
   } from './lib/sidebarProfileBridge';
@@ -75,7 +78,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.20-ui-20261101a';
+  const buildId = '0.2.28-ui-20261104-native-shortcuts';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -174,59 +177,37 @@
     if (!id) return null;
     return terminalUi.bySession[id] ?? 'pending';
   });
-  type TerminalRendererPref = 'native' | 'dom' | 'canvas' | 'webgl';
-  const XTERM_FALLBACK: TerminalRendererPref = 'dom';
-  const LAST_XTERM_KEY = 'aerotab.lastXtermRenderer';
-  let lastXtermRenderer: TerminalRendererPref = (() => {
-    try {
-      const v = sessionStorage.getItem(LAST_XTERM_KEY);
-      if (v === 'dom' || v === 'canvas' || v === 'webgl') return v;
-    } catch { /* private mode */ }
-    return XTERM_FALLBACK;
-  })();
+  let terminalViewChoices = $state<TerminalViewChoices>({});
   let togglingTerminalFrontend = $state(false);
+  let terminalViewError = $state('');
+  let nativeSurfaceBlocked = $state(false);
 
-  function rememberXtermRenderer(r: TerminalRendererPref) {
-    if (r !== 'dom' && r !== 'canvas' && r !== 'webgl') return;
-    lastXtermRenderer = r;
-    try { sessionStorage.setItem(LAST_XTERM_KEY, r); } catch { /* ignore */ }
-  }
-
-  /** Footer chip: toggle settings.terminal.renderer between native and last xterm. */
+  /** Explicit active-pane view choice. No settings write and no xterm handoff. */
   async function toggleTerminalFrontend() {
-    if (togglingTerminalFrontend) return;
+    const id = activePane?.id;
+    const actual = terminalFrontendKind;
+    if (!id || !actual || actual === 'pending' || togglingTerminalFrontend) return;
     togglingTerminalFrontend = true;
+    terminalViewError = '';
     try {
-      const t = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminal' });
-      const cur = (t.value && typeof t.value === 'object')
-        ? { ...(t.value as Record<string, unknown>) }
-        : {};
-      const stored = cur.renderer;
-      let effective: TerminalRendererPref = 'native';
-      if (stored === 'native' || stored === 'dom' || stored === 'canvas' || stored === 'webgl') {
-        effective = stored;
-      } else if (terminalFrontendKind === 'native') {
-        effective = 'native';
-      } else if (terminalFrontendKind?.startsWith('xterm-')) {
-        const k = terminalFrontendKind.replace('xterm-', '');
-        if (k === 'dom' || k === 'canvas' || k === 'webgl') effective = k;
-      }
-      let next: TerminalRendererPref;
-      if (effective === 'native') {
-        next = lastXtermRenderer;
-      } else {
-        rememberXtermRenderer(effective);
-        next = 'native';
-      }
-      await rpc.call('settings.set', { key: 'terminal', value: { ...cur, renderer: next } });
-      settingsCoord.bumpRev();
-      setStatus(
-        next === 'native'
-          ? i18n.t('app.footer.terminalSwitchedNative')
-          : i18n.t('app.footer.terminalSwitchedXterm', { kind: next }),
-      );
-    } catch (e) {
-      onError(`terminal frontend: ${(e as Error).message}`);
+      const effective = actual === 'unavailable' ? terminalViewChoices[id] ?? 'native' : actual;
+      const next = await chooseTerminalView(terminalViewChoices, id, effective, async () => {
+        const invoke = tauriInvoke();
+        if (!invoke) throw new Error('native_surface_unavailable: Tauri bridge unavailable');
+        return await invoke('native_view_capabilities') as NativeViewCapabilities;
+      });
+      // The user may have changed active pane while capabilities were in flight.
+      if (!tabs.tabs.some(tab => tab.panes.some(pane => pane.id === id))) return;
+      terminalUi.beginRequest(id);
+      terminalViewChoices = { ...terminalViewChoices, [id]: next[id]! };
+      setStatus(i18n.t(next[id] === 'native-surface'
+        ? 'app.footer.terminalSwitchedNative' : 'app.footer.terminalSwitchedWebview'));
+    } catch (error) {
+      const e = error as { message?: string; code?: string };
+      terminalViewError = i18n.t('app.footer.terminalUnavailable', {
+        reason: e.message ?? e.code ?? String(error),
+      });
+      onError(terminalViewError);
     } finally {
       togglingTerminalFrontend = false;
     }
@@ -1799,6 +1780,9 @@
 
     kbdHandler = (e: KeyboardEvent) => {
       if (isOverlayBlockingInput()) return;
+      // Native HWND/GTK/NSView focus does not emit DOM focusin. Do not let
+      // the previously focused sidebar keep profile-action guards enabled.
+      if (e.target instanceof Element && e.target.closest('[data-native-session]')) sidebarFocus.clearFocused();
       const terminalFocused = (() => {
         const el = e.target instanceof Element ? e.target : document.activeElement;
         if (!(el instanceof Element)) return false;
@@ -1903,6 +1887,7 @@
       || paletteOpen
       || pickerOpen
       || batchCommandOpen
+      || importWizardOpen
       || sftpWindows.length > 0;
     if (overlayOpen) {
       document.body.dataset.modalOverlay = 'true';
@@ -1913,6 +1898,34 @@
     } else {
       delete document.body.dataset.modalOverlay;
     }
+  });
+
+  // Explicit blocker contract: data-native-view-blocker, data-aerotab-modal,
+  // data-aerotab-menu-open, data-aerotab-tab-list, or dialog[open].
+  // Mutation/effect dispatch precedes the next paint where possible, but IPC hide
+  // remains asynchronous: this is NOT an atomic native/modal presentation barrier.
+  onMount(() => {
+    let last: boolean | undefined;
+    const sync = () => {
+      const blocked = isOverlayBlockingInput()
+        || !!document.querySelector('[data-native-view-blocker]');
+      nativeSurfaceBlocked = blocked;
+      document.body.dataset.nativeViewOccluded = String(blocked);
+      if (blocked !== last) {
+        last = blocked;
+        document.dispatchEvent(new CustomEvent(NATIVE_VIEW_OCCLUSION_EVENT, {
+          detail: { occluded: blocked },
+        }));
+      }
+    };
+    const observer = new MutationObserver(sync);
+    observer.observe(document.body, {
+      subtree: true, childList: true, attributes: true,
+      attributeFilter: ['open', 'data-modal-overlay', 'data-aerotab-modal',
+        'data-aerotab-menu-open', 'data-aerotab-tab-list', 'data-native-view-blocker'],
+    });
+    sync();
+    return () => { observer.disconnect(); delete document.body.dataset.nativeViewOccluded; };
   });
 
   $effect(() => {
@@ -1996,6 +2009,8 @@
                   {rpc}
                   {tab}
                   settingsRev={settingsRev}
+                  {terminalViewChoices}
+                  nativeSurfaceOccluded={nativeSurfaceBlocked}
                   tabVisible={tabs.activeId === tab.id}
                   broadcastEnabled={broadcastOn}
                   broadcastTargetIds={broadcastTargets}
@@ -2141,24 +2156,32 @@
           type="button"
           class="px-1.5 py-0.5 rounded text-[10px] shrink-0 font-sans cursor-pointer
                  hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]
-                 {terminalFrontendKind === 'native'
+                 {terminalFrontendKind === 'native-surface'
                    ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
                    : terminalFrontendKind === 'pending'
                      ? 'bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]'
                      : 'bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]'}"
           title={i18n.t('app.footer.terminalFrontendToggle', { kind: terminalFrontendKind })}
           aria-label={i18n.t('app.footer.terminalFrontendToggle', { kind: terminalFrontendKind })}
-          disabled={togglingTerminalFrontend}
+          disabled={togglingTerminalFrontend || terminalFrontendKind === 'pending' || terminalFrontendKind.startsWith('xterm-')}
           onclick={() => { void toggleTerminalFrontend(); }}
         >
-          {#if terminalFrontendKind === 'native'}
+          {#if terminalFrontendKind === 'native-surface'}
             {i18n.t('app.footer.terminalNative')}
+          {:else if terminalFrontendKind === 'native'}
+            {i18n.t('app.footer.terminalWebview')}
           {:else if terminalFrontendKind === 'pending'}
             {i18n.t('app.footer.terminalPending')}
+          {:else if terminalFrontendKind === 'unavailable'}
+            {i18n.t('app.footer.terminalFailed')}
           {:else}
             {i18n.t('app.footer.terminalXterm', { kind: terminalFrontendKind.replace('xterm-', '') })}
           {/if}
+          <span aria-hidden="true" class="ml-1">⇄</span>
         </button>
+      {/if}
+      {#if terminalViewError}
+        <span role="alert" class="text-[var(--color-danger)] max-w-[360px] truncate" title={terminalViewError}>{terminalViewError}</span>
       {/if}
       {#if hostStatsEnabled && hostStatsStatus === 'ok' && hostStats}
         <span class="hidden lg:inline-flex items-center gap-2 truncate max-w-[520px]" title={hostStatsTitle(hostStats)}>

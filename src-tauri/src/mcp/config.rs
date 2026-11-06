@@ -22,7 +22,7 @@ impl Default for McpConfig {
             enabled: false,
             bind_host: "127.0.0.1".into(),
             allow_remote_bind: false,
-            port: 23890,
+            port: 0,
             additional_context: String::new(),
             tls_cert_path: None,
             tls_key_path: None,
@@ -30,11 +30,12 @@ impl Default for McpConfig {
             permissions: HashMap::from([
                 ("listProfiles".into(), true),
                 ("readTerminal".into(), true),
-                ("writeTerminal".into(), false),
-                ("executeCommand".into(), false),
-                ("manageSessions".into(), false),
-                ("sftp".into(), false),
-                ("localFiles".into(), false),
+                ("readFiles".into(), false),
+                ("writeFiles".into(), false),
+                ("runCommand".into(), false),
+                ("openSession".into(), false),
+                ("manageProfiles".into(), false),
+                ("remoteDesktop".into(), false),
                 ("tunnels".into(), false),
                 ("callRpc".into(), false),
             ]),
@@ -68,9 +69,6 @@ impl McpConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         let ip = self.bind_ip()?;
-        if self.port == 0 {
-            return Err("port must be between 1 and 65535".into());
-        }
         let cert = self
             .tls_cert_path
             .as_ref()
@@ -113,6 +111,20 @@ mod tests {
     fn defaults_are_safe_and_camel_case() {
         let cfg: McpConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.enabled);
+        assert_eq!(cfg.port, 0);
+        for (name, permission, expected) in [
+            ("list_profiles", "listProfiles", true),
+            ("terminal_export", "readTerminal", true),
+            ("run_command", "runCommand", false),
+            ("open_session", "openSession", false),
+            ("read_file", "readFiles", false),
+            ("write_file", "writeFiles", false),
+            ("upsert_profile", "manageProfiles", false),
+            ("remote_open", "remoteDesktop", false),
+        ] {
+            assert_eq!(super::super::tools::permission(name), Some(permission));
+            assert_eq!(cfg.permitted(permission), expected);
+        }
         assert!(cfg.validate().is_ok());
         let value = serde_json::to_value(cfg).unwrap();
         assert_eq!(value["bindHost"], "127.0.0.1");

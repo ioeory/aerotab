@@ -1,0 +1,39 @@
+{
+  "scope":"Prototype evidence and recommendation only; no production integration, fork, dependency upgrade or byte suppression applied.",
+  "losslessDualCoreToggle":"HISTORICAL BLOCKED: user has now explicitly selected single_core_two_views; these independent-parser failures are not new-route acceptance blockers",
+  "currentDecision":"See single-core-integration.json. One persistent canonical alacritty parser feeds Native/Webview presentation adapters, no xterm emulator as fallback.",
+  "minimization":{
+    "command":"node node/minimize.mjs --run",
+    "bound":600,
+    "actualReplays":154,
+    "originalEvents":128,
+    "resizePreservedEvents":14,
+    "minimalOriginalChunkEvents":10,
+    "resizeNecessary":false,
+    "validStandaloneRepro":"ESC[H 中 ESC[H ESC[31m a (concatenate without spaces)",
+    "hex":"1b5b48e4b8ad1b5b481b5b33316d61",
+    "correction":"Original difference is NOT an unused width-0 spacer. After overwriting the wide leading cell, column 1 becomes an ordinary width-1 blank. Native blank fg=default; xterm blank fg=palette1. Leading red a and cursor are equal at this point.",
+    "source":"alacritty Term::write_at_cursor (term/mod.rs 993-1001) removes the following WIDE_CHAR_SPACER flag but does not update its foreground. Installed xterm InputHandler.print clears the old wide cell using setCellFromCodepoint(...,0,1,currentAttr), applying the new foreground.",
+    "followup":"SGR32 + X overwrites blank and restores exact equality. ICH moves discrepant blank. CUP column2 + SGR0 + combining acute causes actual glyph/cursor divergence: native a+acute and cursor[1,0], xterm a and cursor[2,0]. This latter failure is a separate combining-after-control semantic and must not be asserted as causal proof that blank foreground alone changes visible output."
+  },
+  "c1":{
+    "raw84":{"nativeCursor":[0,0],"xtermCursor":[0,1]},
+    "utf8C284":{"nativeCursor":[0,0],"xtermCursor":[0,1]},
+    "raw9b324a":"native prints 2J; xterm treats as CSI ED",
+    "utf8C29b324a":"same difference",
+    "raw9d41":"native prints A; xterm starts OSC",
+    "utf8C29d41":"same difference",
+    "source":"vte0.15 lib.rs advance_ground: invalid raw byte <=0x9F goes to performer.execute; ground_dispatch also routes decoded U+0080..U+009F to execute. ansi.rs Processor::execute 1296-1307 implements listed C0 only; C1 ignored. xterm uses its own C1 terminal state machine.",
+    "publicAPI":"xterm5.5 IParser exposes CSI/DCS/ESC/OSC registration but NO registerExecuteHandler (confirmed typings and runtime). ESC handler cannot intercept raw/decoded IND and CSI/OSC handlers run after parser state transitions, too late to undo consumed byte streams.",
+    "decision":"No supported public adapter proven for full shared semantics. Deleting/translating C1 would change business bytes/protocol and is prohibited. Do not claim provider fixes parser-policy differences. No unverified dependency upgrade."
+  },
+  "recommendedNextProductionPlan":[
+    "Advance real native renderer/host prototype and gather actual embedding, input, resize, GPU-present and PTY evidence independently; do not gate native main-path work on a universal dual-core equivalence promise.",
+    "Keep original session identity and broker transport, ordered events, bounded backpressure, fixed native response authority. Do not detach/replace decoder core when changing native renderer surfaces.",
+    "Treat existing real xterm emulator as an independently selected session renderer, not a guaranteed live lossless migration target. This is risk isolation, not fulfillment or silent reduction of the user's requested lossless toggle; explicit product/user decision remains required.",
+    "If live cross-core equivalence remains mandatory, obtain supported upstream parser/combining/erase semantic hooks or own a version-pinned, audited fork with maintained differential contract. This is an architectural cost/blocker; do not adopt a private patch automatically.",
+    "Alternative canonical parser plus two presentation adapters would need explicit approval and a real xterm presentation implementation; current xterm is NOT being rebranded as a grid renderer or fallback proof.",
+    "Keep all five strict failures blocking; passing diagnostic counterexample tests are not equivalence successes."
+  ],
+  "unproven":["universal ANSI equivalence","manual visual rendering","GPU first-frame acknowledgement","complete raw invalid-byte behavior in every VT state"]
+}

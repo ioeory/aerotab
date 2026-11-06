@@ -1,0 +1,37 @@
+[package]
+name = "native-host-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+tauri-host = ["dep:tauri"]
+
+[[bin]]
+name = "tauri-host-spike"
+path = "src/bin/tauri-host.rs"
+required-features = ["tauri-host"]
+
+[[bin]]
+name = "webview-window-spike"
+path = "src/bin/webview-window.rs"
+required-features = ["tauri-host"]
+
+[dependencies]
+native-terminal-core = { path = "../native-terminal-core" }
+portable-pty = "=0.8.1"
+libc = "0.2"
+glow = "=0.17.0"
+tauri = { version = "2.11.2", default-features = false, features = ["wry", "x11", "unstable"], optional = true }
+gtk = "0.18.2"
+gdk = "0.18.2"
+glib = "0.18.5"
+gio = "0.18.4"
+webkit2gtk = { version = "2.0.2", features = ["v2_40"] }
+serde_json = "1"
+javascriptcore-rs = "1.1.2"
+
+[profile.dev]
+debug = 0

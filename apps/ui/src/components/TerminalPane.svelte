@@ -99,12 +99,16 @@
   import { focusTerminalAuto, focusTerminalIfAllowed, shouldAutoFocusTerminal } from '../lib/modalFocus';
   import { scheduleTerminalFit } from '../lib/terminalFit';
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
+  import { createTerminalSettingsReload } from '../lib/terminalRendererSwitch';
+  import { traceView, traceController } from '../lib/viewCausalTrace';
+  import { restoreRetainedSourceStatus } from '../lib/nativeViewTransaction';
   import { spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
   import {
     NativeTerminalController,
     type ThemeColors as NativeThemeColors,
   } from '../lib/termgrid';
   import NativeTerminalView from './NativeTerminalView.svelte';
+  import { preparePasteText } from '../lib/nativePasteBridge';
   import { sessionEndedGate } from '../lib/sessionEndedGate.svelte';
   import { terminalUi, type TerminalFrontendKind } from '../lib/terminalUi.svelte';
 
@@ -118,6 +122,10 @@
     tabVisible?: boolean;
     /** Bumped by parent whenever persisted settings change. */
     settingsRev?: number;
+    /** Explicit per-pane choice; `native` remains the legacy WebView shared-core view. */
+    rendererOverride?: 'native-surface' | 'native' | 'dom' | 'canvas' | 'webgl';
+    /** App must set this BEFORE opening WebView modals/popovers above OS surfaces. */
+    nativeSurfaceOccluded?: boolean;
     /** Invoked when the user clicks the pane's close button from inside (e.g. exited overlay). */
     onClosePane?: () => void;
     /** Invoked when transfer detection should open the active SSH pane's SFTP browser. */
@@ -137,6 +145,8 @@
     layoutVisible = true,
     tabVisible = true,
     settingsRev = 0,
+    rendererOverride,
+    nativeSurfaceOccluded = false,
     onClosePane,
     onOpenSftp,
     onSplitRight,
@@ -156,9 +166,14 @@
   let activeRenderer = $state<'dom' | 'canvas' | 'webgl'>('dom');
   /** When true, Rust VT engine + termgrid renderer replace xterm.js. */
   let useNative = $state(false);
+  let nativeBackend = $state<'webview' | 'native-surface'>('webview');
   /** True once onMount finished choosing a frontend (footer leaves "pending"). */
   let frontendReady = $state(false);
+  let frontendError = $state(false);
+  let switchingFrontend = false;
   let nativeCtl: NativeTerminalController | null = $state(null);
+  let nativeView: NativeTerminalView | null = $state(null);
+  let nativeViewEpoch = $state(0);
   let nativeTheme: NativeThemeColors | undefined = $state(undefined);
   let nativeFontFamily = $state('JetBrains Mono, Menlo, monospace');
   let nativeFontSize = $state(13);
@@ -334,6 +349,7 @@
       sessionFontDelta += delta;
       nativeFontSize = Math.min(32, Math.max(8, nativeFontSize + delta));
       nativeCtl?.setFont({ size: nativeFontSize });
+      // nativeFontSize prop → NativeTerminalView $effect → hostAdapter.update(viewConfig).
       scheduleSafeFit();
       return;
     }
@@ -620,7 +636,9 @@
   }
 
   async function loadTermSettings() {
-    return getTerminalSettings(() => loadTermSettingsFresh());
+    const cfg = await getTerminalSettings(() => loadTermSettingsFresh());
+    // Never put per-pane overrides in the globally shared settings cache/store.
+    return { ...cfg, renderer: rendererOverride ?? cfg.renderer };
   }
 
   function applyTransferDetectionFromCfg(enabled: boolean) {
@@ -698,10 +716,11 @@
     await sendSessionBytes(await terminalInputBytes(input));
   }
 
-  function sendSessionInput(input: TrzszTerminalInput): void {
-    sessionWriteChain = sessionWriteChain
-      .then(() => sendSessionInputAsync(input))
-      .catch((err: unknown) => console.warn('terminal write failed', err));
+  function sendSessionInput(input: TrzszTerminalInput, valid?: () => boolean): Promise<void> {
+    const write = sessionWriteChain
+      .then(() => !valid || valid() ? sendSessionInputAsync(input) : undefined);
+    sessionWriteChain = write.catch((err: unknown) => console.warn('terminal write failed', err));
+    return write;
   }
 
   function concatPollChunks(chunks: string[]): Uint8Array[] {
@@ -807,9 +826,47 @@
     }
   }
 
-  function nativeWriteInput(data: string): void {
+  /** trzsz has no drain API; only suspend an idle filter around view handoff. */
+  async function suspendTransferFilterForViewSwitch(): Promise<() => Promise<void>> {
+    if (transferFilter?.isTransferringFiles()) {
+      throw new Error('Native view switch unavailable while a trzsz transfer is in progress');
+    }
+    const reenable = transferDetectionEnabled && !!transferFilter;
+    if (transferFilter) {
+      await configureTransferFilter(false);
+      await sessionWriteChain;
+    }
+    return async () => {
+      if (reenable && transferDetectionEnabled && !destroyed) {
+        await configureTransferFilter(true);
+      }
+    };
+  }
+
+  function nativeWriteInput(data: string, valid?: () => boolean): void {
+    if (valid && !valid()) return;
     if (transferFilter) transferFilter.processTerminalInput(data);
-    else sendSessionInput(data);
+    else sendSessionInput(data, valid);
+  }
+
+  async function nativeWriteBytes(bytes: Uint8Array, valid: () => boolean): Promise<void> {
+    // Valid UTF-8 key/IME data takes exactly the existing trzsz/text path.
+    // Legacy mouse bytes must not be decoded with replacement and re-encoded.
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch {
+      if (transferFilter) throw new Error('Raw mouse input unavailable during terminal transfer');
+      await sendSessionInput(bytes, valid);
+      return;
+    }
+    if (!transferFilter) {
+      await sendSessionInput(text, valid);
+      return;
+    }
+    // trzsz may retain input internally and has no flush API. Never pretend
+    // that awaiting our writer also drains its private async protocol state.
+    nativeWriteInput(text, valid);
+    await sessionWriteChain;
   }
 
   function onNativeRaw(bytes: Uint8Array): void {
@@ -834,8 +891,8 @@
     void configureTransferFilter(true);
   }
 
-  async function applyRenderer(renderer: 'native' | 'dom' | 'canvas' | 'webgl') {
-    if (!term || renderer === 'native') return;
+  async function applyRenderer(renderer: 'native-surface' | 'native' | 'dom' | 'canvas' | 'webgl') {
+    if (!term || renderer === 'native' || renderer === 'native-surface') return;
     const target = isTranslucent() ? 'dom' : renderer;
     if (target === activeRenderer) return;
     try { rendererAddon?.dispose(); } catch { /* ignore renderer teardown */ }
@@ -882,7 +939,28 @@
     refreshCursorBlinkIfFocused(term);
   }
 
-  let switchingFrontend = false;
+  let destroyed = false;
+  let frontendInitialized = false;
+  let resolveNativeReady: (() => void) | null = null;
+  let rejectNativeReady: ((error: Error) => void) | null = null;
+
+  function beginNativeReadiness(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      resolveNativeReady = resolve;
+      rejectNativeReady = reject;
+    });
+  }
+
+  function onNativeError(message: string) {
+    frontendReady = false;
+    frontendError = true;
+    reportFrontendKind();
+    rejectNativeReady?.(new Error(message));
+    resolveNativeReady = null;
+    rejectNativeReady = null;
+    onError?.(message);
+  }
+
   /** After xterm → native, feed the replay ring into the new engine once. */
   let seedNativeFromReplay = false;
 
@@ -922,7 +1000,7 @@
         return;
       }
       requestAnimationFrame(() => {
-        if (useNative) nativeCtl?.focus();
+        if (useNative) nativeView?.focus();
         else focusTerminalIfAllowed(term);
       });
     };
@@ -1107,12 +1185,13 @@
 
   onMount(async () => {
     const cfg = await loadTermSettings();
-    if (cfg.renderer === 'native') {
+    if (cfg.renderer === 'native' || cfg.renderer === 'native-surface') {
+      nativeBackend = cfg.renderer === 'native-surface' ? 'native-surface' : 'webview';
       useNative = true;
       applyNativeCfg(cfg);
       applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
       void configureTransferFilter(cfg.experimentalTransferDetection);
-      frontendReady = true;
+      frontendReady = false;
       reportFrontendKind();
       // Native path: no session.poll — the engine owns the output receiver.
       cleanupSearchListener = bindSharedTerminalListeners();
@@ -1175,13 +1254,19 @@
     });
   });
 
-  function reportFrontendKind() {
-    const kind: TerminalFrontendKind = !frontendReady
+  let frontendRequest: number | undefined;
+
+  function reportFrontendKind(finishEpoch?: number) {
+    const kind: TerminalFrontendKind = frontendError
+      ? 'unavailable'
+      : !frontendReady
       ? 'pending'
       : useNative
-        ? 'native'
+        ? (nativeBackend === 'native-surface' ? 'native-surface' : 'native')
         : (`xterm-${activeRenderer}` as TerminalFrontendKind);
-    terminalUi.report(session.id, kind);
+    traceView({ stage: 'pane.report', epoch: nativeViewEpoch, controller: traceController(nativeCtl), status: kind, cancelled: destroyed });
+    if (finishEpoch !== undefined) terminalUi.finishRequest(session.id, finishEpoch, kind);
+    else terminalUi.report(session.id, kind);
   }
 
   $effect(() => {
@@ -1201,7 +1286,7 @@
     scheduleTerminalFit(() => {
       safeFit(true);
       if (searchOpen) return;
-      if (useNative) nativeCtl?.focus();
+      if (useNative) nativeView?.focus();
       else focusTerminalAuto(term, host);
     });
   });
@@ -1236,11 +1321,14 @@
       applyNativeCfg(cfg);
       applyTransferDetectionFromCfg(cfg.experimentalTransferDetection);
       await configureTransferFilter(cfg.experimentalTransferDetection);
+      nativeBackend = cfg.renderer === 'native-surface' ? 'native-surface' : 'webview';
+      const ready = beginNativeReadiness();
       useNative = true;
       frontendReady = false;
       reportFrontendKind();
       await tick();
-      // NativeTerminalView mounts and calls onNativeReady.
+      // NativeTerminalView mounts and calls onNativeReady after attach/snapshot.
+      await ready;
     } finally {
       switchingFrontend = false;
     }
@@ -1262,20 +1350,27 @@
       } catch (err) {
         console.warn('native exportText failed', err);
       }
-      // Must detach so session.poll can feed xterm (engine owns output while attached).
-      await nativeCtl?.dispose({ detachEngine: true });
-      nativeCtl = null;
-      useNative = false;
-      frontendReady = false;
-      reportFrontendKind();
-      await tick();
-      if (!host) {
-        frontendReady = true;
+      const resumeTransfer = await suspendTransferFilterForViewSwitch();
+      try {
+        // Release OS overlay first; only the explicit xterm handoff relinquishes the engine.
+        await nativeView?.release();
+        // Must detach so session.poll can feed xterm (engine owns output while attached).
+        await rpc.call('terminal.detach', { id: session.id });
+        nativeCtl = null;
+        useNative = false;
+        frontendReady = false;
         reportFrontendKind();
-        return;
+        await tick();
+        if (!host) {
+          frontendReady = true;
+          reportFrontendKind();
+          return;
+        }
+        // Shared document listeners already bound from the previous frontend.
+        await bootXterm(cfg, { bindSharedListeners: false });
+      } finally {
+        await resumeTransfer();
       }
-      // Shared document listeners already bound from the previous frontend.
-      await bootXterm(cfg, { bindSharedListeners: false });
     } finally {
       switchingFrontend = false;
     }
@@ -1283,15 +1378,101 @@
 
   // Live-apply settings changes (font / theme / scrollback) without re-mounting
   // the terminal. xterm's options object accepts partial updates.
-  async function reloadSettingsLive() {
-    const cfg = await loadTermSettings();
-    const wantNative = cfg.renderer === 'native';
+  const settingsReload = createTerminalSettingsReload({
+    load: loadTermSettings,
+    apply: applyTermSettingsLive,
+  });
+
+  function reloadSettingsLive() {
+    return settingsReload.request().catch((error: unknown) => onError?.(String(error)));
+  }
+
+  async function applyTermSettingsLive(cfg: Awaited<ReturnType<typeof loadTermSettings>>) {
+    const request = terminalUi.requestEpoch(session.id);
+    frontendRequest = request;
+    const wantNative = cfg.renderer === 'native' || cfg.renderer === 'native-surface';
     if (wantNative !== useNative) {
       if (wantNative) await switchToNativeFrontend(cfg);
       else await switchToXtermFrontend(cfg);
       return;
     }
     if (useNative) {
+      const nextBackend = cfg.renderer === 'native-surface' ? 'native-surface' : 'webview';
+      if (nextBackend !== nativeBackend) {
+        const resumeTransfer = await suspendTransferFilterForViewSwitch();
+        try {
+          if (nativeBackend === 'webview' && nextBackend === 'native-surface' && nativeView) {
+            applyNativeCfg(cfg);
+            await tick(); // stage the requested font/theme, not the previous settings
+            const sourceView = nativeView;
+            const sourceController = nativeCtl;
+            const sourceEpoch = nativeViewEpoch;
+            let sourceClosing = false;
+            const onSourceClosing = (event: Event) => {
+              if ((event as CustomEvent<SessionsClosingDetail>).detail?.sessionIds?.includes(session.id)) {
+                sourceClosing = true; sourceView.cancelViewTransition();
+              }
+            };
+            document.addEventListener(SESSIONS_CLOSING, onSourceClosing);
+            traceView({ stage: 'pane.stage.begin', epoch: sourceEpoch, controller: traceController(sourceController) });
+            try {
+              await sourceView.stageNativeSurface(request ?? 0);
+              traceView({ stage: 'pane.stage.success', epoch: sourceEpoch, controller: traceController(sourceController) });
+            } catch (error) {
+              traceView({ stage: 'pane.stage.catch', epoch: sourceEpoch, controller: traceController(sourceController), cancelled: destroyed || sourceClosing });
+              // App marked pending before dispatching the requested override. A
+              // retained source needs its actual state re-reported after rollback,
+              // but an obsolete callback must not resurrect a closed/new view.
+              if (sourceController && nativeView === sourceView && useNative && nativeBackend === 'webview') {
+                restoreRetainedSourceStatus({
+                  source: sourceController, generation: sourceEpoch,
+                  current: () => ({ source: nativeCtl, generation: nativeViewEpoch,
+                    ready: frontendReady && !frontendError && sourceView.isRetainedWebviewReady(sourceController),
+                    closed: destroyed || exited || sourceClosing }),
+                  report: () => reportFrontendKind(request),
+                });
+              }
+              throw error; // preserve the original diagnostic
+            } finally {
+              document.removeEventListener(SESSIONS_CLOSING, onSourceClosing);
+            }
+            nativeBackend = nextBackend;
+            reportFrontendKind(request);
+            return;
+          }
+          if (nativeBackend === 'native-surface' && nextBackend === 'webview' && nativeView && nativeCtl) {
+            const sourceView = nativeView, sourceController = nativeCtl, sourceEpoch = nativeViewEpoch;
+            let closing = false;
+            const cancel = (event: Event) => {
+              if ((event as CustomEvent<SessionsClosingDetail>).detail?.sessionIds?.includes(session.id)) {
+                closing = true; sourceView.cancelViewTransition();
+              }
+            };
+            document.addEventListener(SESSIONS_CLOSING, cancel);
+            applyNativeCfg(cfg);
+            await tick();
+            try { await sourceView.stageWebviewSurface(request ?? 0); }
+            catch (error) {
+              restoreRetainedSourceStatus({ source: sourceController, generation: sourceEpoch,
+                current: () => ({ source: nativeCtl, generation: nativeViewEpoch,
+                  ready: sourceView.isRetainedNativeReady(sourceController), closed: destroyed || exited || closing }),
+                report: () => reportFrontendKind(request) });
+              throw error;
+            } finally { document.removeEventListener(SESSIONS_CLOSING, cancel); }
+            nativeBackend = nextBackend;
+            reportFrontendKind(request);
+            return;
+          }
+          await nativeView?.release();
+          nativeCtl = null;
+          frontendReady = false;
+          frontendError = false;
+          nativeBackend = nextBackend;
+          nativeViewEpoch++;
+        } finally {
+          await resumeTransfer();
+        }
+      }
       applyNativeCfg(cfg);
       nativeCtl?.setFont({
         family: nativeFontFamily,
@@ -1334,6 +1515,7 @@
 
   $effect(() => {
     void settingsRev;
+    void rendererOverride;
     if (useNative) {
       void reloadSettingsLive();
       return;
@@ -1343,6 +1525,11 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
+    settingsReload.dispose();
+    resolveNativeReady?.();
+    resolveNativeReady = null;
+    rejectNativeReady = null;
     terminalUi.clear(session.id);
     void nativeCtl?.dispose();
     nativeCtl = null;
@@ -1405,7 +1592,7 @@
     searchOpen = false;
     search?.clearDecorations();
     requestAnimationFrame(() => {
-      if (useNative) nativeCtl?.focus();
+      if (useNative) nativeView?.focus();
       else focusTerminalIfAllowed(term);
     });
   }
@@ -1466,15 +1653,16 @@
     if (!text) return;
     await pasteText(text);
   }
-  async function pasteText(raw: string) {
-    let text = raw;
-    if (pasteTrimWhitespace) text = text.replace(/[ \t]+$/gm, '');
-    if (pasteFlattenNewlines) text = text.replace(/\r?\n/g, ' ');
-    if (pasteMultilineWarn && text.includes('\n') && text.length > 200) {
-      if (!(await appConfirm(i18n.t('terminal.pasteConfirm', { count: text.length })))) return;
-    }
+  async function pasteText(raw: string, nativeValid?: () => Promise<boolean>) {
+    const pasteSession = session.id;
+    const text = await preparePasteText(raw, {
+      trim: pasteTrimWhitespace, flatten: pasteFlattenNewlines, warn: pasteMultilineWarn,
+      confirm: (count) => appConfirm(i18n.t('terminal.pasteConfirm', { count })),
+    }, nativeValid ? async () => !exited && session.id === pasteSession && await nativeValid() : undefined);
+    if (text === null) return;
     if (useNative) {
-      await nativeCtl?.paste(text);
+      if (nativeValid) await nativeCtl?.pasteFromNative(text, nativeValid);
+      else await nativeCtl?.paste(text);
       return;
     }
     if (bracketedPaste) {
@@ -1620,11 +1808,10 @@
     }
   }
 
-  function onNativeReady(ctl: NativeTerminalController) {
+  async function onNativeReady(ctl: NativeTerminalController) {
+    if (destroyed) return;
     nativeCtl = ctl;
-    frontendReady = true;
     useNative = true;
-    reportFrontendKind();
     ctl.setVisible(tabVisible && layoutVisible);
     ctl.setWriteInput(nativeWriteInput);
     ctl.setLinkModifier(linkModifier);
@@ -1640,18 +1827,23 @@
     if (seedNativeFromReplay) {
       seedNativeFromReplay = false;
       const chunks = cachedReplayChunks(session.id);
-      void (async () => {
-        for (const chunk of chunks) {
-          try {
-            await ctl.feed(chunk.bytes);
-          } catch (err) {
-            console.warn('native replay feed failed', err);
-            break;
-          }
+      for (const chunk of chunks) {
+        try {
+          await ctl.feed(chunk.bytes);
+        } catch (err) {
+          onNativeError(`native replay feed failed: ${String(err)}`);
+          return;
         }
-      })();
+      }
     }
-    if (active) ctl.focus();
+    frontendError = false;
+    frontendReady = true;
+    reportFrontendKind(frontendRequest);
+    resolveNativeReady?.();
+    resolveNativeReady = null;
+    rejectNativeReady = null;
+    // OS surface focuses after its latest geometry/show update; do not duplicate that IPC here.
+    if (nativeBackend === 'webview' && active && !nativeSurfaceOccluded && !searchOpen && !menuOpen) nativeView?.focus();
   }
 
   function onNativeExit() {
@@ -1671,7 +1863,12 @@
     ondragover={onTransferDragOver}
     ondrop={onTransferDrop}
   >
+    {#key `${session.id}:${nativeViewEpoch}`}
     <NativeTerminalView
+      bind:this={nativeView}
+      backend={nativeBackend}
+      {active}
+      occluded={nativeSurfaceOccluded || searchOpen || menuOpen || (exited && active) || !!transferNotice}
       {rpc}
       sessionId={session.id}
       fontFamily={nativeFontFamily}
@@ -1689,15 +1886,25 @@
       linkModifier={linkModifier}
       copyOnSelect={copyOnSelect}
       writeInput={nativeWriteInput}
+      writeNativeBytes={nativeWriteBytes}
+      onNativePaste={pasteText}
       visible={tabVisible && layoutVisible}
       onBell={triggerBell}
       onExit={onNativeExit}
       onActivity={() => { if (!active) tabs.markActivity(session.id, 'output'); }}
       onRaw={onNativeRaw}
       onTrzszDetected={onNativeTrzszDetected}
+      onRecovered={(ctl, backend, request) => {
+        if (destroyed || exited || ctl !== nativeCtl || !nativeView || nativeBackend !== backend) return;
+        const ready = backend === 'native-surface' ? nativeView.isRetainedNativeReady(ctl) : nativeView.isRetainedWebviewReady(ctl);
+        if (!ready) return;
+        frontendError = false; frontendReady = true;
+        reportFrontendKind(request || undefined);
+      }}
       onReady={onNativeReady}
-      onError={onError}
+      onError={onNativeError}
     />
+    {/key}
   </div>
 {:else}
   <div
