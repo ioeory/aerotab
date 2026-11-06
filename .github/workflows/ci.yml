@@ -98,10 +98,10 @@ jobs:
           - os: windows-latest
             bundle: nsis
           # Intel DMG: cross-compile on Apple Silicon (macos-13 Intel runners are scarce/queued).
-          - os: macos-14
+          - os: macos-15
             bundle: dmg-intel
             rust_target: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             bundle: dmg-arm
             rust_target: aarch64-apple-darwin
     steps:
@@ -162,7 +162,7 @@ jobs:
         working-directory: src-tauri
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: true
-        # Native build on macos-14 ARM runners (no cross-target needed).
+        # Native build on macos-15 ARM runners (no cross-target needed).
         run: cargo tauri build --bundles dmg
       - name: Resolve bundle artifact path
         id: bundle
@@ -189,7 +189,7 @@ jobs:
               name="AeroTab_${ver}_x64.dmg"
               ;;
             dmg-arm)
-              # Native build on ARM macos-14 (no --target); fall back to cross-compile path if present.
+              # Native build on ARM macos-15 (no --target); fall back to cross-compile path if present.
               path="target/release/bundle/dmg/AeroTab_${ver}_aarch64.dmg"
               if [ ! -f "$path" ]; then
                 path="target/aarch64-apple-darwin/release/bundle/dmg/AeroTab_${ver}_aarch64.dmg"
