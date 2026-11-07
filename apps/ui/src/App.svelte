@@ -92,7 +92,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.30-ui-20261107-host-stats-effect-fix';
+  const buildId = '0.2.34-ui-20261107-native-pane-activation';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -2143,7 +2143,7 @@
           {/if}
         </div>
         {#if tabs.activeId && auxiliaryPanels[tabs.activeId] && workspacePage === 'sessions'}
-          <aside class="session-auxiliary-panel" data-native-view-blocker="">
+          <aside class="session-auxiliary-panel" data-aerotab-focus-zone="">
             {#if auxiliaryPanels[tabs.activeId] === 'system'}
               <HostSystemPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />
             {:else if auxiliaryPanels[tabs.activeId] === 'notes'}

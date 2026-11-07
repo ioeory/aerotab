@@ -151,6 +151,8 @@ pub struct ViewState {
     pub generation: Uuid,
     pub geometry: Geometry,
     pub visible: bool,
+    #[cfg(target_os = "windows")]
+    pub focused: bool,
     pub last_draw_seq: Option<u32>,
     pub revision: u32,
     pub drawn_revision: Option<u32>,
@@ -184,6 +186,8 @@ impl Registry {
             generation: Uuid::new_v4(),
             geometry,
             visible: true,
+            #[cfg(target_os = "windows")]
+            focused: false,
             last_draw_seq: None,
             revision: 0,
             drawn_revision: None,

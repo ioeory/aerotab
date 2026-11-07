@@ -15,6 +15,10 @@ test('native view receives explicit workspace visibility and resource blocker', 
   assert.match(app, /data-native-view-blocker=\{workspacePage === 'hosts' \? '' : undefined\}/);
 });
 
+test('session side panels resize rather than globally occlude native terminals', () => {
+  assert.doesNotMatch(app, /<aside[^>]*class="session-auxiliary-panel"[^>]*data-native-view-blocker/);
+});
+
 test('opening a split in the current tab reveals the session workspace', () => {
   assert.match(app, /const openedSession = ids\.some\(id => !observedSessionIds\.has\(id\)\)/);
   assert.match(app, /\|\| openedSession\) workspacePage = 'sessions'/);

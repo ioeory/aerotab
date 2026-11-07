@@ -168,8 +168,10 @@ export class WebGLRenderer implements GridRenderer {
     this.dpr = Math.max(1, dpr);
     this.cssW = cols * metrics.width;
     this.cssH = rows * metrics.height;
-    this.canvas.width = Math.max(1, Math.round(cols * metrics.deviceWidth));
-    this.canvas.height = Math.max(1, Math.round(rows * metrics.deviceHeight));
+    const width = Math.max(1, Math.round(cols * metrics.deviceWidth));
+    const height = Math.max(1, Math.round(rows * metrics.deviceHeight));
+    if (this.canvas.width !== width) this.canvas.width = width;
+    if (this.canvas.height !== height) this.canvas.height = height;
     this.canvas.style.width = `${this.cssW}px`;
     this.canvas.style.height = `${this.cssH}px`;
     this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);

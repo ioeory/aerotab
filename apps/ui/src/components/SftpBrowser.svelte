@@ -2146,7 +2146,7 @@
 {/if}
 
 <style>
-  .sftp-browser-surface { background: var(--color-bg-soft); font-size: var(--text-compact, 14px); line-height: 1.5; container-type: inline-size; }
+  .sftp-browser-surface { background: var(--color-bg-soft) !important; color: var(--color-fg); isolation: isolate; font-size: var(--text-compact, 14px); line-height: 1.5; container-type: inline-size; }
   .sftp-browser-surface > header { background: var(--color-surface-raised); gap: 6px; }
   .sftp-browser-surface > header button { min-height: 30px; font-size: var(--text-compact, 14px); }
   .sftp-path-toolbar { flex-wrap: wrap; gap: 4px; background: var(--color-bg-soft); }

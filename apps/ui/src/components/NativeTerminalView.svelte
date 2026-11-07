@@ -10,6 +10,7 @@
     NATIVE_VIEW_OCCLUSION_EVENT, type TerminalViewBackend, type NativeViewConfig,
   } from '../lib/nativeViewHost';
   import { tracePaste } from '../lib/nativePasteTrace';
+  import { NATIVE_ACTIVATION_EVENT, nativeActivationRouter, type NativeActivation } from '../lib/nativeActivation';
   import {
     createPasteRequestGate, listenNativePaste, listenNativeEvent,
     NATIVE_FONT_DELTA_EVENT, type FontDeltaRequest,
@@ -48,6 +49,7 @@
     writeInput?: (data: string) => void | Promise<void>;
     visible?: boolean;
     active?: boolean;
+    onActivate?: () => void;
     onBell?: () => void;
     onTitle?: (title: string) => void;
     onExit?: () => void;
@@ -85,6 +87,7 @@
     writeInput,
     visible = true,
     active = true,
+    onActivate,
     onBell,
     onTitle,
     onExit,
@@ -123,10 +126,12 @@
   let pasteGate = createPasteRequestGate();
   let unlistenPaste: (() => void) | null = null;
   let unlistenInput: (() => void) | null = null;
+  let unlistenActivation: (() => void) | null = null;
   let unlistenFontDelta: (() => void) | null = null;
   let inputQueue: ReturnType<typeof createNativeInputQueue> | null = null;
   function disposePaste() {
     pasteGate.dispose(); unlistenPaste?.(); unlistenPaste = null;
+    unlistenActivation?.(); unlistenActivation = null;
     unlistenFontDelta?.(); unlistenFontDelta = null;
     inputQueue?.dispose(); unlistenInput?.(); unlistenInput = null;
   }
@@ -192,6 +197,20 @@
     const stopInput = await listenNativeEvent<NativeInputEvent>(NATIVE_INPUT_EVENT, event => inputQueue?.accept(event));
     if (disposed) { stopInput(); return; }
     unlistenInput = stopInput;
+    const stopActivation = await listenNativeEvent<NativeActivation>(NATIVE_ACTIVATION_EVENT, event => {
+      void nativeActivationRouter.accept(event, {
+        sessionId,
+        generation: () => hostAdapter?.generation() ?? null,
+        // Inactive is exactly the state we must be able to activate. Visibility,
+        // occlusion, handoff and generation remain independent safety gates.
+        eligible: () => visible && !occluded && !globalOccluded && !document.hidden
+          && !disposed && !surfaceError && !rollbackPending && !stagingWebview && !committedWebview,
+        state: async () => await tauriInvoke()!('native_view_state', { sessionId }) as { generation?: string; focused?: boolean },
+        activate: () => onActivate?.(),
+      });
+    });
+    if (disposed) { stopActivation(); return; }
+    unlistenActivation = stopActivation;
     // Register before attach/focus; absent listener always fails closed.
     const unlisten = await listenNativePaste((request) => {
       const generation = hostAdapter?.generation() ?? null;

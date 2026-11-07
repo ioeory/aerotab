@@ -178,6 +178,7 @@ export class NativeTerminalController {
     this.stagingWebview = false;
     this.webviewHandoff = false;
     this.flushPausedWrites();
+    this.requestedGeometry = '';
     this.observeResize();
     this.fit();
   }
@@ -235,6 +236,7 @@ export class NativeTerminalController {
     dpr: 1,
   };
   private resizeObs: ResizeObserver | null = null;
+  private requestedGeometry = '';
   private boundKey = (e: KeyboardEvent) => { void this.onKey(e).catch(() => {}); };
   private boundPaste = (e: ClipboardEvent) => this.onPaste(e);
   private boundWinKey = (e: KeyboardEvent) => {
@@ -306,7 +308,6 @@ export class NativeTerminalController {
       this.mode = frame.header.mode;
       this.cols = frame.header.cols;
       this.rows = frame.header.rows;
-      this.renderer?.resize(this.cols, this.rows, this.metrics, this.spec.dpr);
       this.schedulePaint();
     })();
     try {
@@ -611,6 +612,9 @@ export class NativeTerminalController {
       const ticket = this.pendingDraw;
       const cursor = this.cursorState();
       try {
+        // Resize and draw the received grid in the same RAF. Never expose an
+        // erased backing store while waiting for the backend's resized frame.
+        this.renderer.resize(this.grid.cols, this.grid.rows, this.metrics, this.spec.dpr);
         this.renderer.render({
           grid: this.grid,
           palette: this.palette,
@@ -692,6 +696,7 @@ export class NativeTerminalController {
   fit() {
     if (this.disposed || this.opts.nativeSurface) return;
     const host = this.opts.canvas.parentElement ?? this.opts.canvas;
+    if (host.clientWidth < 2 || host.clientHeight < 2) return;
     const dpr = window.devicePixelRatio || 1;
     if (dpr !== this.spec.dpr) {
       this.invalidateDraw();
@@ -701,12 +706,12 @@ export class NativeTerminalController {
     }
     const cols = Math.max(2, Math.floor(host.clientWidth / this.metrics.width));
     const rows = Math.max(1, Math.floor(host.clientHeight / this.metrics.height));
-    this.renderer?.resize(cols, rows, this.metrics, dpr);
-    if (cols !== this.cols || rows !== this.rows) {
+    const geometry = `${cols}:${rows}:${this.metrics.deviceWidth}:${this.metrics.deviceHeight}`;
+    if (geometry !== this.requestedGeometry) {
       this.invalidateDraw();
-      this.cols = cols;
-      this.rows = rows;
-      this.grid.resize(cols, rows);
+      this.requestedGeometry = geometry;
+      // cols/rows and grid describe received output, not an in-flight request.
+      // Keeping them intact avoids blank frames and stale-frame resize loops.
       void this.rpc.call('terminal.resize', {
         id: this.sessionId,
         cols,

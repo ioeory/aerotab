@@ -129,6 +129,7 @@
     nativeSurfaceOccluded?: boolean;
     /** Invoked when the user clicks the pane's close button from inside (e.g. exited overlay). */
     onClosePane?: () => void;
+    onActivate?: () => void;
     /** Invoked when transfer detection should open the active SSH pane's SFTP browser. */
     onOpenSftp?: () => void;
     onSplitRight?: () => void;
@@ -149,6 +150,7 @@
     rendererOverride,
     nativeSurfaceOccluded = false,
     onClosePane,
+    onActivate,
     onOpenSftp,
     onSplitRight,
     onSplitDown,
@@ -1868,6 +1870,7 @@
     <NativeTerminalView
       bind:this={nativeView}
       backend={nativeBackend}
+      {onActivate}
       {active}
       occluded={nativeSurfaceOccluded || searchOpen || menuOpen || (exited && active) || !!transferNotice}
       {rpc}

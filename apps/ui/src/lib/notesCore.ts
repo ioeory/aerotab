@@ -1,23 +1,26 @@
+import { Marked, Renderer } from 'marked';
+
 export interface Note { id: string; parent_id: string | null; title: string; markdown: string; tags: string[]; profile_ids: string[]; version: number; updated_at: number }
 export interface NoteFolder { id: string; parent_id: string | null; name: string; version: number; updated_at: number }
 export interface NotesSnapshot { notes: Note[]; folders: NoteFolder[]; revision: number }
 export const emptySnapshot = (): NotesSnapshot => ({ notes: [], folders: [], revision: 0 });
 const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-/** Deliberately small Markdown dialect; HTML and images always remain inert text. */
+/** No raw HTML or remote image loading; only explicit HTTP(S)/mailto links. */
+const renderer = new Renderer();
+renderer.html = ({ text }) => escape(text);
+renderer.image = ({ text }) => escape(text);
+renderer.link = function ({ href, tokens }) {
+  const label = this.parser.parseInline(tokens);
+  if (!/^(https?:\/\/|mailto:)/i.test(href) || /[\u0000-\u0020\u007f]/.test(href)) return label;
+  try {
+    const url = new URL(href);
+    if (!['https:', 'http:', 'mailto:'].includes(url.protocol) || url.username || url.password) return label;
+  } catch { return label; }
+  return `<a href="${escape(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${label}</a>`;
+};
+const markdownParser = new Marked({ renderer, gfm: true, async: false });
 export function renderMarkdown(markdown: string): string {
-  let fenced = false;
-  return markdown.split('\n').map(line => {
-    if (line.startsWith('```')) { fenced = !fenced; return fenced ? '<pre><code>' : '</code></pre>'; }
-    if (fenced) return escape(line) + '\n';
-    let text = escape(line).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/~~([^~]+)~~/g, '<del>$1</del>').replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    // Links stay text; no automatic navigation, URL loading or external images.
-    const heading = /^(#{1,6}) (.*)$/.exec(text);
-    if (heading?.[1]) return `<h${heading[1].length}>${heading[2] ?? ''}</h${heading[1].length}>`;
-    if (/^---+$/.test(text)) return '<hr>';
-    if (text.startsWith('&gt; ')) return `<blockquote>${text.slice(5)}</blockquote>`;
-    text = text.replace(/^[-*] \[([ x])\] /, (_, done) => done === 'x' ? '☑ ' : '☐ ').replace(/^[-*] /, '• ');
-    return `<div>${text || '<br>'}</div>`;
-  }).join('\n') + (fenced ? '</code></pre>' : '');
+  return markdownParser.parse(markdown) as string;
 }
 export function safeFilename(value: string): string {
   let name = value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/^\.+|[ .]+$/g, '').trim() || 'note';

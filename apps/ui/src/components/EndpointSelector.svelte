@@ -23,7 +23,7 @@
   const LOCAL_ID = '__local__';
   let query = $state('');
   let open = $state(false);
-  let hover = $state(0);
+  let hover = $state(-1);
 
   const q = $derived(query.trim().toLowerCase());
 
@@ -48,12 +48,12 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') { open = false; query = ''; return; }
-    if (e.key === 'ArrowDown') { e.preventDefault(); hover = Math.min(hover + 1, items.length); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); hover = Math.min(hover + 1, items.length - 1); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); hover = Math.max(hover - 1, 0); return; }
     if (e.key === 'Enter') {
       e.preventDefault();
-      const f = items[hover];
-      if (f) select(f.id);
+      if (hover === -1) select(LOCAL_ID);
+      else { const f = items[hover]; if (f) select(f.id); }
     }
   }
 
@@ -74,7 +74,7 @@
   });
 </script>
 
-<div bind:this={wrapEl} class="relative min-w-0">
+<div bind:this={wrapEl} class="endpoint-selector relative min-w-0">
   <input
     type="text"
     class="input min-h-9 min-w-0 py-1.5 text-[length:var(--text-ui)] w-full"
@@ -82,12 +82,12 @@
     class:border-[var(--color-accent)]={open}
     placeholder={displayName() || placeholder}
     bind:value={query}
-    onfocus={() => { open = true; hover = 0; }}
+    onfocus={() => { open = true; hover = -1; }}
     onkeydown={onKey}
   />
 
   {#if open}
-    <div class="absolute left-0 right-0 top-full mt-1 z-50 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md shadow-lg max-h-[260px] overflow-y-auto py-1">
+    <div class="endpoint-menu absolute left-0 right-0 top-full mt-1 z-50 border border-[var(--color-border)] rounded-md shadow-lg max-h-[260px] overflow-y-auto py-1">
       <button type="button"
         class="w-full flex items-center gap-2 px-2 py-1.5 text-[length:var(--text-compact)] text-left {value === LOCAL_ID ? 'text-[var(--color-accent)]' : ''} {hover === -1 ? 'bg-[var(--color-accent)]/15' : 'hover:bg-[var(--color-panel-2)]'}"
         onclick={() => select(LOCAL_ID)}
@@ -114,3 +114,8 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .endpoint-selector { flex-shrink: 0; isolation: isolate; z-index: 2; }
+  .endpoint-menu { background: var(--color-panel); color: var(--color-fg); box-shadow: var(--shadow-lg); overscroll-behavior: contain; }
+</style>

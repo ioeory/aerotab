@@ -287,7 +287,13 @@ export function createNativeViewHost(options: {
           await updating;
           if (disposed || !attached || !focusAllowed || !visible) return;
           try { await invoke('native_view_focus', { sessionId }); }
-          catch (error) { throw nativeSurfaceError(error); }
+          catch (error) {
+            // A dock/modal hide can reach the UI thread after focus was queued.
+            // Rejection of that stale focus is not a rendering/attachment failure.
+            const code = (error as { code?: string } | null)?.code;
+            if (code === 'input_not_ready' && (!focusAllowed || !visible || inputFrozen || inputRecovery || suspendedForWebview || disposed)) return;
+            throw nativeSurfaceError(error);
+          }
         })().finally(() => { focusing = null; });
       }
       return focusing;

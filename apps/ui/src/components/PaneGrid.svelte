@@ -1,6 +1,7 @@
 <script lang="ts">
   import { GripVertical, Maximize2, Minimize2, X } from '@lucide/svelte';
   import { onDestroy, onMount, tick } from 'svelte';
+  import { nativeActivationRouter } from '../lib/nativeActivation';
   import { registerPaneLayoutBarrier } from '../lib/paneLayoutBarrier';
   import PaneNodeView from './PaneNodeView.svelte';
   import TerminalPane from './TerminalPane.svelte';
@@ -164,6 +165,7 @@
   });
 
   function focusPane(sessionId: string) {
+    nativeActivationRouter.invalidate();
     tabs.focusPane(tab.id, sessionId);
     requestAnimationFrame(() => dispatchFocusPane(sessionId));
   }
@@ -263,6 +265,7 @@
           {rpc}
           session={pane}
           active={focused && tabVisible}
+          onActivate={() => { if (tabVisible && !hidden) tabs.focusPane(tab.id, pane.id); }}
           rendererOverride={terminalViewChoices[pane.id]}
           {nativeSurfaceOccluded}
           layoutVisible={!hidden}

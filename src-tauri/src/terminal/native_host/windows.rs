@@ -11,7 +11,10 @@ use windows_sys::Win32::{
         WindowsAndMessaging::*,
     },
 };
-thread_local! { static VIEWS: RefCell<HashMap<Uuid, Box<Attachment>>> = RefCell::default(); }
+thread_local! {
+    static VIEWS: RefCell<HashMap<Uuid, Box<Attachment>>> = RefCell::default();
+    static ACTIVATION_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 struct Callback {
     id: Uuid,
     generation: Uuid,
@@ -556,6 +559,7 @@ impl Attachment {
             generation: self.generation,
             geometry: self.geometry,
             visible: self.visible,
+            focused: self.active(),
             last_draw_seq: self.last_seq,
             revision: self.revision.applied,
             drawn_revision: self.revision.drawn,
@@ -707,6 +711,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_LBUTTONDOWN | WM_MBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONUP | WM_MBUTTONUP
             | WM_RBUTTONUP | WM_MOUSEMOVE | WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
                 unsafe { &mut *p }.mouse(msg, w, l);
+                0
+            }
+            WM_SETFOCUS => {
+                let v = unsafe { &mut *p };
+                if v.active() {
+                    let seq = ACTIVATION_SEQ.with(|seq| {
+                        let next = seq.get() + 1;
+                        seq.set(next);
+                        next
+                    });
+                    let _ = v.app.emit_to(
+                        tauri::EventTarget::webview_window("main"),
+                        "aerotab:native-activation",
+                        serde_json::json!({"sessionId":v.id(),"generation":v.generation,"seq":seq}),
+                    );
+                }
                 0
             }
             WM_KILLFOCUS => {

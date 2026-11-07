@@ -149,6 +149,15 @@ body[data-frame-style="frameless"] { /* reserved for custom titlebar */ }
 * { box-sizing: border-box; }
 button { font-family: inherit; }
 
+/* WebView2 paints native popup rows separately from the styled select.
+ * Always provide BOTH colors; inherited light text on its default white popup
+ * is unreadable. These rules deliberately do not use translucent utilities. */
+select { color-scheme: inherit; }
+select option, select optgroup {
+  color: var(--color-fg);
+  background: var(--color-panel);
+}
+
 /* xterm.js theme alignment with our tokens (the lib injects inline colors via
  * Terminal options too — see TerminalPane.svelte). */
 .xterm .xterm-viewport { background: transparent !important; }

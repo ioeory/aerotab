@@ -105,6 +105,22 @@ test('reversible WebView suspension hides then captures watermark without freezi
   assert.equal(await host.canPaste('g'),true);await host.dispose();
 });
 
+test('dock occlusion racing an in-flight focus does not destroy the attachment', async () => {
+  const { createNativeViewHost } = await api();
+  const pending = deferred(); let focusStarted = false;
+  const host = createNativeViewHost({ sessionId: 's', invoke: async cmd => {
+    if (cmd === 'native_view_capabilities') return capabilities;
+    if (cmd === 'native_view_focus') { focusStarted = true; await pending.promise; throw { code: 'input_not_ready', message: 'inactive or frozen attachment' }; }
+    return { generation: 'g' };
+  }});
+  await host.start(geometry); await host.update(geometry, true); await host.acknowledgeInput(0);
+  host.setFocusAllowed(true); const focusing = host.focus(); await flush(); assert.equal(focusStarted, true);
+  host.setFocusAllowed(false); await host.update(geometry, false);
+  pending.resolve(); await assert.doesNotReject(focusing);
+  assert.equal(host.generation(), 'g');
+  await host.dispose();
+});
+
 // GTK consumes logical/CSS bounds, not physical backing-buffer pixels.
 test('geometry remains CSS pixels at high DPR and hides invalid or clipped bounds', async () => {
   const { nativeViewGeometry } = await api();

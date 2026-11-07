@@ -47,8 +47,11 @@ export class Canvas2DRenderer implements GridRenderer {
     this.rows = rows;
     this.metrics = metrics;
     this.dpr = Math.max(1, dpr);
-    this.canvas.width = Math.max(1, Math.round(cols * metrics.deviceWidth));
-    this.canvas.height = Math.max(1, Math.round(rows * metrics.deviceHeight));
+    const width = Math.max(1, Math.round(cols * metrics.deviceWidth));
+    const height = Math.max(1, Math.round(rows * metrics.deviceHeight));
+    // Even assigning the same size erases a canvas backing store.
+    if (this.canvas.width !== width) this.canvas.width = width;
+    if (this.canvas.height !== height) this.canvas.height = height;
     this.canvas.style.width = `${cols * metrics.width}px`;
     this.canvas.style.height = `${rows * metrics.height}px`;
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);

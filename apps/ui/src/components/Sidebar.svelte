@@ -591,15 +591,17 @@
   }
 
   function onProfileRowClick(p: StoredProfile, ev: MouseEvent) {
+    focusProfile(p);
+    if (!hasProfileSelection) {
+      // Normal browsing keeps the existing double-click/Enter connection path.
+      // Only an explicit checkbox (or bulk action) enters selection mode.
+      return;
+    }
     if (ev.shiftKey && selectionAnchorId) {
       catalog.selectedIds = rangeSelectProfiles(filteredProfiles, selectionAnchorId, p.id);
-    } else if (ev.ctrlKey || ev.metaKey) {
-      catalog.selectedIds = toggleProfileInSelection(selectedProfileIds, p.id);
-      selectionAnchorId = p.id;
     } else {
-      focusProfile(p);
-      catalog.selectedIds = new Set([p.id]);
-      selectionAnchorId = p.id;
+      catalog.selectedIds = toggleProfileInSelection(selectedProfileIds, p.id);
+      selectionAnchorId = catalog.selectedIds.size ? p.id : null;
     }
   }
 
