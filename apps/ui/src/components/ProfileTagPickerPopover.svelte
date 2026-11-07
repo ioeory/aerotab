@@ -56,6 +56,7 @@
     style="left: {left}px; top: {top}px;"
     role="dialog"
     aria-modal="true"
+    tabindex="-1"
     aria-label={i18n.t('sidebar.editTags')}
     onclick={(e) => e.stopPropagation()}
     onkeydown={onKeydown}
@@ -84,7 +85,10 @@
   .profile-tag-picker-panel {
     position: fixed;
     z-index: 59;
-    width: min(300px, calc(100vw - 24px));
+    width: min(360px, calc(100vw - 24px));
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    font-family: var(--font-sans, system-ui, sans-serif);
     padding: 10px 12px 12px;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
@@ -92,7 +96,8 @@
     background: var(--color-panel);
   }
   .profile-tag-picker-title {
-    font-size: 12px;
+    font-size: var(--text-section, 20px);
+    line-height: 1.4;
     font-weight: 600;
     color: var(--color-fg);
     margin-bottom: 8px;

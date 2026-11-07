@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { getProfileCatalog } from '../../../lib/profileCatalog.svelte';
   // Profiles & connections — manage saved SSH/serial profiles + browse
   // ~/.ssh/config entries imported from the host. Mirrors the sidebar's
   // profile list but with grouping, search, and inline edit/delete.
@@ -91,7 +92,7 @@
     }, 25_000);
     try {
       const listResult = await withRpcTimeout(
-        rpc.call<StoredProfile[]>('profile.list'),
+        getProfileCatalog(rpc).refresh().then(() => getProfileCatalog(rpc).profiles),
         12_000,
         'profile.list',
       ).catch((e) => {

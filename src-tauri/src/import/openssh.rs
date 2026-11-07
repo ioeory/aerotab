@@ -67,6 +67,9 @@ fn map_entry(entry: &SshConfigEntry, idx: usize, catalog: &[SshConfigEntry]) -> 
         user: entry.user.clone().unwrap_or_else(|| "root".into()),
         auth,
         jump_via,
+        jump_profile_ids: vec![],
+        proxy_id: None,
+        resolved_proxy: None,
     };
     let profile = build_profile(
         name.clone(),
@@ -119,6 +122,9 @@ fn jump_via_from_config(
             user: hop.user.clone().unwrap_or_else(|| "root".into()),
             auth: auth_for_entry(hop),
             jump_via: Vec::new(),
+            jump_profile_ids: vec![],
+            proxy_id: None,
+            resolved_proxy: None,
         });
     }
     hops

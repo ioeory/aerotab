@@ -1,0 +1,38 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import { compileModule } from 'svelte/compiler';
+const core = readFileSync(new URL('./monitoring.ts', import.meta.url), 'utf8');
+const store = readFileSync(new URL('./hostMonitoring.svelte.ts', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
+const source = ts.transpileModule(`${core}\nconst untrack = fn => fn(); const PROFILES_CHANGED = 'aerotab:profiles-changed';\n${store}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+const compiled = compileModule(source, { filename: 'hostMonitoring.svelte.js', generate: 'server' }).js.code.replaceAll("'svelte/internal/server'", JSON.stringify(import.meta.resolve('svelte/internal/server')));
+const api = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+test('panel CRUD persists only safe definitions and restores without starting connections', () => {
+  let saved = null;
+  globalThis.localStorage = { getItem: () => saved, setItem: (_, value) => { saved = value; } };
+  const rpc = { call: () => { throw Error('must not connect before Start'); } };
+  const store = new api.HostMonitoring(rpc);
+  const id = store.create('Prod', ['a', 'a']);
+  assert.equal(store.panels[0].name, 'Prod'); assert.equal(store.selectedPanelId, id);
+  store.update(id, { name: 'Production', view: 'chart', intervalMs: 10000 });
+  assert.equal(store.references('a')[0].name, 'Production');
+  assert.equal(JSON.parse(saved).panels[0].view, 'chart');
+  const restored = new api.HostMonitoring(rpc);
+  assert.equal(restored.panels[0].name, 'Production'); assert.deepEqual(restored.running, []);
+  restored.remove(id); assert.deepEqual(restored.references('a'), []);
+  store.service.dispose(); restored.service.dispose();
+});
+test('two running panels share one host lease and deleting one preserves the other', async () => {
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  let calls = 0, resolve;
+  const store = new api.HostMonitoring({ call: () => { calls++; return new Promise(r => { resolve = r; }); } });
+  store.setProfiles([{ id: 'a', kind: 'ssh', name: 'A', ssh: { host: 'a' } }]);
+  const first = store.create('One', ['a']); const second = store.create('Two', ['a']);
+  store.start(first); store.start(second); assert.equal(calls, 1);
+  store.remove(first); assert.deepEqual(store.service.activeProfileIds(), ['a']);
+  store.stop(second); assert.deepEqual(store.service.activeProfileIds(), []);
+  resolve({ cpu_percent: 5 }); await new Promise(r => setImmediate(r));
+  assert.equal(store.service.snapshot('a').history.length, 0);
+  store.service.dispose();
+});

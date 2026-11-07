@@ -69,7 +69,7 @@ pub fn preview_tabby(text: &str, path: Option<&str>) -> Result<ImportPreviewResu
 
 #[derive(Debug, Clone)]
 enum TabbyItem {
-    AeroTab(Profile),
+    AeroTab(Box<Profile>),
     Tabby {
         name: String,
         kind: String,
@@ -108,7 +108,7 @@ fn extract_items(value: Value) -> Result<Vec<TabbyItem>, String> {
 
 fn item_from_value(value: Value) -> Result<TabbyItem, String> {
     if let Ok(profile) = serde_json::from_value::<Profile>(value.clone()) {
-        return Ok(TabbyItem::AeroTab(profile));
+        return Ok(TabbyItem::AeroTab(Box::new(profile)));
     }
     let map = value
         .as_object()
@@ -143,7 +143,7 @@ fn item_from_value(value: Value) -> Result<TabbyItem, String> {
 
 fn map_tabby_item(item: TabbyItem, idx: usize) -> Option<ImportCandidate> {
     match item {
-        TabbyItem::AeroTab(profile) => Some(map_aerotab_profile(profile, idx)),
+        TabbyItem::AeroTab(profile) => Some(map_aerotab_profile(*profile, idx)),
         TabbyItem::Tabby {
             name,
             kind,
@@ -214,6 +214,9 @@ fn map_tabby_native(
                 user,
                 auth,
                 jump_via: vec![],
+                jump_profile_ids: vec![],
+                proxy_id: None,
+                resolved_proxy: None,
             };
             let profile = build_profile(
                 name.clone(),

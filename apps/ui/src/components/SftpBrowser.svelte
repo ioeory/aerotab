@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { transferTabBridge } from '../lib/transferTabBridge.svelte';
+  import { getFileTransferService } from '../lib/fileTransferService';
+  import type { SftpLease } from '../lib/sftpConnections';
+  import { workspaceMenu } from '../lib/workspaceMenu';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import {
     X, Folder, FileText, RefreshCw, ChevronRight, Home, ArrowUp,
@@ -57,6 +61,8 @@
     onRemoteCrossTransfer?: (request: RemoteCrossTransferRequest) => void;
     onLocalUploadTransfer?: (request: LocalUploadTransferRequest) => void;
     refreshToken?: number;
+    initialPath?: string;
+    onPathChange?: (path: string) => void;
     onError: (msg: string) => void;
   }
   let {
@@ -78,6 +84,8 @@
     onRemoteCrossTransfer,
     onLocalUploadTransfer,
     refreshToken = 0,
+    initialPath = '.',
+    onPathChange,
     onError,
   }: Props = $props();
   const target = $derived.by((): SftpSource | null => {
@@ -93,7 +101,7 @@
 
   let sessionId = $state<string | null>(null);
   let sudoMode = $state(initialSudoMode());
-  let cwd = $state('.');
+  let cwd = $state(initialPath || '.');
   let entries = $state<SftpEntry[]>([]);
   let loading = $state(false);
   let listError = $state<string | null>(null);
@@ -144,19 +152,9 @@
   let localPaneCollapsed = $state(false);
   let downloadBannerDismissed = $state(false);
 
-  const activeTransferCount = $derived(
-    transfers.filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'paused').length,
-  );
-  const transferQueueItems = $derived(
-    transfers.map((task) => ({
-      id: task.id,
-      name: task.name,
-      status: task.status,
-      percent: transferPercent(task),
-      summary: transferSummary(task),
-      kindLabel: task.kind,
-    })),
-  );
+  let sharedTasks = $state<import('../lib/transferQueue').TransferTask[]>([]);
+  const activeTransferCount = $derived(sharedTasks.filter(t => ['queued', 'running', 'canceling'].includes(t.status)).length);
+  const transferQueueItems = $derived(sharedTasks.map(task => ({ id: task.id, name: task.name, status: task.status === 'canceling' ? 'running' as const : task.status === 'interrupted' ? 'error' as const : task.status, percent: task.size ? Math.min(100, Math.round(task.transferred / task.size * 100)) : 0, summary: task.message ?? `${task.transferred} / ${task.size} B` })));
   const showLocalPaneEffective = $derived(showLocalPane && localCwd && !localPaneCollapsed);
 
   let reportedTransferCount = -1;
@@ -180,6 +178,11 @@
   let transferProgressTick: number | null = null;
   let registrySnapshot = '';
   let connectSeq = 0;
+  let destroyed = false;
+  let browserLease: SftpLease | null = null;
+  const fileService = getFileTransferService(rpc);
+  transferTabBridge.configure(rpc);
+  $effect(() => { onPathChange?.(cwd); });
   /** Last connect key we attempted; blocks auto-reconnect loops on failure. */
   let appliedConnectKey = '';
   let connectInFlight = false;
@@ -203,9 +206,9 @@
     sessionId = null;
     registrySnapshot = '';
     appliedConnectKey = '';
-    if (prev) {
-      await rpc.call('sftp.close', { id: prev }).catch(() => {});
-    }
+    void prev;
+    browserLease?.release();
+    browserLease = null;
     sftpSessionRegistry.unregister(registryId);
   }
 
@@ -310,7 +313,7 @@
     const remoteRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE);
     if (remoteRaw && sessionId) {
       const payload = parseRemoteDrag(remoteRaw);
-      if (payload?.sourceSessionId && payload.sourceSessionId !== sessionId) {
+      if (payload?.sourceSessionId) {
         await receiveRemoteDrop(payload);
         return;
       }
@@ -336,28 +339,10 @@
   async function handleLocalPaneDrop(e: DragEvent) {
     e.preventDefault();
     const remoteRaw = readSftpDragData(e.dataTransfer, SFTP_DRAG_REMOTE);
-    if (remoteRaw && sessionId) {
+    if (remoteRaw) {
       const payload = parseRemoteDrag(remoteRaw);
-      if (!payload) return;
-      if (payload.kind === 'Dir') {
-        await downloadDirectoryToLocal(payload.path, [payload.name], localCwd);
-        return;
-      }
-      const dest = joinLocalPath(localCwd, payload.name);
-      const id = nextTransferId();
-      downloadEntries.set(id, {
-        name: payload.name,
-        kind: 'File',
-        size: payload.size,
-        mode: 0,
-        mtime: null,
-      });
-      enqueueDownloadTransfer(
-        { name: payload.name, kind: 'File', size: payload.size, mode: 0, mtime: null },
-        payload.path,
-        payload.name,
-        { id, localPath: dest },
-      );
+      if (!payload?.sourceSessionId) return;
+      try { fileService.queue.enqueue({ name: payload.name, source: { kind: 'remote', sessionId: payload.sourceSessionId, path: payload.path }, destination: { kind: 'local', path: joinLocalPath(localCwd, payload.name) }, entryKind: payload.kind, size: payload.size }); } catch (err) { onError(String(err)); }
       return;
     }
     await handleLocalOsFileDrop(e);
@@ -388,7 +373,7 @@
   async function enqueueUploadFromLocal(payload: LocalDragPayload) {
     if (!sessionId) return;
     if (payload.kind === 'dir') {
-      await collectLocalDirectoryUploads(payload.path, [payload.name]);
+      fileService.queue.enqueue({ name: payload.name, source: { kind: 'local', path: payload.path }, destination: { kind: 'remote', sessionId, path: joinPath(cwd, payload.name), profileId: profile?.id }, entryKind: 'Dir', size: 0 });
       return;
     }
     const id = nextTransferId();
@@ -524,28 +509,35 @@
     if (!target) throw new Error('SFTP target is not set');
     // Always use a dedicated SFTP SSH connection. Reusing the interactive shell
     // session (openForSession) can reset the link on some servers (Windows 10054).
-    const r = await rpc.call<{ id: string }>('sftp.open', { profile: target.ssh, sudo: sudoMode });
-    return r.id;
+    const lease = fileService.connections.acquire(`${registryId}:${connectSeq}`, { ...(profile?.id ? { profile_id: profile.id } : { profile: target.ssh }), sudo: sudoMode });
+    browserLease = lease;
+    return lease.ready;
   }
 
   async function connect(): Promise<boolean> {
     if (!target) return false;
+    const generation = connectSeq;
     await invalidateSftpSession();
+    if (destroyed || generation !== connectSeq) return false;
     loading = true;
     listError = null;
     try {
       const id = await openSftpBackend();
+      if (destroyed || generation !== connectSeq) return false;
       sessionId = id;
       knownRemoteDirs.clear();
       // Resolve home (".") to an absolute path so navigation is predictable.
-      const real = await rpc.call<{ path: string }>('sftp.realpath', { id, path: '.' });
+      const real = await rpc.call<{ path: string }>('sftp.realpath', { id, path: initialPath || '.' });
+      if (destroyed || generation !== connectSeq) return false;
       const nextCwd = real.path || '.';
       const list = await rpc.call<SftpEntry[]>('sftp.list', { id, path: nextCwd });
+      if (destroyed || generation !== connectSeq) return false;
       cwd = nextCwd;
       entries = sortEntries(list);
       markConnectSuccess(sftpConnectKey());
       return true;
     } catch (e) {
+      if (destroyed || generation !== connectSeq) return false;
       await invalidateSftpSession();
       entries = [];
       listError = (e as Error).message;
@@ -850,9 +842,20 @@
   }
 
   function enqueueTransfer(task: TransferTask) {
-    transfers = [...transfers, task];
-    flushTransfersUi();
-    void processTransfers();
+    if (!sessionId) return;
+    const remote = { kind: 'remote' as const, sessionId, profileId: profile?.id, path: task.path, label: target?.name };
+    if (task.kind === 'upload') {
+      const file = uploadFiles.get(task.id);
+      const sourcePath = task.localFilePath ?? file?.name;
+      if (!sourcePath) { onError('Local source is unavailable'); return; }
+      fileService.queue.enqueue({ name: task.name, source: { kind: 'local', path: sourcePath, file }, destination: remote, entryKind: 'File', size: task.size });
+      uploadFiles.delete(task.id);
+    } else {
+      const localPath = task.localPath ?? (task.localBaseDir && task.relativePath ? task.relativePath.reduce((base, name) => joinLocalPath(base, name), task.localBaseDir) : undefined);
+      if (!localPath) { onError('Desktop destination is required'); return; }
+      fileService.queue.enqueue({ name: task.name, source: remote, destination: { kind: 'local', path: localPath }, entryKind: 'File', size: task.size });
+      downloadEntries.delete(task.id);
+    }
   }
 
   async function processTransfers() {
@@ -966,13 +969,14 @@
     }
     const key = sftpConnectKey();
     if (!key || key === appliedConnectKey) return;
-    if (untrack(() => connectInFlight)) return;
     const seq = ++connectSeq;
     connectInFlight = true;
     void (async () => {
       try {
         if (seq !== connectSeq) return;
-        await connect();
+        // connect() synchronously invalidates sessionId before its first await.
+        // Do not make that output state a dependency of this owning effect.
+        await untrack(() => connect());
       } finally {
         if (seq === connectSeq) connectInFlight = false;
       }
@@ -1239,21 +1243,9 @@
       });
       return;
     }
-    const dirCache = new Set<string>();
     try {
-      if (payload.kind === 'Dir') {
-        await copyRemoteDirBetweenSessions(payload.sourceSessionId, payload.path, sessionId, destPath, dirCache);
-      } else {
-        const destDir = parentPath(destPath);
-        if (destDir !== '/' && destDir !== '.') {
-          await ensureRemoteDirOn(sessionId, destDir, dirCache);
-        }
-        await copyRemoteFileBetweenSessions(payload.sourceSessionId, payload.path, sessionId, destPath, payload.size);
-      }
-      await refresh();
-    } catch (e) {
-      onError(i18n.t('sftp.crossTransferFailed', { message: (e as Error).message }));
-    }
+      fileService.queue.enqueue({ name: payload.name, source: { kind: 'remote', sessionId: payload.sourceSessionId, path: payload.path, label: payload.sourceLabel }, destination: { kind: 'remote', sessionId, path: destPath, profileId: profile?.id }, entryKind: payload.kind, size: payload.size });
+    } catch (e) { onError(String(e)); }
   }
 
   async function sendEntryToSession(entry: SftpEntry, dest: RegisteredSftpSession) {
@@ -1278,20 +1270,9 @@
       });
       return;
     }
-    const dirCache = new Set<string>();
-    try {
-      if (entry.kind === 'Dir') {
-        await copyRemoteDirBetweenSessions(sessionId, srcPath, dest.sessionId, destPath, dirCache);
-      } else if (entry.kind === 'File') {
-        const destDir = parentPath(destPath);
-        if (destDir !== '/' && destDir !== '.') {
-          await ensureRemoteDirOn(dest.sessionId, destDir, dirCache);
-        }
-        await copyRemoteFileBetweenSessions(sessionId, srcPath, dest.sessionId, destPath, entry.size);
-      }
-    } catch (e) {
-      onError(i18n.t('sftp.crossTransferFailed', { message: (e as Error).message }));
-    }
+    if (entry.kind !== 'File' && entry.kind !== 'Dir') return;
+    try { fileService.queue.enqueue({ name: entry.name, source: { kind: 'remote', sessionId, path: srcPath, profileId: profile?.id }, destination: { kind: 'remote', sessionId: dest.sessionId, path: destPath }, entryKind: entry.kind, size: entry.size }); }
+    catch (e) { onError(String(e)); }
   }
 
   function toggleTransferSelection(id: string) {
@@ -1548,7 +1529,7 @@
     lastDownloadPath = baseDir;
     preparingTransfers = true;
     try {
-      await collectDirectoryDownloads(joinPath(cwd, e.name), [e.name], baseDir);
+      if (sessionId) fileService.queue.enqueue({ name: e.name, source: { kind: 'remote', sessionId, profileId: profile?.id, path: joinPath(cwd, e.name) }, destination: { kind: 'local', path: joinLocalPath(baseDir, e.name) }, entryKind: 'Dir', size: 0 });
     } catch (err) {
       onError(`download folder ${e.name}: ${(err as Error).message}`);
     } finally {
@@ -1701,6 +1682,7 @@
   }
 
   onMount(() => {
+    const unsubscribe = fileService.queue.subscribe(() => { sharedTasks = fileService.queue.tasks.map(t => ({ ...t })); });
     transferProgressTick = window.setInterval(() => {
       if (transfers.some((task) => task.status === 'running')) flushTransfersUi();
     }, 5000);
@@ -1708,14 +1690,16 @@
       await loadSftpSettings();
       await initLocalPane();
     })();
+    return unsubscribe;
   });
 
   onDestroy(() => {
     if (transferProgressTick !== null) window.clearInterval(transferProgressTick);
     sftpSessionRegistry.unregister(registryId);
-    if (sessionId) {
-      void rpc.call('sftp.close', { id: sessionId }).catch(() => {});
-    }
+    destroyed = true;
+    connectSeq++;
+    browserLease?.release();
+    browserLease = null;
   });
 </script>
 
@@ -1730,23 +1714,23 @@
   aria-label={i18n.t('sftp.aria')}
 >
   <div
-    class={mode === 'modal'
+    class="sftp-browser-surface {mode === 'modal'
       ? 'panel w-full max-w-[min(1200px,96vw)] h-full max-h-[720px] flex flex-col overflow-hidden'
-      : 'h-full w-full flex flex-col overflow-hidden bg-[var(--color-panel)]'}
+      : 'h-full w-full flex flex-col overflow-hidden bg-[var(--color-panel)]'}"
   >
     <header class="flex flex-col gap-0.5 px-4 py-2 border-b border-[var(--color-border-soft)]">
       <div class="flex items-center gap-2 min-w-0">
         <div class="text-[var(--color-accent)] font-semibold text-[13px] shrink-0">SFTP</div>
         <div class="min-w-0 flex-1">
-          <div class="text-[12px] text-[var(--color-fg)] truncate">{target?.name ?? i18n.t('sftp.sshSession')}</div>
+          <div class="text-[14px] text-[var(--color-fg)] truncate">{target?.name ?? i18n.t('sftp.sshSession')}</div>
           {#if target}
-            <div class="text-[10.5px] font-mono text-[var(--color-fg-muted)] truncate">{profileEndpointLabel({ name: target.name, kind: 'ssh', ssh: target.ssh } as StoredProfile)}</div>
+            <div class="text-[12px] font-mono text-[var(--color-fg-muted)] truncate">{profileEndpointLabel({ name: target.name, kind: 'ssh', ssh: target.ssh } as StoredProfile)}</div>
           {/if}
         </div>
         {#if mode === 'dock' && showLocalPane}
           <button
             type="button"
-            class="px-2 py-0.5 rounded text-[10.5px] border {localPaneCollapsed ? 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)]' : 'border-[var(--color-accent)] text-[var(--color-accent)]'}"
+            class="px-2 py-0.5 rounded text-[12px] border {localPaneCollapsed ? 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)]' : 'border-[var(--color-accent)] text-[var(--color-accent)]'}"
             onclick={() => { localPaneCollapsed = !localPaneCollapsed; }}
           >
             {i18n.t('sftp.toggleLocalPane')}
@@ -1754,7 +1738,7 @@
         {/if}
         <button
           type="button"
-          class="px-2 py-0.5 rounded text-[10.5px] border {sudoMode ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
+          class="px-2 py-0.5 rounded text-[12px] border {sudoMode ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
           onclick={toggleSudoMode}
           title={i18n.t('sftp.toggleSudo')}
           aria-pressed={sudoMode}
@@ -1793,15 +1777,15 @@
       </div>
       </div>
       {#if mode === 'dock'}
-        <div class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('sftp.independentConnection')}</div>
+        <div class="text-[12px] text-[var(--color-fg-muted)]">{i18n.t('sftp.independentConnection')}</div>
       {/if}
     </header>
 
-    <div class="flex items-center gap-1 px-3 py-1.5 border-b border-[var(--color-border-soft)] text-[12px]">
+    <div class="sftp-path-toolbar flex items-center gap-1 px-3 py-1.5 border-b border-[var(--color-border-soft)] text-[14px]">
       <button type="button" class="toolbtn" onclick={goHome} title={i18n.t('common.home')}><Home size={13} /></button>
       <button type="button" class="toolbtn" onclick={goUp} title={i18n.t('common.up')}><ArrowUp size={13} /></button>
       <button type="button" class="toolbtn" onclick={refresh} title={i18n.t('common.refresh')}><RefreshCw size={13} /></button>
-      <div class="mx-2 flex items-center gap-0.5 flex-wrap text-[11.5px] text-[var(--color-fg-muted)] min-w-0">
+      <div class="sftp-breadcrumbs mx-2 flex items-center gap-0.5 text-[var(--color-fg-muted)] min-w-0" title={cwd}>
         {#each breadcrumbs as bc, i (i)}
           {#if i > 0}<ChevronRight size={11} class="text-[var(--color-border)]" />{/if}
           <button
@@ -1829,9 +1813,9 @@
 
     {#if listError}
       <div class="mx-3 mt-2 px-3 py-2 rounded border border-[var(--color-danger)]/40 bg-[var(--color-danger)]/10
-                  text-[12px] text-[var(--color-fg)] flex items-center gap-2">
-        <span class="min-w-0 truncate">{i18n.t('sftp.listFailed', { message: listError })}</span>
-        <button type="button" class="btn-secondary shrink-0 text-[11px] px-2 py-0.5" onclick={retryRemoteList}>
+                  text-[14px] text-[var(--color-fg)] flex items-center gap-2">
+        <span role="alert" class="min-w-0 break-words">{i18n.t('sftp.listFailed', { message: listError })}</span>
+        <button type="button" class="btn-secondary shrink-0 text-[14px] px-2 py-0.5" onclick={retryRemoteList}>
           {i18n.t('sftp.retryList')}
         </button>
       </div>
@@ -1873,12 +1857,12 @@
         </div>
         <div class="relative flex-1 min-h-0 overflow-y-auto {loading && entries.length > 0 ? 'pointer-events-none opacity-70' : ''}">
           {#if loading && entries.length === 0 && !listError}
-            <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
+            <div class="px-4 py-6 text-[14px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
           {:else if entries.length === 0 && !listError}
-            <div class="px-4 py-6 text-[12px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
+            <div class="px-4 py-6 text-[14px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
           {:else}
-            <table class="w-full text-[12px]">
-              <thead class="sticky top-0 bg-[var(--color-panel)] text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
+            <table class="w-full text-[14px]">
+              <thead class="sticky top-0 bg-[var(--color-panel)] text-[12px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
                 <tr>
                   <th class="text-left px-3 py-1.5 font-normal">{i18n.t('sftp.name')}</th>
                   <th class="text-right px-3 py-1.5 font-normal w-[100px]">{i18n.t('sftp.size')}</th>
@@ -1921,7 +1905,7 @@
                             <FileText size={13} class="text-[var(--color-fg-muted)] shrink-0" />
                           {/if}
                           <input
-                            class="input flex-1 min-w-0 py-0.5 text-[12px] font-mono"
+                            class="input flex-1 min-w-0 py-0.5 text-[14px] font-mono"
                             bind:value={renameDraft}
                             onkeydown={(ev) => {
                               if (ev.key === 'Escape') cancelInlineRename();
@@ -1941,14 +1925,14 @@
                           {:else}
                             <FileText size={13} class="text-[var(--color-fg-muted)]" />
                           {/if}
-                          <span class="truncate text-[var(--color-fg)]">{e.name}</span>
+                          <span class="truncate text-[var(--color-fg)]" title={e.name}>{e.name}</span>
                         </button>
                       {/if}
                     </td>
                     <td class="px-3 py-1 text-right text-[var(--color-fg-muted)]">
                       {e.kind === 'File' ? formatSize(e.size) : ''}
                     </td>
-                    <td class="px-3 py-1 text-[var(--color-fg-muted)] font-mono text-[11px]">
+                    <td class="px-3 py-1 text-[var(--color-fg-muted)] font-mono text-[14px]">
                       {(e.mode & 0o777).toString(8).padStart(3, '0')}
                     </td>
                     <td class="px-2 py-1 text-right whitespace-nowrap">
@@ -2003,9 +1987,9 @@
     </div>
 
     {#if !defaultDownloadDir && !downloadBannerDismissed && showLocalPane}
-      <div class="mx-3 mb-1 px-3 py-2 rounded border border-[var(--color-border-soft)] bg-[var(--color-panel-2)] text-[11px] flex items-center gap-2">
+      <div class="mx-3 mb-1 px-3 py-2 rounded border border-[var(--color-border-soft)] bg-[var(--color-panel-2)] text-[14px] flex items-center gap-2">
         <span class="min-w-0 flex-1">{i18n.t('sftp.downloadDirBanner')}</span>
-        <button type="button" class="btn-secondary text-[11px] px-2 py-0.5 shrink-0" onclick={() => { void chooseDownloadDir(); }}>
+        <button type="button" class="btn-secondary text-[14px] px-2 py-0.5 shrink-0" onclick={() => { void chooseDownloadDir(); }}>
           {i18n.t('sftp.pickDownloadDir')}
         </button>
         <button type="button" class="btn-ghost p-1 shrink-0" aria-label={i18n.t('common.close')} onclick={() => { downloadBannerDismissed = true; }}>
@@ -2014,7 +1998,7 @@
       </div>
     {/if}
 
-    <div class="border-t border-[var(--color-border-soft)] px-3 py-1.5 text-[11px] text-[var(--color-fg-muted)]
+    <div class="border-t border-[var(--color-border-soft)] px-3 py-1.5 text-[14px] text-[var(--color-fg-muted)]
                 flex items-center gap-2 min-h-[28px]">
       <span class="truncate min-w-0" title={lastDownloadPath ?? defaultDownloadDir ?? ''}>
         {#if lastDownloadPath}
@@ -2034,7 +2018,7 @@
       </button>
     </div>
 
-    {#if transfers.length > 0}
+    {#if showLocalPane && sharedTasks.length > 0}
       <button
         type="button"
         aria-label={i18n.t('sftp.resizeTransferPanel')}
@@ -2058,13 +2042,11 @@
         onInvertSelection={invertTransferSelection}
         onClearSelection={clearTransferSelection}
         onRemoveSelected={removeSelectedTransfers}
-        onCancelAll={cancelActiveTransfers}
-        onClearFinished={clearFinishedTransfers}
-        onClearAll={clearAllTransfers}
+        onCancelAll={() => { for (const task of sharedTasks) fileService.queue.cancel(task.id); }}
+        onClearFinished={() => fileService.queue.clearFinished()}
+        onClearAll={() => { for (const task of sharedTasks) fileService.queue.cancel(task.id); fileService.queue.clearFinished(); }}
         onToggleSelect={toggleTransferSelection}
-        onPause={pauseTransfer}
-        onResume={resumeTransfer}
-        onCancel={cancelTransfer}
+        onCancel={id => fileService.queue.cancel(id)}
         onOpenTransferCenter={onOpenTransferCenter}
       />
     {/if}
@@ -2087,6 +2069,8 @@
     ></div>
     <div
       bind:this={remoteMenuEl}
+      use:workspaceMenu={closeRemoteMenu}
+      data-aerotab-context-menu=""
       role="menu"
       tabindex="-1"
       data-aerotab-menu-open=""
@@ -2095,36 +2079,36 @@
       onmousedown={(e) => e.stopPropagation()}
     >
       {#if entry.kind === 'Dir'}
-        <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { void enter(en); })}>
-          {i18n.t('sftp.contextOpen')}
+        <button type="button" class="menu-item" onclick={runRemoteMenuAction((en) => { void enter(en); })}>
+          <Folder size={15} /> {i18n.t('sftp.contextOpen')}
         </button>
       {:else if entry.kind === 'File'}
-        <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { void openTextEditor(en); })}>
-          {i18n.t('sftp.contextEdit')}
+        <button type="button" class="menu-item" onclick={runRemoteMenuAction((en) => { void openTextEditor(en); })}>
+          <FileText size={15} /> {i18n.t('sftp.contextEdit')}
         </button>
       {/if}
       {#if entry.kind === 'File' || entry.kind === 'Dir'}
-        <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { downloadEntry(en); })}>
-          {entry.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('sftp.contextDownload')}
+        <button type="button" class="menu-item" onclick={runRemoteMenuAction((en) => { downloadEntry(en); })}>
+          <Download size={15} /> {entry.kind === 'Dir' ? i18n.t('common.downloadFolder') : i18n.t('sftp.contextDownload')}
         </button>
       {/if}
-      <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { startInlineRename(en); })}>
-        {i18n.t('sftp.contextRename')}
+      <button type="button" class="menu-item" onclick={runRemoteMenuAction((en) => { startInlineRename(en); })}>
+        <Pencil size={15} /> {i18n.t('sftp.contextRename')}
       </button>
       {#if otherSftpSessions.length > 0}
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-        <div class="px-3 py-1 text-[10px] uppercase tracking-wide text-[var(--color-fg-muted)]">
+        <div class="px-3 py-1 text-[12px] uppercase tracking-wide text-[var(--color-fg-muted)]">
           {i18n.t('sftp.sendToSessionTitle')}
         </div>
         {#each otherSftpSessions as dest (dest.registryId)}
-          <button type="button" class="menu-item" onmousedown={runRemoteMenuAction((en) => { void sendEntryToSession(en, dest); })}>
-            {i18n.t('sftp.sendToSession', { label: dest.label })}
+          <button type="button" class="menu-item" onclick={runRemoteMenuAction((en) => { void sendEntryToSession(en, dest); })}>
+            <ExternalLink size={15} /> {i18n.t('sftp.sendToSession', { label: dest.label })}
           </button>
         {/each}
       {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item text-[var(--color-danger)]" onmousedown={runRemoteMenuAction((en) => { const selected = selectedRemoteEntries(); void removeEntries(selected.length > 1 && selected.some((item) => item.name === en.name) ? selected : [en]); })}>
-        {selectedRemoteNames.size > 1 ? i18n.t('sftp.contextDeleteSelected', { count: selectedRemoteNames.size }) : i18n.t('sftp.contextDelete')}
+      <button type="button" class="menu-item text-[var(--color-danger)]" onclick={runRemoteMenuAction((en) => { const selected = selectedRemoteEntries(); void removeEntries(selected.length > 1 && selected.some((item) => item.name === en.name) ? selected : [en]); })}>
+        <Trash2 size={15} /> {selectedRemoteNames.size > 1 ? i18n.t('sftp.contextDeleteSelected', { count: selectedRemoteNames.size }) : i18n.t('sftp.contextDelete')}
       </button>
     </div>
   </div>
@@ -2140,17 +2124,17 @@
         </button>
       </header>
       <textarea
-        class="flex-1 min-h-[320px] m-3 p-2 font-mono text-[12px] bg-[var(--color-bg-soft)] text-[var(--color-fg)] border border-[var(--color-border)] rounded resize-y"
+        class="flex-1 min-h-[320px] m-3 p-2 font-mono text-[14px] bg-[var(--color-bg-soft)] text-[var(--color-fg)] border border-[var(--color-border)] rounded resize-y"
         bind:value={editContent}
         spellcheck="false"
       ></textarea>
       <footer class="flex justify-end gap-2 px-4 py-2 border-t border-[var(--color-border-soft)]">
-        <button type="button" class="btn-secondary text-[12px] px-3 py-1" onclick={() => { editOpen = false; }}>
+        <button type="button" class="btn-secondary text-[14px] px-3 py-1" onclick={() => { editOpen = false; }}>
           {i18n.t('common.cancel')}
         </button>
         <button
           type="button"
-          class="btn-secondary text-[12px] px-3 py-1 text-[var(--color-accent)]"
+          class="btn-secondary text-[14px] px-3 py-1 text-[var(--color-accent)]"
           disabled={editSaving}
           onclick={() => { void saveTextEditor(); }}
         >
@@ -2160,3 +2144,30 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .sftp-browser-surface { background: var(--color-bg-soft); font-size: var(--text-compact, 14px); line-height: 1.5; container-type: inline-size; }
+  .sftp-browser-surface > header { background: var(--color-surface-raised); gap: 6px; }
+  .sftp-browser-surface > header button { min-height: 30px; font-size: var(--text-compact, 14px); }
+  .sftp-path-toolbar { flex-wrap: wrap; gap: 4px; background: var(--color-bg-soft); }
+  .sftp-path-toolbar .toolbtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 5px; }
+  .sftp-breadcrumbs { flex: 1 1 140px; overflow-x: auto; scrollbar-width: thin; padding: 6px 0; font-size: var(--text-compact, 14px); font-family: var(--font-mono); }
+  .sftp-breadcrumbs button { flex-shrink: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sftp-breadcrumbs button:last-child { color: var(--color-fg); font-weight: 500; }
+  .sftp-browser-surface .shell-section-title { display: flex; align-items: center; min-height: 36px; font-weight: 600; font-size: var(--text-compact, 14px); letter-spacing: 0; background: var(--color-surface-raised); }
+  .sftp-browser-surface table { table-layout: fixed; }
+  .sftp-browser-surface th { font-size: var(--text-meta, 12px); font-weight: 500; letter-spacing: 0; }
+  .sftp-browser-surface td { padding-top: 8px; padding-bottom: 8px; }
+  .sftp-browser-surface td:first-child { font-size: var(--text-ui, 16px); }
+  .sftp-browser-surface td:nth-child(2), .sftp-browser-surface td:nth-child(3) { font-size: var(--text-meta, 12px); font-variant-numeric: tabular-nums; }
+  .sftp-browser-surface td:first-child button { min-width: 0; max-width: 100%; }
+  .sftp-browser-surface button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+  .sftp-browser-surface button.toolbtn:hover { background: var(--color-panel-2); }
+  @container (max-width: 580px) {
+    .sftp-breadcrumbs { order: 3; flex-basis: 100%; margin: 0; border-top: 1px solid var(--color-border-soft); }
+    .sftp-browser-surface th:nth-child(3), .sftp-browser-surface td:nth-child(3) { display: none; }
+    .sftp-browser-surface th:nth-child(2) { width: 76px; }
+    .sftp-browser-surface th:last-child { width: 88px; }
+    .sftp-browser-surface td { padding-left: 6px; padding-right: 6px; }
+  }
+</style>

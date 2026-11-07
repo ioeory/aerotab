@@ -32,6 +32,10 @@ pub enum KnownHostsError {
     Io(String),
     #[error("json: {0}")]
     Json(String),
+    #[error("invalid host key: {0}")]
+    Invalid(String),
+    #[error("host pin changed; refresh and explicitly confirm again")]
+    Conflict,
     #[error("host key mismatch for {host}: pinned {pinned_kind} != offered {offered_kind}")]
     Mismatch {
         host: String,
@@ -136,17 +140,58 @@ impl KnownHosts {
                 offered_kind: offered_key_type.to_string(),
             }),
             None => {
-                state.hosts.insert(
+                let mut next = state.clone();
+                next.hosts.insert(
                     host_port.to_string(),
                     PinnedKey {
                         key_b64: offered_key_b64.to_string(),
                         key_type: offered_key_type.to_string(),
                     },
                 );
-                self.save(&state)?;
+                self.save(&next)?;
+                *state = next;
                 Ok(Verdict::Tofu)
             }
         }
+    }
+
+    /// Explicit operator trust: `None` only creates an absent pin; replacement
+    /// requires the exact previously displayed key, preventing stale confirmations.
+    /// Callers must obtain explicit user confirmation before invoking this method.
+    pub fn put(
+        &self,
+        host_port: &str,
+        key: PinnedKey,
+        expected: Option<&PinnedKey>,
+    ) -> Result<(), KnownHostsError> {
+        let (host, port) = host_port
+            .rsplit_once(':')
+            .ok_or_else(|| KnownHostsError::Invalid("expected host:port".into()))?;
+        if host.is_empty()
+            || host_port
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+            || port.parse::<u16>().ok().filter(|p| *p > 0).is_none()
+            || key.key_b64.len() > 16384
+        {
+            return Err(KnownHostsError::Invalid("invalid host or port".into()));
+        }
+        let parsed = russh_keys::parse_public_key_base64(&key.key_b64)
+            .map_err(|_| KnownHostsError::Invalid("invalid SSH public key".into()))?;
+        if parsed.name() != key.key_type {
+            return Err(KnownHostsError::Invalid(
+                "key algorithm does not match blob".into(),
+            ));
+        }
+        let mut state = self.inner.state.lock().unwrap();
+        if state.hosts.get(host_port) != expected {
+            return Err(KnownHostsError::Conflict);
+        }
+        let mut next = state.clone();
+        next.hosts.insert(host_port.to_string(), key);
+        self.save(&next)?;
+        *state = next;
+        Ok(())
     }
 
     /// Returns every pinned entry as `(host, key)` pairs.
@@ -162,9 +207,11 @@ impl KnownHosts {
     /// Removes a single host pin. Returns true if something was removed.
     pub fn remove(&self, host_port: &str) -> Result<bool, KnownHostsError> {
         let mut state = self.inner.state.lock().unwrap();
-        let removed = state.hosts.remove(host_port).is_some();
+        let mut next = state.clone();
+        let removed = next.hosts.remove(host_port).is_some();
         if removed {
-            self.save(&state)?;
+            self.save(&next)?;
+            *state = next;
         }
         Ok(removed)
     }
@@ -179,6 +226,56 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("tabby-kh-{}", Uuid::new_v4()));
         p
+    }
+
+    #[test]
+    fn put_requires_valid_key_and_compare_and_swap() {
+        let dir = tmp();
+        let kh = KnownHosts::open(&dir).unwrap();
+        let key = PinnedKey {
+            key_type: "ssh-ed25519".into(),
+            key_b64: "AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        };
+        assert!(kh.put("h:22", key.clone(), None).is_ok());
+        assert!(kh.put("h:22", key.clone(), None).is_err());
+        let bad = PinnedKey {
+            key_b64: "invalid".into(),
+            ..key.clone()
+        };
+        assert!(kh.put("other:22", bad, None).is_err());
+        let wrong_algorithm = PinnedKey {
+            key_type: "ssh-rsa".into(),
+            ..key.clone()
+        };
+        assert!(kh.put("other:22", wrong_algorithm, None).is_err());
+        assert!(kh.put("h:0", key.clone(), None).is_err());
+        assert!(kh.put("h:22", key.clone(), Some(&key)).is_ok());
+        let stale = PinnedKey {
+            key_b64: "different".into(),
+            ..key.clone()
+        };
+        assert!(matches!(
+            kh.put("h:22", key.clone(), Some(&stale)),
+            Err(KnownHostsError::Conflict)
+        ));
+        std::fs::create_dir(dir.join("known_hosts.json.tmp")).unwrap();
+        assert!(kh.put("other:22", key, None).is_err());
+        assert_eq!(kh.list().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_writes_do_not_change_memory_or_disk() {
+        let dir = tmp();
+        let kh = KnownHosts::open(&dir).unwrap();
+        kh.verify("a:22", "AAA", "ssh-ed25519").unwrap();
+        std::fs::create_dir(dir.join("known_hosts.json.tmp")).unwrap();
+        assert!(kh.remove("a:22").is_err());
+        assert_eq!(kh.list().len(), 1);
+        assert!(kh.verify("b:22", "BBB", "ssh-ed25519").is_err());
+        assert_eq!(kh.list().len(), 1);
+        assert_eq!(KnownHosts::open(&dir).unwrap().list().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

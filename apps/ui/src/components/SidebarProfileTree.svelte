@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import { ChevronDown, ChevronRight } from '@lucide/svelte';
   import type { ProfileHealthResult, StoredProfile } from '../lib/types';
-  import type { ProfileTreeFolder } from '../lib/profileTree';
+  import { collectProfilesInFolder, type ProfileTreeFolder } from '../lib/profileTree';
   import { groupStyle } from '../lib/profileVisuals';
   import { profileVisualsStore } from '../lib/profileVisualsStore.svelte';
   import { i18n } from '../lib/i18n.svelte';
@@ -161,7 +161,7 @@
           <input
             bind:this={groupRenameInputEl}
             type="text"
-            class="profile-inline-rename input flex-1 min-w-0 text-[11px] font-medium"
+            class="profile-inline-rename input flex-1 min-w-0 text-[14px] font-medium"
             value={inlineEditGroupDraft}
             onclick={(ev) => ev.stopPropagation()}
             oninput={(ev) => onInlineGroupDraftChange?.((ev.currentTarget as HTMLInputElement).value)}
@@ -172,7 +172,7 @@
         {:else}
           <button
             type="button"
-            class="profile-group-header flex-1 min-w-0 text-left truncate text-[11px] font-medium text-[var(--color-fg)] cursor-pointer"
+            class="profile-group-header flex-1 min-w-0 text-left truncate text-[14px] font-medium text-[var(--color-fg)] cursor-pointer"
             onclick={() => onToggleFolder(child.path)}
             ondblclick={(ev) => {
               ev.stopPropagation();
@@ -183,8 +183,8 @@
           </button>
         {/if}
       </div>
-      <span class="ml-auto shrink-0 text-[10px] opacity-70 pr-0.5">
-        {child.profiles.length + child.folders.length}
+      <span class="ml-auto shrink-0 text-[12px] opacity-70 pr-0.5">
+        {collectProfilesInFolder(child).length}
       </span>
     </div>
     {#if expanded}
@@ -229,7 +229,7 @@
 {/each}
 
 {#if showUngroupedLabel && folder.profiles.length > 0}
-  <div class="px-1 pt-2 pb-0.5 text-[10px] uppercase tracking-[0.1em] text-[var(--color-fg-muted)]">
+  <div class="px-1 pt-2 pb-0.5 text-[12px] uppercase tracking-[0.1em] text-[var(--color-fg-muted)]">
     {i18n.t('sidebar.ungrouped')}
   </div>
 {/if}
@@ -279,6 +279,6 @@
   }
   .profile-inline-rename {
     padding: 1px 4px;
-    height: 20px;
+    min-height: 32px;
   }
 </style>

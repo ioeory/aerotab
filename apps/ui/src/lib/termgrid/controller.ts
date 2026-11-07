@@ -517,7 +517,7 @@ export class NativeTerminalController {
     const dpr = window.devicePixelRatio || 1;
     this.spec = {
       family: this.opts.fontFamily ?? 'JetBrains Mono, Menlo, monospace',
-      size: this.opts.fontSize ?? 13,
+      size: this.opts.fontSize ?? 15,
       weight: this.opts.fontWeight ?? 400,
       weightBold: this.opts.fontWeightBold ?? 700,
       linePadding: this.opts.linePadding ?? 0,

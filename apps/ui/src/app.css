@@ -2,20 +2,32 @@
 @import "@xterm/xterm/css/xterm.css";
 
 @theme {
-  --color-bg: #0b0d12;
-  --color-panel: #13161d;
-  --color-panel-2: #1a1e27;
-  --color-bg-soft: #10131b;
-  --color-surface-raised: #171b25;
-  --color-border: #2a2f3b;
-  --color-border-soft: #1f2330;
-  --color-fg: #e6e9ef;
-  --color-fg-muted: #8b93a7;
-  --color-accent: #7aa2f7;
-  --color-accent-soft: #7aa2f733;
-  --color-success: #9ece6a;
-  --color-danger: #f7768e;
-  --color-warning: #e0af68;
+  --color-bg: #17191c;
+  --color-panel: #1d2024;
+  --color-panel-2: #272b30;
+  --color-bg-soft: #1a1d20;
+  --color-surface-raised: #2b3036;
+  --color-border: #49515c;
+  --color-border-soft: #373d46;
+  --color-fg: #f0f1f3;
+  --color-fg-muted: #b5bcc6;
+  --color-fg-subtle: #b5bcc6;
+  --color-accent: #a9bdf0;
+  --color-accent-fg: #17191c;
+  --color-accent-text: #a9bdf0;
+  --color-accent-soft: #333947;
+  --color-surface-hover: #2e3135;
+  --color-surface-selected: #363c49;
+  --color-surface-disabled: #272b30;
+  --color-fg-disabled: #b5bcc6;
+  --color-focus-ring: #a9bdf0;
+  --color-success: #a4d7ad;
+  --color-danger: #f2a3ab;
+  --color-danger-soft: #372f34;
+  --color-warning: #e9c386;
+  --color-info: #a5c2ff;
+  --color-scrollbar-thumb: #49515c;
+  --color-scrollbar-hover: #b5bcc6;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -26,8 +38,15 @@
   --radius-md: 6px;
   --radius-lg: 10px;
 
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-sans: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "Menlo", monospace;
+  --text-ui: 1rem;
+  --text-compact: 0.875rem;
+  --text-meta: 0.75rem;
+  --text-heading: 1.625rem;
+  --text-section: 1.25rem;
+  --leading-ui: 1.5;
+  --leading-help: 1.6;
 }
 
 :root {
@@ -43,9 +62,9 @@
   --ui-opacity: 1;
   --ui-bg-opacity-percent: 100%;
   --ui-spaciness: 1;
-  --shadow-panel: 0 8px 32px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 18px 60px rgba(0, 0, 0, 0.5);
-  --ring-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+  --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.16);
+  --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.24);
+  --ring-focus: 0 0 0 2px var(--color-panel), 0 0 0 4px var(--color-focus-ring);
 }
 
 html, body, #root {
@@ -53,7 +72,7 @@ html, body, #root {
   margin: 0;
   color: var(--color-fg);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 16px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -122,7 +141,7 @@ body[data-translucent="true"] .bg-\[var\(--color-panel-2\)\] {
 /* Tabs location — default is "top". Other positions reorder the flex
  * children of the <main> container. Left/right are not yet rebuilt since
  * the tab bar is horizontal; they fall back to top with a note in UI. */
-body[data-tabs-location="bottom"] main { flex-direction: column-reverse; }
+body[data-tabs-location="bottom"] .session-workspace { flex-direction: column-reverse; }
 
 /* Frame style hint — used by the optional custom titlebar (M6 backend). */
 body[data-frame-style="frameless"] { /* reserved for custom titlebar */ }
@@ -164,8 +183,8 @@ body[data-translucent="true"] .xterm canvas {
 /* Native scrollbars: thin, theme-aware */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #2a2f3b; border-radius: 8px; }
-::-webkit-scrollbar-thumb:hover { background: #3a4050; }
+::-webkit-scrollbar-thumb { background: var(--color-scrollbar-thumb); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-scrollbar-hover); }
 
 /* Dialogs (Svelte <dialog>) */
 dialog {
@@ -191,41 +210,49 @@ dialog.app-confirm-dialog--anchored {
 .btn-danger {
   padding: 6px 14px;
   border-radius: var(--radius-md);
-  font-size: 12.5px;
+  font-size: var(--text-compact);
   font-weight: 500;
   cursor: pointer;
-  border: 1px solid color-mix(in srgb, var(--color-danger) 50%, transparent);
-  background: color-mix(in srgb, var(--color-danger) 18%, transparent);
+  border: 1px solid var(--color-danger);
+  background: var(--color-danger-soft);
   color: var(--color-danger);
   transition: background-color 180ms ease, border-color 180ms ease;
 }
 .btn-danger:hover:not([disabled]) {
-  background: color-mix(in srgb, var(--color-danger) 30%, transparent);
-  border-color: color-mix(in srgb, var(--color-danger) 65%, transparent);
+  background: color-mix(in srgb, var(--color-danger) 20%, var(--color-panel));
+  border-color: var(--color-danger);
 }
 .btn-danger:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-danger) 55%, transparent);
+  outline: 2px solid var(--color-danger);
   outline-offset: 2px;
 }
 
-/* Shared settings-section primitives (used by every settings/sections/*.svelte). */
-.settings-section { display: flex; flex-direction: column; gap: 18px; }
+/* Shared settings primitives are scoped: never style terminal grid descendants. */
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
+  overflow-wrap: anywhere;
+}
 .settings-section h2 {
-  font-size: 16px;
+  font-size: var(--text-section);
   font-weight: 600;
   color: var(--color-fg);
   margin: 0 0 4px 0;
 }
 .settings-section .section-h {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  font-size: var(--text-compact);
+  font-weight: 600;
+  letter-spacing: 0.025em;
   color: var(--color-fg-muted);
   margin: 14px 0 6px;
 }
 .settings-section .lbl {
   display: block;
-  font-size: 11px;
+  font-size: var(--text-ui);
   color: var(--color-fg-muted);
   margin-top: 8px;
   margin-bottom: 4px;
@@ -237,16 +264,21 @@ dialog.app-confirm-dialog--anchored {
   color: var(--color-fg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  padding: 8px 12px;
+  min-height: 40px;
   font: inherit;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
   outline: none;
 }
 .settings-section .input:focus,
 .settings-section .select:focus { border-color: var(--color-accent); }
 .settings-section .help {
-  font-size: 10.5px;
+  font-size: var(--text-compact);
   color: var(--color-fg-muted);
-  margin-top: 4px;
+  line-height: var(--leading-help);
+  margin-top: 6px;
+  max-width: 72ch;
 }
 .settings-section .row {
   display: flex;
@@ -256,14 +288,18 @@ dialog.app-confirm-dialog--anchored {
 }
 .settings-section .btn-primary {
   background: var(--color-accent);
-  color: var(--color-bg);
+  color: var(--color-accent-fg);
   border: none;
   padding: 6px 14px;
   border-radius: var(--radius-sm);
   font-weight: 600;
   cursor: pointer;
 }
-.settings-section .btn-primary[disabled] { opacity: 0.5; cursor: not-allowed; }
+.settings-section .btn-primary[disabled] {
+  color: var(--color-fg-disabled);
+  background: var(--color-surface-disabled);
+  cursor: not-allowed;
+}
 .settings-section .btn-secondary {
   background: var(--color-panel-2);
   color: var(--color-fg);
@@ -278,7 +314,7 @@ dialog.app-confirm-dialog--anchored {
   padding: 24px;
   text-align: center;
   color: var(--color-fg-muted);
-  font-size: 12px;
+  font-size: var(--text-compact);
 }
 
 /* Visual bell flash for terminal panes. */
@@ -311,8 +347,9 @@ dialog.app-confirm-dialog--anchored {
   border-radius: var(--radius-sm);
   font: inherit;
   font-weight: 600;
-  font-size: 12px;
-  line-height: 1.2;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
+  min-height: 40px;
   cursor: pointer;
   transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease, opacity 180ms ease;
 }
@@ -323,15 +360,17 @@ dialog.app-confirm-dialog--anchored {
   box-shadow: var(--ring-focus);
 }
 .btn[disabled],
-.settings-section .btn-primary[disabled] {
-  opacity: 0.5;
+.settings-section :is(.btn-primary, .btn-secondary)[disabled] {
+  color: var(--color-fg-disabled);
+  background: var(--color-surface-disabled);
+  border-color: var(--color-border-soft);
   cursor: not-allowed;
 }
 
 .btn-primary,
 .settings-section .btn-primary {
   background: var(--color-accent);
-  color: var(--color-bg);
+  color: var(--color-accent-fg);
   border: 1px solid transparent;
 }
 .btn-primary:hover:not([disabled]),
@@ -369,8 +408,11 @@ dialog.app-confirm-dialog--anchored {
   color: var(--color-fg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  padding: 8px 12px;
+  min-height: 40px;
   font: inherit;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
   outline: none;
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
@@ -418,7 +460,7 @@ dialog.app-confirm-dialog--anchored {
   display: inline-block;
   padding: 1px 5px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-meta);
   line-height: 1.4;
   color: var(--color-fg-muted);
   background: var(--color-bg);
@@ -428,10 +470,13 @@ dialog.app-confirm-dialog--anchored {
 
 .shell-nav-item {
   display: block;
+  min-height: 44px;
+  font-family: var(--font-sans);
+  line-height: var(--leading-ui);
   width: 100%;
   text-align: left;
-  padding: 6px 14px;
-  font-size: 12px;
+  padding: 8px 14px;
+  font-size: var(--text-ui);
   color: var(--color-fg);
   background: transparent;
   border: none;
@@ -440,22 +485,22 @@ dialog.app-confirm-dialog--anchored {
   transition: background-color 180ms ease, color 180ms ease;
 }
 .shell-nav-item:hover {
-  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  background: var(--color-surface-hover);
 }
 .shell-nav-item:focus-visible {
   outline: none;
   box-shadow: var(--ring-focus);
 }
 .shell-nav-item.active {
-  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
-  color: var(--color-accent);
+  background: var(--color-surface-selected);
+  color: var(--color-accent-text);
   font-weight: 600;
 }
 
 .shell-section-title {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  font-size: var(--text-compact);
+  font-weight: 600;
+  letter-spacing: 0.025em;
   color: var(--color-fg-muted);
 }
 
@@ -470,6 +515,8 @@ dialog.app-confirm-dialog--anchored {
 .menu-item,
 .ctx-item {
   display: block;
+  min-height: 36px;
+  line-height: var(--leading-ui);
   width: 100%;
   text-align: left;
   padding: 6px 12px;
@@ -478,13 +525,13 @@ dialog.app-confirm-dialog--anchored {
   border: none;
   cursor: pointer;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--text-compact);
   transition: background-color 180ms ease, color 180ms ease;
 }
 .menu-item:hover,
 .ctx-item:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-2));
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 .menu-item--shortcut {
   display: flex;
@@ -494,12 +541,12 @@ dialog.app-confirm-dialog--anchored {
 }
 .menu-item--shortcut .kbd {
   flex-shrink: 0;
-  font-size: 10px;
-  opacity: 0.75;
+  font-size: var(--text-meta);
 }
-.ctx-item:disabled {
-  opacity: 0.45;
-  cursor: default;
+.ctx-item:disabled,
+.menu-item:disabled {
+  color: var(--color-fg-disabled);
+  cursor: not-allowed;
 }
 
 .tab-shell {
@@ -533,6 +580,27 @@ dialog.app-confirm-dialog--anchored {
   box-shadow: var(--ring-focus);
 }
 
+/* Opt-in typography roles. Terminal surfaces intentionally do not use these. */
+.ui-page-title { margin: 0; font-size: var(--text-heading); line-height: 1.3; font-weight: 600; }
+.ui-section-title { margin: 0; font-size: var(--text-section); line-height: 1.4; font-weight: 600; }
+.ui-body { font-family: var(--font-sans); font-size: var(--text-ui); line-height: var(--leading-ui); }
+.ui-compact { font-family: var(--font-sans); font-size: var(--text-compact); line-height: var(--leading-ui); }
+.ui-metadata { font-size: var(--text-meta); line-height: var(--leading-ui); color: var(--color-fg-muted); }
+.ui-help { font-size: var(--text-compact); line-height: var(--leading-help); color: var(--color-fg-muted); overflow-wrap: anywhere; }
+
+.settings-section :is(button, input, select, textarea) { font-family: var(--font-sans); }
+.settings-section :is(.btn-primary, .btn-secondary, .input, .select):focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.settings-section .row { flex-wrap: wrap; row-gap: 10px; }
+.settings-section .row > :is(input:not([type="checkbox"]):not([type="radio"]), select) { min-width: 0; }
+.settings-section :is(.input, .select):disabled {
+  color: var(--color-fg-disabled);
+  background: var(--color-surface-disabled);
+  cursor: not-allowed;
+}
+
 /* Profile visuals — tags, kind badges, group headers, icon picker */
 .profile-tag {
   display: inline-flex;
@@ -545,14 +613,14 @@ dialog.app-confirm-dialog--anchored {
   border: 1px solid var(--profile-tone-border, var(--color-border-soft));
   background: var(--profile-tone-bg, var(--color-panel-2));
   color: var(--profile-tone-fg, var(--color-fg-muted));
-  font-size: 9.5px;
+  font-size: var(--text-meta);
   line-height: 1.35;
   padding: 1px 6px;
   font-weight: 500;
 }
 .profile-tag--compact {
   max-width: 64px;
-  font-size: 9px;
+  font-size: var(--text-meta);
   padding: 0 5px;
 }
 
@@ -564,7 +632,7 @@ dialog.app-confirm-dialog--anchored {
   border: 1px solid var(--profile-tone-border, var(--color-border-soft));
   background: var(--profile-tone-bg, var(--color-panel-2));
   color: var(--profile-tone-fg, var(--color-fg-muted));
-  font-size: 8.5px;
+  font-size: var(--text-meta);
   font-weight: 700;
   letter-spacing: 0.06em;
   line-height: 1.2;
@@ -572,7 +640,7 @@ dialog.app-confirm-dialog--anchored {
   font-family: var(--font-mono);
 }
 .profile-kind-badge--compact {
-  font-size: 8px;
+  font-size: var(--text-meta);
   padding: 0 3px;
 }
 
@@ -611,7 +679,7 @@ dialog.app-confirm-dialog--anchored {
   border: 1px solid var(--color-border-soft);
   background: var(--color-panel-2);
   color: var(--color-fg-muted);
-  font-size: 9px;
+  font-size: var(--text-meta);
   line-height: 1.1;
   text-transform: lowercase;
   cursor: pointer;

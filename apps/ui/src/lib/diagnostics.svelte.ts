@@ -34,7 +34,7 @@ function safeRandomId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function sanitizeMessage(value: unknown): string {
+export function sanitizeMessage(value: unknown): string {
   const text = value instanceof Error ? value.message : String(value ?? '');
   return text
     .replace(/(password|passphrase|secret|token|private[_ -]?key)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
@@ -134,8 +134,8 @@ export function categoryForRpcMethod(method: string): DiagnosticCategory {
   return 'app';
 }
 
-export function categoryForStatus(message: string): DiagnosticCategory {
-  const text = message.toLowerCase();
+export function categoryForStatus(message: unknown): DiagnosticCategory {
+  const text = sanitizeMessage(message).toLowerCase();
   if (text.includes('sync')) return 'sync';
   if (text.includes('sftp') || text.includes('transfer') || text.includes('upload') || text.includes('download')) return 'transfer';
   if (text.includes('profile') || text.includes('connect') || text.includes('ssh')) return 'connection';

@@ -184,6 +184,10 @@ pub struct AppState {
     pub known_hosts: Mutex<Option<KnownHosts>>,
     /// Persistent connection-profile store. Configured via `profile.configure`.
     pub profiles: Mutex<Option<ProfileStore>>,
+    pub notes: Mutex<Option<crate::notes::NotesStore>>,
+    pub scripts: Mutex<Option<Arc<crate::scripts::ScriptsService>>>,
+    pub network_resources: Mutex<Option<crate::network_resources::NetworkResourceStore>>,
+    pub forwarding: crate::network_resources::ForwardingRuntime,
     /// Most recently configured Git sync backend; retained so the engine
     /// can call `fetch_remote` / `push_remote` outside the abstract
     /// SyncBackend trait.
@@ -748,6 +752,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
     register_secret(dispatcher, state.clone());
     register_profiles(dispatcher, state.clone());
+    register_resources(dispatcher, state.clone());
     register_known_hosts(dispatcher, state.clone());
     register_ssh_stats(dispatcher, state.clone());
     register_sftp(dispatcher, state.clone());
@@ -933,6 +938,140 @@ async fn require_profiles(state: &AppState) -> Result<ProfileStore, RpcError> {
         .ok_or_else(|| RpcError::new(ErrorCode::InvalidParams, "profile store not configured"))
 }
 
+fn register_resources(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    for method in [
+        "notes.list",
+        "notes.put",
+        "notes.delete",
+        "notes.deleteImpact",
+        "notes.putFolder",
+    ] {
+        let st = state.clone();
+        dispatcher.register(method, move |params| {
+            let st = st.clone();
+            async move {
+                let store = st
+                    .notes
+                    .lock()
+                    .await
+                    .clone()
+                    .ok_or_else(|| internal("notes store not configured"))?;
+                let ids = require_profiles(&st)
+                    .await?
+                    .list()
+                    .await
+                    .map_err(|e| internal(e.to_string()))?
+                    .into_iter()
+                    .map(|p| p.id.to_string())
+                    .collect::<Vec<_>>();
+                crate::notes::dispatch(&store, method, params, &ids).map_err(invalid_params)
+            }
+        });
+    }
+    for method in [
+        "scripts.list",
+        "scripts.get",
+        "scripts.put",
+        "scripts.delete",
+        "scripts.prepare",
+        "scripts.run",
+        "scripts.tasks",
+        "scripts.status",
+        "scripts.cancel",
+    ] {
+        let st = state.clone();
+        dispatcher.register(method, move |params| {
+            let st = st.clone();
+            async move {
+                let service = st
+                    .scripts
+                    .lock()
+                    .await
+                    .clone()
+                    .ok_or_else(|| internal("scripts store not configured"))?;
+                let resolve = |id: String| {
+                    let st = st.clone();
+                    async move {
+                        let id =
+                            Uuid::parse_str(&id).map_err(|_| "invalid profile id".to_string())?;
+                        let profile = resolve_ssh_profile(&st, id).await.map_err(|e| e.message)?;
+                        let known_hosts = st
+                            .known_hosts
+                            .lock()
+                            .await
+                            .clone()
+                            .ok_or_else(|| "SSH trust store not configured".to_string())?;
+                        Ok(crate::scripts::ResolvedTarget {
+                            profile,
+                            known_hosts,
+                            transport: load_ssh_transport_settings(&st).await,
+                        })
+                    }
+                };
+                service
+                    .dispatch(method, params, &resolve)
+                    .await
+                    .map_err(invalid_params)
+            }
+        });
+    }
+    for method in [
+        "proxy.list",
+        "proxy.save",
+        "proxy.delete",
+        "forwarding.list",
+        "forwarding.save",
+        "forwarding.delete",
+        "forwarding.start",
+        "forwarding.stop",
+        "forwarding.running",
+    ] {
+        let st = state.clone();
+        dispatcher.register(method, move |params: Value| {
+            let st = st.clone();
+            async move {
+                let store = st.network_resources.lock().await.clone().ok_or_else(|| internal("network resource store not configured"))?;
+                let id = || -> Result<Uuid, RpcError> { serde_json::from_value(params.get("id").cloned().unwrap_or(Value::Null)).map_err(|e| invalid_params(e.to_string())) };
+                match method {
+                    "proxy.list" => serde_json::to_value(store.list_proxies().map_err(|e| internal(e.to_string()))?).map_err(|e| internal(e.to_string())),
+                    "forwarding.list" => serde_json::to_value(store.list_rules().map_err(|e| internal(e.to_string()))?).map_err(|e| internal(e.to_string())),
+                    "proxy.save" => {
+                        let resource: crate::network_resources::ProxyResource = serde_json::from_value(params.get("resource").cloned().unwrap_or(Value::Null)).map_err(|e| invalid_params(e.to_string()))?;
+                        if let crate::network_resources::ProxyConfig::SshJump { profile_id } = resource.config { resolve_ssh_profile(&st, profile_id).await?; }
+                        store.save_proxy(resource).map_err(|e| invalid_params(e.to_string()))?;
+                        Ok(Value::Null)
+                    }
+                    "proxy.delete" => {
+                        let id = id()?;
+                        let profiles = require_profiles(&st).await?.list().await.map_err(|e| internal(e.to_string()))?;
+                        let deps = profiles.iter().filter(|p| matches!(&p.spec, ProfileKind::Ssh { ssh } if ssh.proxy_id == Some(id))).map(|p| p.name.clone()).collect::<Vec<_>>();
+                        Ok(json!({"removed": store.delete_proxy(id, &deps).map_err(|e| invalid_params(e.to_string()))?}))
+                    }
+                    "forwarding.save" => {
+                        let rule: crate::network_resources::ForwardingRule = serde_json::from_value(params.get("rule").cloned().unwrap_or(Value::Null)).map_err(|e| invalid_params(e.to_string()))?;
+                        resolve_ssh_profile(&st, rule.profile_id).await?;
+                        store.save_rule(rule).map_err(|e| invalid_params(e.to_string()))?;
+                        Ok(Value::Null)
+                    }
+                    "forwarding.delete" => {
+                        let id = id()?;
+                        Ok(json!({"removed": store.delete_rule(id, &st.forwarding.dependents(id).await).map_err(|e| invalid_params(e.to_string()))?}))
+                    }
+                    "forwarding.start" => {
+                        let rule = store.get_rule(id()?).map_err(|e| internal(e.to_string()))?.ok_or_else(|| invalid_params("forwarding rule not found"))?;
+                        let profile = resolve_ssh_profile(&st, rule.profile_id).await?;
+                        let kh = st.known_hosts.lock().await.clone();
+                        serde_json::to_value(st.forwarding.start(&rule, profile, &st.tunnels, kh).await.map_err(|e| internal(e.to_string()))?).map_err(|e| internal(e.to_string()))
+                    }
+                    "forwarding.stop" => Ok(json!({"stopped": st.forwarding.stop(id()?, &st.tunnels).await})),
+                    "forwarding.running" => serde_json::to_value(st.forwarding.running(&st.tunnels).await).map_err(|e| internal(e.to_string())),
+                    _ => unreachable!(),
+                }
+            }
+        });
+    }
+}
+
 fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
     #[derive(Debug, Deserialize)]
     struct ConfigureParams {
@@ -958,6 +1097,18 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: ConfigureParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = ProfileStore::open(&p.path).map_err(|e| internal(e.to_string()))?;
+                let dir = std::path::Path::new(&p.path)
+                    .parent()
+                    .ok_or_else(|| invalid_params("invalid profile path"))?;
+                *st.notes.lock().await =
+                    Some(crate::notes::NotesStore::open(dir.join("notes")).map_err(internal)?);
+                *st.scripts.lock().await = Some(Arc::new(crate::scripts::ScriptsService::new(
+                    crate::scripts::ScriptsStore::open(dir.join("scripts")).map_err(internal)?,
+                )));
+                *st.network_resources.lock().await = Some(
+                    crate::network_resources::NetworkResourceStore::open(dir)
+                        .map_err(|e| internal(e.to_string()))?,
+                );
                 *st.profiles.lock().await = Some(store);
                 Ok(Value::Null)
             }
@@ -998,6 +1149,23 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let profile: Profile =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_profiles(&st).await?;
+                if let ProfileKind::Ssh { ssh } = &profile.spec {
+                    if let Some(id) = ssh.proxy_id {
+                        let network = st
+                            .network_resources
+                            .lock()
+                            .await
+                            .clone()
+                            .ok_or_else(|| internal("proxy store not configured"))?;
+                        if network
+                            .get_proxy(id)
+                            .map_err(|e| internal(e.to_string()))?
+                            .is_none()
+                        {
+                            return Err(invalid_params("proxy resource not found"));
+                        }
+                    }
+                }
                 store
                     .upsert(profile)
                     .await
@@ -1014,6 +1182,35 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: IdParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_profiles(&st).await?;
+                let mut dependencies = Vec::new();
+                if let Some(notes) = st.notes.lock().await.clone() {
+                    dependencies.extend(
+                        notes
+                            .profile_references(&p.id.to_string())
+                            .map_err(internal)?,
+                    );
+                }
+                if let Some(scripts) = st.scripts.lock().await.clone() {
+                    dependencies.extend(
+                        scripts
+                            .store
+                            .references(&p.id.to_string())
+                            .map_err(internal)?,
+                    );
+                }
+                if let Some(network) = st.network_resources.lock().await.clone() {
+                    dependencies.extend(
+                        network
+                            .profile_dependents(p.id)
+                            .map_err(|e| internal(e.to_string()))?,
+                    );
+                }
+                if !dependencies.is_empty() {
+                    return Err(invalid_params(format!(
+                        "profile is referenced by: {}",
+                        dependencies.join(", ")
+                    )));
+                }
                 let removed = store
                     .delete(p.id)
                     .await
@@ -1251,7 +1448,10 @@ fn register_known_hosts(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
 #[derive(Debug, Deserialize)]
 struct HostStatsParams {
-    profile: SshProfile,
+    #[serde(default)]
+    profile: Option<SshProfile>,
+    #[serde(default)]
+    profile_id: Option<Uuid>,
 }
 
 fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
@@ -1261,7 +1461,11 @@ fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
         async move {
             let p: HostStatsParams =
                 serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-            let profile = materialize_ssh_profile(&st, p.profile).await?;
+            let profile = match (p.profile_id, p.profile) {
+                (Some(id), _) => resolve_ssh_profile(&st, id).await?,
+                (None, Some(profile)) => materialize_ssh_profile(&st, profile).await?,
+                _ => return Err(invalid_params("profile_id or profile required")),
+            };
             let kh = st.known_hosts.lock().await.clone();
             let stats = ssh::stats::probe_host_stats(&profile, kh)
                 .await
@@ -1275,7 +1479,10 @@ fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
 #[derive(Debug, Deserialize)]
 struct SftpOpenParams {
-    profile: SshProfile,
+    #[serde(default)]
+    profile: Option<SshProfile>,
+    #[serde(default)]
+    profile_id: Option<Uuid>,
     #[serde(default)]
     sudo: bool,
 }
@@ -1784,7 +1991,11 @@ fn register_sftp(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: SftpOpenParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let profile = materialize_ssh_profile(&st, p.profile).await?;
+                let profile = match (p.profile_id, p.profile) {
+                    (Some(id), _) => resolve_ssh_profile(&st, id).await?,
+                    (None, Some(profile)) => materialize_ssh_profile(&st, profile).await?,
+                    _ => return Err(invalid_params("profile_id or profile required")),
+                };
                 let kh = st.known_hosts.lock().await.clone();
                 let transport = load_ssh_transport_settings(&st).await;
                 let sftp = Sftp::open_with_options(
@@ -2404,7 +2615,70 @@ async fn materialize_ssh_profile(
     st: &AppState,
     mut ssh: SshProfile,
 ) -> Result<SshProfile, RpcError> {
+    let profiles = match st.profiles.lock().await.clone() {
+        Some(store) => store.list().await.map_err(|e| internal(e.to_string()))?,
+        None => vec![],
+    };
+    let network = st.network_resources.lock().await.clone();
     let vault = st.vault.lock().await.clone();
+    fn attach(
+        ssh: &mut SshProfile,
+        profiles: &[Profile],
+        network: Option<&crate::network_resources::NetworkResourceStore>,
+        vault: &Option<crate::vault::VaultStore>,
+        path: &mut Vec<Uuid>,
+    ) -> Result<(), RpcError> {
+        if path.len() > 32 {
+            return Err(invalid_params("proxy chain exceeds 32 levels"));
+        }
+        if let Some(id) = ssh.proxy_id {
+            if path.contains(&id) {
+                return Err(invalid_params("proxy cycle"));
+            }
+            let proxy = network
+                .ok_or_else(|| internal("proxy store not configured"))?
+                .get_proxy(id)
+                .map_err(|e| internal(e.to_string()))?
+                .ok_or_else(|| invalid_params("proxy resource not found"))?;
+            path.push(id);
+            match proxy.config {
+                crate::network_resources::ProxyConfig::SshJump { profile_id } => {
+                    let p = profiles
+                        .iter()
+                        .find(|p| p.id == profile_id)
+                        .ok_or_else(|| invalid_params("proxy SSH profile not found"))?;
+                    let ProfileKind::Ssh { ssh: hop } = &p.spec else {
+                        return Err(invalid_params("proxy target is not SSH"));
+                    };
+                    let mut hop =
+                        crate::profile::resolve_jump_references(hop, profiles, &mut vec![])
+                            .map_err(|e| invalid_params(e.to_string()))?;
+                    attach(&mut hop, profiles, network, vault, path)?;
+                    if !ssh.jump_profile_ids.is_empty() || !ssh.jump_via.is_empty() {
+                        return Err(invalid_params(
+                            "SSH proxy and jump chain cannot be combined",
+                        ));
+                    }
+                    ssh.jump_via.push(hop);
+                }
+                _ => {
+                    ssh.resolved_proxy = Some(Arc::new(crate::proxy_transport::ResolvedProxy {
+                        resource: proxy,
+                        vault: vault.clone(),
+                    }))
+                }
+            }
+            path.pop();
+            ssh.proxy_id = None;
+        }
+        for hop in &mut ssh.jump_via {
+            attach(hop, profiles, network, vault, path)?;
+        }
+        Ok(())
+    }
+    ssh = crate::profile::resolve_jump_references(&ssh, &profiles, &mut vec![])
+        .map_err(|e| invalid_params(e.to_string()))?;
+    attach(&mut ssh, &profiles, network.as_ref(), &vault, &mut vec![])?;
     ssh::vault_resolve::resolve_profile_vault_auth(vault.as_ref(), &mut ssh)
         .await
         .map_err(|e| internal(e.to_string()))?;
@@ -3796,6 +4070,24 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: P =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_vault(&st).await?;
+                if let Some(profiles) = st.profiles.lock().await.clone() {
+                    let list = profiles.list().await.map_err(|e| internal(e.to_string()))?;
+                    let mut dependencies = crate::profile::vault_dependents(&list, &p.id);
+                    if let Some(network) = st.network_resources.lock().await.clone() {
+                        dependencies.extend(
+                            network
+                                .vault_dependents(&p.id)
+                                .map_err(|e| internal(e.to_string()))?,
+                        );
+                    }
+                    if !dependencies.is_empty() {
+                        return Err(invalid_params(format!(
+                            "vault entry {} is used by {}",
+                            p.id,
+                            dependencies.join(", ")
+                        )));
+                    }
+                }
                 let removed = store
                     .remove(&p.id)
                     .await
@@ -4731,6 +5023,49 @@ mod tests {
         // Second stop is a no-op.
         let r = d.dispatch(req("sync.stopAutoSync", json!(null))).await;
         assert_eq!(r.result.unwrap(), json!({"stopped": false}));
+    }
+
+    #[tokio::test]
+    async fn resource_methods_use_configured_stores_and_protect_dependencies() {
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        let dir = std::env::temp_dir().join(format!("resources-rpc-{}", Uuid::new_v4()));
+        let configured = d
+            .dispatch(req(
+                "profile.configure",
+                json!({"path":dir.join("profiles.sled")}),
+            ))
+            .await;
+        assert!(configured.error.is_none(), "{:?}", configured.error);
+        let id = Uuid::new_v4();
+        assert!(d.dispatch(req("profile.upsert", json!({"id":id,"name":"host","kind":"ssh","ssh":{"host":"localhost","port":22,"user":"u","auth":"Agent"}}))).await.error.is_none());
+        for method in [
+            "notes.list",
+            "scripts.list",
+            "proxy.list",
+            "forwarding.list",
+            "forwarding.running",
+        ] {
+            let result = d.dispatch(req(method, json!({}))).await;
+            assert!(result.error.is_none(), "{method}: {:?}", result.error);
+        }
+        let note = json!({"id":"note","parent_id":null,"title":"dependent","markdown":"safe","tags":[],"profile_ids":[id],"version":0,"updated_at":0});
+        let saved = d
+            .dispatch(req("notes.put", json!({"note":note,"expectedVersion":0})))
+            .await;
+        assert!(saved.error.is_none(), "{:?}", saved.error);
+        assert!(d
+            .dispatch(req("profile.delete", json!({"id":id})))
+            .await
+            .error
+            .is_some());
+        assert!(d
+            .dispatch(req("ssh.hostStats", json!({"profile_id":Uuid::new_v4()})))
+            .await
+            .error
+            .unwrap()
+            .message
+            .contains("profile not found"));
     }
 
     #[tokio::test]

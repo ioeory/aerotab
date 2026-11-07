@@ -92,7 +92,7 @@
   style:max-height={maxHeight}
 >
   {#if showToolbar}
-    <div class="sticky top-0 z-10 flex flex-wrap items-center gap-2 px-3 py-1.5 bg-[var(--color-panel)] border-b border-[var(--color-border-soft)] text-[11px]">
+    <div class="queue-toolbar sticky top-0 z-10 flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border-soft)]">
       <span class="uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
         {isActive ? i18n.t('transfer.queueActive') : i18n.t('transfer.history')}
       </span>
@@ -133,7 +133,7 @@
     {:else}
       {#each tasks as task (task.id)}
         {@const Icon = statusIcon(task.status)}
-        <div class="px-3 py-2 text-[11.5px] {selectedIds.has(task.id) ? 'bg-[var(--color-panel-2)]' : ''}">
+        <div class="queue-task px-3 py-2 {selectedIds.has(task.id) ? 'bg-[var(--color-panel-2)]' : ''}" data-status={task.status}>
           <div class="flex items-center gap-2 min-w-0">
             {#if onToggleSelect}
               <input
@@ -148,19 +148,19 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2 min-w-0">
                 {#if task.directionLabel}
-                  <span class="uppercase text-[9.5px] text-[var(--color-fg-muted)] shrink-0">{task.directionLabel}</span>
+                  <span class="uppercase text-[12px] text-[var(--color-fg-muted)] shrink-0">{task.directionLabel}</span>
                 {/if}
                 {#if task.modeLabel}
-                  <span class="uppercase text-[9.5px] text-[var(--color-accent)] shrink-0">{task.modeLabel}</span>
+                  <span class="uppercase text-[12px] text-[var(--color-accent)] shrink-0">{task.modeLabel}</span>
                 {/if}
                 {#if task.kindLabel}
-                  <span class="uppercase text-[9.5px] text-[var(--color-fg-muted)] shrink-0">{task.kindLabel}</span>
+                  <span class="uppercase text-[12px] text-[var(--color-fg-muted)] shrink-0">{task.kindLabel}</span>
                 {/if}
-                <span class="truncate text-[var(--color-fg)]">{task.name}</span>
-                <span class="ml-auto text-[10.5px] text-[var(--color-fg-muted)] shrink-0">{task.percent}%</span>
+                <span class="queue-task-name truncate text-[var(--color-fg)]" title={task.name}>{task.name}</span>
+                <span class="ml-auto text-[12px] text-[var(--color-fg-muted)] shrink-0">{task.percent}%</span>
               </div>
               {#if task.routeLabel}
-                <div class="mt-0.5 truncate text-[10px] font-mono text-[var(--color-fg-muted)]">{task.routeLabel}</div>
+                <div class="mt-0.5 truncate text-[12px] font-mono text-[var(--color-fg-muted)]" title={task.routeLabel}>{task.routeLabel}</div>
               {/if}
               <div
                 class="mt-1 h-1 rounded bg-[var(--color-panel-2)] overflow-hidden"
@@ -172,12 +172,12 @@
               >
                 <div class="h-full bg-[var(--color-accent)] transition-[width] duration-150" style="width: {task.percent}%"></div>
               </div>
-              <div class="mt-1 truncate text-[10.5px] text-[var(--color-fg-muted)]">{task.summary}</div>
+              <div class="queue-task-summary mt-1 text-[var(--color-fg-muted)]" title={task.summary}>{task.summary}</div>
             </div>
             {#if isActive && (task.status === 'queued' || task.status === 'running' || task.status === 'paused')}
               {#if task.status === 'paused'}
                 <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]" title={i18n.t('sftp.resumeTransfer')} aria-label={i18n.t('sftp.resumeTransfer')} onclick={() => onResume?.(task.id)}><Play size={12} /></button>
-              {:else}
+              {:else if onPause}
                 <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-warning)]" title={i18n.t('sftp.pauseTransfer')} aria-label={i18n.t('sftp.pauseTransfer')} onclick={() => onPause?.(task.id)}><Pause size={12} /></button>
               {/if}
               <button type="button" class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-danger)]" title={i18n.t('sftp.cancelTransfer')} aria-label={i18n.t('sftp.cancelTransfer')} onclick={() => onCancel?.(task.id)}><X size={12} /></button>
@@ -191,3 +191,27 @@
     {/if}
   </div>
 </div>
+
+<style>
+  .sftp-transfer-queue { font-size: var(--text-compact, 14px); line-height: 1.5; }
+  .queue-toolbar { background: var(--color-surface-raised); gap: 6px 10px; }
+  .queue-toolbar > span:first-child { font-weight: 600; color: var(--color-fg); letter-spacing: 0; }
+  .queue-toolbar > span:nth-child(2) { padding: 1px 6px; border-radius: 4px; background: var(--color-panel-2); font-size: var(--text-meta, 12px); font-variant-numeric: tabular-nums; }
+  .queue-toolbar button { min-height: 28px; border-radius: 4px; padding: 2px 4px; }
+  .queue-toolbar button:hover { background: var(--color-panel-2); }
+  .queue-task { padding: 12px; border-left: 2px solid transparent; }
+  .queue-task[data-status='running'] { border-left-color: var(--color-accent); }
+  .queue-task[data-status='error'] { border-left-color: var(--color-danger); }
+  .queue-task[data-status='paused'] { border-left-color: var(--color-warning); }
+  .queue-task-name { font-size: var(--text-ui, 16px); font-weight: 500; }
+  .queue-task-summary { font-size: var(--text-compact, 14px); overflow-wrap: anywhere; }
+  .queue-task[data-status='error'] .queue-task-summary { color: var(--color-danger); }
+  .queue-task[data-status='done'] [role='progressbar'] > div { background: var(--color-success); }
+  .queue-task[data-status='paused'] [role='progressbar'] > div { background: var(--color-warning); }
+  .queue-task[data-status='error'] [role='progressbar'] > div { background: var(--color-danger); }
+  .queue-task button { min-width: 30px; min-height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; }
+  .queue-task button:hover { background: var(--color-panel-2); }
+  .queue-task input { width: 15px; height: 15px; accent-color: var(--color-accent); }
+  button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+  @media (prefers-reduced-motion: reduce) { [role='progressbar'] > div { transition: none; } }
+</style>

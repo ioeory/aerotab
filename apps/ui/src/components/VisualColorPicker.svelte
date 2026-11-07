@@ -16,6 +16,8 @@
 <div
   class="visual-color-picker {compact ? 'visual-color-picker--compact' : ''} {menu ? 'visual-color-picker--menu' : ''}"
   role="listbox"
+  tabindex="-1"
+  onkeydown={(e) => e.stopPropagation()}
   aria-label={i18n.t('profiles.visualColorPicker')}
   onclick={(e) => e.stopPropagation()}
 >
@@ -29,6 +31,7 @@
         class="visual-color-swatch {selected ? 'selected' : ''}"
         style={visualStyle(toneFromColor(color))}
         title={color}
+        aria-label={color}
         onclick={() => onPick(color)}
       >
         <span class="visual-color-swatch-core" style="background:{color}"></span>
@@ -84,7 +87,7 @@
     height: 16px;
     display: grid;
     place-items: center;
-    font-size: 13px;
+    font-size: var(--text-compact, 14px);
     line-height: 1;
     padding: 0;
     flex-shrink: 0;
@@ -113,7 +116,9 @@
   }
   .visual-color-reset {
     align-self: flex-start;
-    font-size: 10.5px;
+    font-size: var(--text-compact, 14px);
+    font-family: var(--font-sans, system-ui, sans-serif);
+    line-height: 1.5;
     color: var(--color-fg-muted);
     background: transparent;
     border: none;

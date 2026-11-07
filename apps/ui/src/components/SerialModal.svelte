@@ -66,19 +66,19 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="min-w-[420px]">
+<dialog bind:this={dialog} class="w-[min(520px,calc(100vw-32px))] min-w-0 max-h-[calc(100vh-32px)] overflow-y-auto" aria-labelledby="serial-modal-title">
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">New serial connection</h2>
+      <h2 id="serial-modal-title" class="text-[length:var(--text-section,20px)] font-semibold text-[var(--color-accent)]">New serial connection</h2>
       <button type="button" onclick={close} aria-label="Close"
               class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]">
         <X size={14} />
       </button>
     </div>
 
-    <label for="sm-port" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Port</label>
+    <label for="sm-port" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">Port</label>
     <div class="flex gap-2">
-      <select id="sm-port" bind:value={port} class="input flex-1">
+      <select id="sm-port" bind:value={port} class="input flex-1 min-w-0">
         {#if ports.length === 0}
           <option value="">(no ports detected)</option>
         {/if}
@@ -89,40 +89,40 @@
       </button>
     </div>
 
-    <div class="flex gap-3 mt-2">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
       <div class="flex-1">
-        <label for="sm-baud" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Baud</label>
-        <select id="sm-baud" bind:value={baud} class="input">
+        <label for="sm-baud" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">Baud</label>
+        <select id="sm-baud" bind:value={baud} class="input w-full min-w-0">
           {#each baudOptions as b}<option value={b}>{b}</option>{/each}
         </select>
       </div>
       <div class="flex-1">
-        <label for="sm-data" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Data bits</label>
-        <select id="sm-data" bind:value={dataBits} class="input">
+        <label for="sm-data" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">Data bits</label>
+        <select id="sm-data" bind:value={dataBits} class="input w-full min-w-0">
           {#each [5,6,7,8] as d}<option value={d}>{d}</option>{/each}
         </select>
       </div>
     </div>
 
-    <div class="flex gap-3 mt-2">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
       <div class="flex-1">
-        <label for="sm-parity" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Parity</label>
-        <select id="sm-parity" bind:value={parity} class="input">
+        <label for="sm-parity" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">Parity</label>
+        <select id="sm-parity" bind:value={parity} class="input w-full min-w-0">
           <option value="None">None</option>
           <option value="Even">Even</option>
           <option value="Odd">Odd</option>
         </select>
       </div>
       <div class="flex-1">
-        <label for="sm-stop" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Stop bits</label>
-        <select id="sm-stop" bind:value={stopBits} class="input">
+        <label for="sm-stop" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">Stop bits</label>
+        <select id="sm-stop" bind:value={stopBits} class="input w-full min-w-0">
           <option value="One">1</option>
           <option value="Two">2</option>
         </select>
       </div>
       <div class="flex-1">
-        <label for="sm-flow" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">Flow</label>
-        <select id="sm-flow" bind:value={flow} class="input">
+        <label for="sm-flow" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">Flow</label>
+        <select id="sm-flow" bind:value={flow} class="input w-full min-w-0">
           <option value="None">None</option>
           <option value="Software">XON/XOFF</option>
           <option value="Hardware">RTS/CTS</option>
@@ -130,7 +130,7 @@
       </div>
     </div>
 
-    <div class="flex justify-end gap-2 mt-5">
+    <div class="flex flex-wrap justify-end gap-2 mt-5">
       <button type="button" onclick={close} class="btn-secondary">Cancel</button>
       <button type="submit" class="btn-primary">Connect</button>
     </div>

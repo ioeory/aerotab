@@ -213,7 +213,7 @@
   }
   let syncHistory = $state<SyncHistoryEntry[]>([]);
 
-  function markDirty() { settingsCoord.markDirty(); }
+  function markDirty() { settingsCoord.markDirty('configsync'); }
 
   function fmtTime(ms: number | null): string {
     if (ms == null) return 'never';

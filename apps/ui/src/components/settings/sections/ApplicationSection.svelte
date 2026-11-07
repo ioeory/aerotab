@@ -158,12 +158,7 @@
   async function changeLocale(next: LocaleSetting) {
     locale = next;
     i18n.setLocale(locale);
-    try {
-      await saveApplicationSettings();
-      settingsCoord.bumpRev();
-    } catch (e) {
-      onError(`locale: ${(e as Error).message}`);
-    }
+    settingsCoord.markDirty('application');
   }
 
   onMount(() => {

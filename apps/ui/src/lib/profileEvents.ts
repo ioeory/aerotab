@@ -1,4 +1,4 @@
-/** Fired after profiles are created, updated, or deleted. */
+/** Fired after profiles are created, updated, or deleted. Never contains profile payloads or secrets. */
 export const PROFILES_CHANGED = 'aerotab:profiles-changed';
 
 export interface ProfilesChangedDetail {

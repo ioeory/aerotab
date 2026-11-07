@@ -49,7 +49,7 @@
 {#each rows as row (row.key)}
   {#if row.kind === 'ungrouped-header'}
     <tr class="import-group-row border-t border-[var(--color-border-soft)] bg-[var(--color-panel-2)]">
-      <td colspan="5" class="px-2 py-1 text-[11px] font-medium text-[var(--color-fg-muted)]">
+      <td colspan="5" class="px-2 py-1 text-[length:var(--text-compact,14px)] font-medium text-[var(--color-fg-muted)]">
         {i18n.t('import.ungrouped')}
         <span class="font-normal">({row.count})</span>
       </td>
@@ -64,6 +64,7 @@
         {#if importableCount > 0}
           <input
             type="checkbox"
+            aria-label={child.name}
             checked={groupCheckboxState(child) === true}
             indeterminate={groupCheckboxState(child) === 'mixed'}
             onchange={(e) => onGroupCheckboxChange(child, e)}
@@ -73,7 +74,7 @@
       <td colspan="4" class="px-2 py-1">
         <button
           type="button"
-          class="inline-flex items-center gap-1 min-w-0 max-w-full text-left text-[11px] font-medium text-[var(--color-fg)]"
+          class="inline-flex items-center gap-1 min-w-0 max-w-full text-left text-[length:var(--text-compact,14px)] font-medium text-[var(--color-fg)]"
           onclick={() => onToggleFolder(child.path)}
           aria-expanded={expanded}
         >
@@ -84,7 +85,7 @@
               <ChevronRight size={12} />
             {/if}
           </span>
-          <span class="truncate">{child.name}</span>
+          <span class="[overflow-wrap:anywhere]">{child.name}</span>
           <span class="shrink-0 text-[var(--color-fg-muted)] font-normal">
             ({totalCount}{#if importableCount !== totalCount}, {importableCount} {i18n.t('import.importableShort')}{/if})
           </span>
@@ -96,15 +97,16 @@
       <td class="px-2 py-1 text-center" style="padding-left: {8 + row.depth * 14}px">
         <input
           type="checkbox"
+          aria-label={row.candidate.name}
           checked={selectedIds.has(row.candidate.sourceId)}
           disabled={row.candidate.status === 'error'}
           onchange={(e) => onToggleRow(row.candidate.sourceId, e.currentTarget.checked)}
         />
       </td>
-      <td class="px-2 py-1 truncate max-w-[200px]" title={row.candidate.name}>{row.candidate.name}</td>
-      <td class="px-2 py-1 uppercase text-[10px]">{row.candidate.kind}</td>
-      <td class="px-2 py-1 truncate max-w-[120px] text-[var(--color-fg-muted)]">{row.candidate.group ?? '—'}</td>
-      <td class="px-2 py-1 text-[var(--color-fg-muted)] max-w-[220px] truncate" title={statusLabel(row.candidate)}>
+      <td class="px-2 py-1 [overflow-wrap:anywhere] max-w-[260px]" title={row.candidate.name}>{row.candidate.name}</td>
+      <td class="px-2 py-1 uppercase text-[length:var(--text-meta,12px)]">{row.candidate.kind}</td>
+      <td class="px-2 py-1 [overflow-wrap:anywhere] max-w-[180px] text-[var(--color-fg-muted)]">{row.candidate.group ?? '—'}</td>
+      <td class="px-2 py-1 text-[var(--color-fg-muted)] max-w-[280px] [overflow-wrap:anywhere]" title={statusLabel(row.candidate)}>
         {statusLabel(row.candidate)}
       </td>
     </tr>

@@ -1,0 +1,52 @@
+export interface Note { id: string; parent_id: string | null; title: string; markdown: string; tags: string[]; profile_ids: string[]; version: number; updated_at: number }
+export interface NoteFolder { id: string; parent_id: string | null; name: string; version: number; updated_at: number }
+export interface NotesSnapshot { notes: Note[]; folders: NoteFolder[]; revision: number }
+export const emptySnapshot = (): NotesSnapshot => ({ notes: [], folders: [], revision: 0 });
+const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+/** Deliberately small Markdown dialect; HTML and images always remain inert text. */
+export function renderMarkdown(markdown: string): string {
+  let fenced = false;
+  return markdown.split('\n').map(line => {
+    if (line.startsWith('```')) { fenced = !fenced; return fenced ? '<pre><code>' : '</code></pre>'; }
+    if (fenced) return escape(line) + '\n';
+    let text = escape(line).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/~~([^~]+)~~/g, '<del>$1</del>').replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    // Links stay text; no automatic navigation, URL loading or external images.
+    const heading = /^(#{1,6}) (.*)$/.exec(text);
+    if (heading?.[1]) return `<h${heading[1].length}>${heading[2] ?? ''}</h${heading[1].length}>`;
+    if (/^---+$/.test(text)) return '<hr>';
+    if (text.startsWith('&gt; ')) return `<blockquote>${text.slice(5)}</blockquote>`;
+    text = text.replace(/^[-*] \[([ x])\] /, (_, done) => done === 'x' ? '☑ ' : '☐ ').replace(/^[-*] /, '• ');
+    return `<div>${text || '<br>'}</div>`;
+  }).join('\n') + (fenced ? '</code></pre>' : '');
+}
+export function safeFilename(value: string): string {
+  let name = value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/^\.+|[ .]+$/g, '').trim() || 'note';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = '_' + name;
+  return name.slice(0, 120);
+}
+export function uniqueFilename(title: string, used: Set<string>): string {
+  const base = safeFilename(title); let name = `${base}.md`; let index = 2;
+  while ([...used].some(item => item.toLowerCase() === name.toLowerCase())) name = `${base} (${index++}).md`;
+  used.add(name); return name;
+}
+/** One in-flight request per note. Failed writes never clear the latest draft. */
+export class NoteSaveQueue<T> {
+  private current: T | undefined;
+  private generation = 0;
+  private savedGeneration = 0;
+  private pending: Promise<void> | null = null;
+  constructor(private save: (draft: T, version: number) => Promise<number>, public version: number) {}
+  get dirty(): boolean { return this.generation !== this.savedGeneration; }
+  update(draft: T): void { this.current = draft; this.generation++; }
+  flush(): Promise<void> {
+    if (this.pending) return this.pending;
+    this.pending = (async () => {
+      while (this.dirty) {
+        const generation = this.generation; const draft = this.current!;
+        this.version = await this.save(draft, this.version);
+        this.savedGeneration = generation;
+      }
+    })().finally(() => { this.pending = null; });
+    return this.pending;
+  }
+}

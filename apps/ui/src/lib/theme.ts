@@ -1,6 +1,5 @@
-// Built-in colour themes for the AeroTab UI. Themes drive a small set of
-// CSS custom properties on the document root; xterm picks up the matching
-// palette via `applyTheme` callers reading the same constants.
+// Stable theme IDs and terminal palettes. UI-only tokens are deliberately
+// separate so appearance previews never mutate a terminal's ANSI palette.
 
 export interface Theme {
   name: string;
@@ -22,7 +21,7 @@ export interface Theme {
 
 export const TOKYO_NIGHT: Theme = {
   name: 'tokyo-night',
-  label: 'Tokyo Night',
+  label: 'Slate',
   bg: '#0b0d12',
   panel: '#13161d',
   panel2: '#1a1e27',
@@ -42,7 +41,7 @@ export const TOKYO_NIGHT: Theme = {
 
 export const SOLARIZED_DARK: Theme = {
   name: 'solarized-dark',
-  label: 'Solarized Dark',
+  label: 'Deep teal',
   bg: '#002b36',
   panel: '#073642',
   panel2: '#0a4150',
@@ -62,7 +61,7 @@ export const SOLARIZED_DARK: Theme = {
 
 export const GRUVBOX_DARK: Theme = {
   name: 'gruvbox-dark',
-  label: 'Gruvbox Dark',
+  label: 'Warm graphite',
   bg: '#1d2021',
   panel: '#282828',
   panel2: '#32302f',
@@ -82,7 +81,7 @@ export const GRUVBOX_DARK: Theme = {
 
 export const ONE_LIGHT: Theme = {
   name: 'one-light',
-  label: 'One Light',
+  label: 'Warm light',
   bg: '#fafafa',
   panel: '#eaeaeb',
   panel2: '#e0e0e2',
@@ -102,7 +101,7 @@ export const ONE_LIGHT: Theme = {
 
 export const TERMORA_DARK: Theme = {
   name: 'termora-dark',
-  label: 'Termora Dark',
+  label: 'Graphite',
   bg: '#0f1117',
   panel: '#171a22',
   panel2: '#20242e',
@@ -124,7 +123,7 @@ export const TERMORA_DARK: Theme = {
 
 export const TERMORA_LIGHT: Theme = {
   name: 'termora-light',
-  label: 'Termora Light',
+  label: 'Cloud',
   bg: '#f6f7fb',
   panel: '#ffffff',
   panel2: '#eef1f6',
@@ -153,19 +152,98 @@ export const BUILTIN_THEMES: Theme[] = [
   TERMORA_LIGHT,
 ];
 
-export function applyTheme(theme: Theme) {
+export type ThemeMode = 'dark' | 'light';
+
+export interface UiPalette {
+  label: string;
+  mode: ThemeMode;
+  bg: string;
+  panel: string;
+  panel2: string;
+  raised: string;
+  fg: string;
+  muted: string;
+  border: string;
+  accent: string;
+}
+
+/** Netcatty-inspired neutral surfaces, with the six persisted IDs intact. */
+export const UI_PALETTES: Record<string, UiPalette> = {
+  'termora-dark': { label: 'Graphite', mode: 'dark', bg: '#17191c', panel: '#1d2024', panel2: '#272b30', raised: '#2b3036', fg: '#f0f1f3', muted: '#b5bcc6', border: '#49515c', accent: '#a9bdf0' },
+  'tokyo-night': { label: 'Slate', mode: 'dark', bg: '#171c25', panel: '#1d2430', panel2: '#273140', raised: '#2b3545', fg: '#f0f3fa', muted: '#bbc5d6', border: '#4b5c73', accent: '#a5c2ff' },
+  'solarized-dark': { label: 'Deep teal', mode: 'dark', bg: '#142323', panel: '#1b2b2c', panel2: '#253637', raised: '#293c3d', fg: '#edf5f2', muted: '#b7ccc6', border: '#4e6863', accent: '#9acdc5' },
+  'gruvbox-dark': { label: 'Warm graphite', mode: 'dark', bg: '#211e1b', panel: '#292521', panel2: '#35302a', raised: '#3b352e', fg: '#f7f1e8', muted: '#cdc0ae', border: '#6b5e4e', accent: '#e9c28b' },
+  'one-light': { label: 'Warm light', mode: 'light', bg: '#f7f5f1', panel: '#fffefa', panel2: '#ede9e2', raised: '#ffffff', fg: '#282621', muted: '#625d54', border: '#b4ada1', accent: '#735027' },
+  'termora-light': { label: 'Cloud', mode: 'light', bg: '#f4f6f9', panel: '#ffffff', panel2: '#e9edf3', raised: '#ffffff', fg: '#202833', muted: '#536174', border: '#aab5c4', accent: '#315eac' },
+};
+
+export function themeMode(theme: Theme): ThemeMode {
+  return UI_PALETTES[theme.name]?.mode ?? (contrastRatio(theme.bg, '#ffffff') < 4.5 ? 'light' : 'dark');
+}
+
+function rgb(hex: string): number[] {
+  return [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+}
+
+export function contrastRatio(a: string, b: string): number {
+  const luminance = (hex: string) => rgb(hex).map(v => {
+    const c = v / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  }).reduce((sum, c, i) => sum + c * ([0.2126, 0.7152, 0.0722][i] ?? 0), 0);
+  const x = luminance(a);
+  const y = luminance(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+export function normalizeAccent(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  if (/^#[0-9a-f]{6}$/i.test(value)) return value.toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(value)) return '#' + [...value.slice(1)].map(c => c + c).join('').toLowerCase();
+  return null;
+}
+
+function mix(a: string, b: string, ratio: number): string {
+  const other = rgb(b);
+  return '#' + rgb(a).map((c, i) => Math.round(c * ratio + (other[i] ?? 0) * (1 - ratio)).toString(16).padStart(2, '0')).join('');
+}
+
+export function themeTokens(theme: Theme, accentOverride?: string | null): Record<string, string> {
+  const p = UI_PALETTES[theme.name] ?? {
+    label: theme.label, mode: themeMode(theme), bg: theme.bg, panel: theme.panel,
+    panel2: theme.panel2, raised: theme.surfaceRaised ?? theme.panel2,
+    fg: theme.fg, muted: theme.fgMuted, border: theme.border, accent: theme.accent,
+  };
+  const light = p.mode === 'light';
+  const accent = normalizeAccent(accentOverride) ?? p.accent;
+  const accentFg = contrastRatio(accent, '#ffffff') >= contrastRatio(accent, '#17191c') ? '#ffffff' : '#17191c';
+  // A white accent on a light palette still needs a visible focus/label colour.
+  const accentText = contrastRatio(accent, p.panel2) >= 4.5 ? accent : p.accent;
+  return {
+    bg: p.bg, panel: p.panel, 'panel-2': p.panel2, 'bg-soft': mix(p.panel, p.bg, 0.5),
+    'surface-raised': p.raised, fg: p.fg, 'fg-muted': p.muted, 'fg-subtle': p.muted,
+    border: p.border, 'border-soft': mix(p.border, p.panel, 0.6),
+    accent, 'accent-fg': accentFg, 'accent-text': accentText,
+    'accent-soft': mix(accent, p.panel, light ? 0.10 : 0.16),
+    'surface-hover': mix(p.fg, p.panel, light ? 0.07 : 0.08),
+    'surface-selected': mix(accent, p.panel, light ? 0.12 : 0.18),
+    'focus-ring': accentText, 'fg-disabled': p.muted, 'surface-disabled': p.panel2,
+    success: light ? '#27643d' : '#a4d7ad', warning: light ? '#805612' : '#e9c386',
+    danger: light ? '#b22e3e' : '#f2a3ab', info: light ? '#315eac' : '#a5c2ff',
+    'danger-soft': mix(light ? '#b22e3e' : '#f2a3ab', p.panel, 0.12),
+    'scrollbar-thumb': p.border, 'scrollbar-hover': p.muted,
+  };
+}
+
+/** Paints UI chrome only; never sends terminal configuration or ANSI updates. */
+export function applyTheme(theme: Theme, accentOverride?: string | null) {
+  if (typeof document === 'undefined') return;
   const r = document.documentElement;
-  r.style.setProperty('--color-bg', theme.bg);
-  r.style.setProperty('--color-panel', theme.panel);
-  r.style.setProperty('--color-panel-2', theme.panel2);
-  r.style.setProperty('--color-bg-soft', theme.bgSoft ?? theme.bg);
-  r.style.setProperty('--color-surface-raised', theme.surfaceRaised ?? theme.panel2);
-  r.style.setProperty('--color-fg', theme.fg);
-  r.style.setProperty('--color-fg-muted', theme.fgMuted);
-  r.style.setProperty('--color-border', theme.border);
-  r.style.setProperty('--color-border-soft', theme.borderSoft);
-  r.style.setProperty('--color-accent', theme.accent);
-  r.style.setProperty('--color-danger', theme.danger);
+  for (const [key, value] of Object.entries(themeTokens(theme, accentOverride))) {
+    r.style.setProperty(`--color-${key}`, value);
+  }
+  r.style.colorScheme = themeMode(theme);
+  r.dataset.theme = theme.name;
+  r.dataset.themeMode = themeMode(theme);
 }
 
 export function xtermPalette(theme: Theme) {

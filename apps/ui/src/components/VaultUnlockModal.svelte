@@ -75,10 +75,10 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="min-w-[400px]" onclose={() => onSkip?.()}>
+<dialog bind:this={dialog} aria-labelledby="vault-unlock-title" class="w-[min(520px,calc(100vw-32px))] min-w-0 max-h-[calc(100vh-32px)] overflow-y-auto" onclose={() => onSkip?.()}>
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-2">
-      <h2 class="text-[14px] font-semibold text-[var(--color-accent)]">
+      <h2 id="vault-unlock-title" class="text-[length:var(--text-section,20px)] font-semibold text-[var(--color-accent)]">
         {i18n.t('vault.unlockPromptTitle')}
       </h2>
       <button
@@ -90,10 +90,10 @@
         <X size={14} />
       </button>
     </div>
-    <p class="text-[12px] text-[var(--color-fg-muted)] mb-3 leading-relaxed">
+    <p class="text-[length:var(--text-ui,16px)] text-[var(--color-fg-muted)] mb-3 leading-relaxed">
       {i18n.t('vault.unlockPromptBody')}
     </p>
-    <label for="vum-password" class="block text-[11px] text-[var(--color-fg-muted)] mb-1">
+    <label for="vum-password" class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">
       {i18n.t('vault.unlockPromptPassword')}
     </label>
     <input
@@ -104,16 +104,16 @@
       autocomplete="current-password"
     />
     {#if !keyringAlreadySaved}
-      <label class="flex items-center gap-2 text-[12px] text-[var(--color-fg)] mb-4">
+      <label class="flex items-center gap-2 text-[length:var(--text-ui,16px)] text-[var(--color-fg)] mb-4">
         <input type="checkbox" bind:checked={saveToKeyring} />
         {i18n.t('vault.saveToKeyringOnUnlock')}
       </label>
     {:else}
-      <p class="text-[11px] text-[var(--color-fg-muted)] mb-4">
+      <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-4">
         {i18n.t('vault.keyringAlreadySavedHint')}
       </p>
     {/if}
-    <div class="flex justify-end gap-2">
+    <div class="flex flex-wrap justify-end gap-2">
       <button type="button" class="btn-secondary" disabled={busy} onclick={skip}>
         {i18n.t('vault.unlockPromptSkip')}
       </button>

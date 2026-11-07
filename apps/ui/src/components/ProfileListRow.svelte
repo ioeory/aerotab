@@ -15,7 +15,7 @@
 
   interface Props {
     profile: StoredProfile;
-    variant?: 'sidebar' | 'settings';
+    variant?: 'sidebar' | 'settings' | 'resource';
     depth?: number;
     health?: ProfileHealthResult;
     healthIssues?: ProfileHealthResult['checks'];
@@ -157,7 +157,7 @@
   });
 
   $effect(() => {
-    if (!focused || renaming || variant !== 'sidebar') return;
+    if (!focused || renaming || variant === 'settings') return;
     if (typeof document === 'undefined') return;
     const active = document.activeElement;
     if (active instanceof Element && active.closest('[data-aerotab-sidebar-profiles]')) {
@@ -342,7 +342,7 @@
       {/if}
       <button type="button" class="action-chip" title={i18n.t('sidebar.editIcon')} aria-label={i18n.t('sidebar.editIcon')} onclick={(ev) => quickAction(ev, 'icon')}><Image size={11} /></button>
     </div>
-  {:else}
+  {:else if variant === 'settings'}
     <div class="profile-list-row-settings-actions shrink-0">
       <button type="button" class="action-chip" title={i18n.t('profiles.connect')} aria-label={i18n.t('profiles.connect')} onclick={() => onConnect?.()}><Plug size={12} /></button>
       <button type="button" class="action-chip" title={i18n.t('common.edit')} aria-label={i18n.t('common.edit')} onclick={() => onEdit?.()}><Pencil size={12} /></button>
@@ -369,6 +369,11 @@
 {/if}
 
 <style>
+  .profile-list-row { line-height: 1.5; }
+  .profile-list-row--resource { padding: 4px 0; align-items: flex-start; }
+  .profile-list-row--resource .profile-list-row-title { font-size: 16px; font-weight: 600; }
+  .profile-list-row--resource .profile-list-row-endpoint { font-size: 14px; font-family: var(--font-mono, ui-monospace, monospace); }
+  .profile-list-row--resource .profile-list-row-check { margin-top: 12px; }
   .profile-list-row {
     position: relative;
     display: flex;
@@ -417,33 +422,33 @@
     padding: 4px 0;
   }
   .profile-list-row-title {
-    font-size: 11.5px;
+    font-size: 14px;
     color: var(--color-fg);
   }
   .profile-inline-rename {
-    font-size: 11.5px;
+    font-size: 14px;
     padding: 1px 4px;
-    height: 20px;
+    min-height: 32px;
   }
   .profile-list-row--settings .profile-list-row-title {
-    font-size: 12.5px;
+    font-size: 16px;
     font-weight: 500;
   }
   .profile-list-row-endpoint {
-    font-size: 10px;
+    font-size: 14px;
     color: var(--color-fg-muted);
   }
   .profile-list-row-connect-hint {
-    font-size: 9.5px;
+    font-size: 12px;
     color: var(--color-accent);
     opacity: 0.75;
   }
   .profile-list-row--settings .profile-list-row-endpoint {
-    font-size: 11px;
+    font-size: 14px;
     font-family: var(--font-mono, ui-monospace, monospace);
   }
   .profile-list-row-note {
-    font-size: 10px;
+    font-size: 14px;
     color: var(--color-fg-muted);
     opacity: 0.85;
   }
@@ -467,7 +472,7 @@
     display: inline-flex;
   }
   .profile-tag-more {
-    font-size: 10px;
+    font-size: 14px;
     line-height: 1.2;
     color: var(--color-fg-muted);
     padding: 1px 5px;
@@ -500,7 +505,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    font-size: 10.5px;
+    font-size: 14px;
     color: var(--color-fg-muted);
   }
   .profile-list-row-check {

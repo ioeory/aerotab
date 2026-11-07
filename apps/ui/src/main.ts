@@ -24,7 +24,17 @@ document.addEventListener(
 // WKWebView opens dropped images in-page unless document-level preventDefault runs.
 const cleanupFileDropGuard = installWebKitFileDropGuard();
 
-mount(App, { target });
+const runtimeProbe = (window as unknown as {
+  __aerotabRuntimeDiagnostics?: { mark(phase: string): void };
+}).__aerotabRuntimeDiagnostics;
+runtimeProbe?.mark('mounting');
+try {
+  mount(App, { target });
+  runtimeProbe?.mark('mounted');
+} catch (error) {
+  runtimeProbe?.mark('mount-failed');
+  throw error;
+}
 
 // Focus the main window after the first frame (setup also shows it; this is a backup).
 requestAnimationFrame(() => {

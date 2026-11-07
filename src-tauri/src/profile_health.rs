@@ -331,6 +331,9 @@ mod tests {
                     user: "root".into(),
                     auth,
                     jump_via: vec![],
+                    jump_profile_ids: vec![],
+                    proxy_id: None,
+                    resolved_proxy: None,
                 },
             },
         }

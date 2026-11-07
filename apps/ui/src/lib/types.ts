@@ -58,6 +58,9 @@ export interface SshProfileSpec {
   /** Multi-hop bastion chain. Dialed left-to-right; final hop reaches the
    * target described by this profile. Empty = direct dial. */
   jump_via: SshProfileSpec[];
+  /** Stable saved-profile references; resolved from the latest backend snapshot. */
+  jump_profile_ids?: string[];
+  proxy_id?: string | null;
 }
 
 export type TunnelKind = 'local' | 'remote' | 'dynamic';

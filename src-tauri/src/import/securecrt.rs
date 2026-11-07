@@ -194,6 +194,9 @@ fn map_session(session: ScrtSession, idx: usize) -> ImportCandidate {
         user,
         auth: AuthMethod::Agent,
         jump_via: vec![],
+        jump_profile_ids: vec![],
+        proxy_id: None,
+        resolved_proxy: None,
     };
     let profile = build_profile(
         session.name.clone(),

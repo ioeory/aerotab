@@ -68,7 +68,7 @@
     backend = 'webview',
     occluded = false,
     fontFamily = 'JetBrains Mono, Menlo, monospace',
-    fontSize = 13,
+    fontSize = 15,
     fontWeight = 400,
     fontWeightBold = 700,
     linePadding = 0,

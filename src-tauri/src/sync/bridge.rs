@@ -219,8 +219,24 @@ async fn put_local_if_changed(
 }
 
 async fn export_connections(profiles: &ProfileStore, engine: &SyncEngine) -> Result<(), SyncError> {
+    for id in profiles.explicit_deletions().await.map_err(store_err)? {
+        let rid = RecordId(id);
+        if engine.get_local(Group::Connections, rid).await.is_some() {
+            engine.delete_local(Group::Connections, rid).await?;
+        }
+    }
     let list = profiles.list().await.map_err(store_err)?;
+    let deleted = engine
+        .snapshot_group(Group::Connections)
+        .await
+        .into_iter()
+        .filter(|(_, record)| record.tombstone)
+        .map(|(id, _)| id)
+        .collect::<std::collections::HashSet<_>>();
     for profile in list {
+        if deleted.contains(&RecordId(profile.id)) {
+            continue;
+        }
         let bytes = serde_json::to_vec(&profile).map_err(json_err)?;
         put_local_if_changed(engine, Group::Connections, RecordId(profile.id), bytes).await?;
     }
@@ -228,10 +244,15 @@ async fn export_connections(profiles: &ProfileStore, engine: &SyncEngine) -> Res
 }
 
 async fn import_connections(profiles: &ProfileStore, engine: &SyncEngine) -> Result<(), SyncError> {
+    for (id, record) in engine.snapshot_group(Group::Connections).await {
+        if record.tombstone {
+            profiles.delete(id.0).await.map_err(store_err)?;
+        }
+    }
     for id in engine.list_local(Group::Connections).await {
         if let Some(bytes) = engine.get_local(Group::Connections, id).await {
             let profile: Profile = serde_json::from_slice(&bytes).map_err(json_err)?;
-            profiles.upsert(profile).await.map_err(store_err)?;
+            profiles.upsert_synced(profile).await.map_err(store_err)?;
         }
     }
     Ok(())
@@ -383,8 +404,24 @@ async fn export_credentials(
         notes.credentials_skipped_locked = true;
         return Ok(());
     }
+    for id in store.explicit_deletions().map_err(vault_store_err)? {
+        let rid = credential_record_id(&id);
+        if engine.get_local(Group::Credentials, rid).await.is_some() {
+            engine.delete_local(Group::Credentials, rid).await?;
+        }
+    }
     let metas = store.list().await.map_err(vault_store_err)?;
+    let deleted = engine
+        .snapshot_group(Group::Credentials)
+        .await
+        .into_iter()
+        .filter(|(_, record)| record.tombstone)
+        .map(|(id, _)| id)
+        .collect::<std::collections::HashSet<_>>();
     for meta in metas {
+        if deleted.contains(&credential_record_id(&meta.id)) {
+            continue;
+        }
         let entry = store.get(&meta.id).await.map_err(vault_store_err)?;
         let bytes = serde_json::to_vec(&entry).map_err(json_err)?;
         let rid = credential_record_id(&entry.id);
@@ -402,6 +439,16 @@ async fn import_credentials(
     };
     if !store.is_unlocked().await {
         return Ok(());
+    }
+    for meta in store.list().await.map_err(vault_store_err)? {
+        if engine
+            .snapshot_group(Group::Credentials)
+            .await
+            .iter()
+            .any(|(id, record)| *id == credential_record_id(&meta.id) && record.tombstone)
+        {
+            store.remove(&meta.id).await.map_err(vault_store_err)?;
+        }
     }
     for id in engine.list_local(Group::Credentials).await {
         if let Some(bytes) = engine.get_local(Group::Credentials, id).await {
@@ -539,6 +586,92 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("aerotab-bridge-test-{}", Uuid::new_v4()));
         SettingsStore::open(p).unwrap()
+    }
+
+    fn profile(id: Uuid) -> Profile {
+        serde_json::from_value(json!({"id":id,"name":"test","kind":"ssh","ssh":{"host":"host","port":22,"user":"user","auth":"Agent"}})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn profile_explicit_deletion_propagates_without_first_sync_data_loss() {
+        let src =
+            ProfileStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string())).unwrap();
+        let dst =
+            ProfileStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string())).unwrap();
+        let e = engine();
+        let p = profile(Uuid::new_v4());
+        src.upsert(p.clone()).await.unwrap();
+        export_connections(&src, &e).await.unwrap();
+        export_connections(&dst, &e).await.unwrap();
+        assert!(e
+            .get_local(Group::Connections, RecordId(p.id))
+            .await
+            .is_some());
+        import_connections(&dst, &e).await.unwrap();
+        src.delete(p.id).await.unwrap();
+        export_connections(&src, &e).await.unwrap();
+        assert!(
+            e.get_local(Group::Connections, RecordId(p.id))
+                .await
+                .is_none(),
+            "explicit deletion must tombstone sync record"
+        );
+        import_connections(&dst, &e).await.unwrap();
+        assert!(dst.get(p.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn vault_explicit_deletion_propagates_without_first_sync_data_loss() {
+        let src = VaultStore::open_with_params(
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            KdfParams::test_cheap(),
+        )
+        .unwrap();
+        let dst = VaultStore::open_with_params(
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            KdfParams::test_cheap(),
+        )
+        .unwrap();
+        src.initialize(b"pw").await.unwrap();
+        dst.initialize(b"pw").await.unwrap();
+        let entry = src
+            .put(VaultEntry {
+                id: "legacy-key-id".into(),
+                label: "key".into(),
+                kind: crate::vault::EntryKind::Password,
+                username: None,
+                secret: "secret".into(),
+            })
+            .await
+            .unwrap();
+        let e = engine();
+        let mut notes = BridgeNotes::default();
+        export_credentials(Some(&src), &e, &mut notes)
+            .await
+            .unwrap();
+        export_credentials(Some(&dst), &e, &mut notes)
+            .await
+            .unwrap();
+        assert!(e
+            .get_local(Group::Credentials, credential_record_id(&entry.id))
+            .await
+            .is_some());
+        import_credentials(Some(&dst), &e).await.unwrap();
+        src.remove(&entry.id).await.unwrap();
+        export_credentials(Some(&src), &e, &mut notes)
+            .await
+            .unwrap();
+        assert!(
+            e.get_local(Group::Credentials, credential_record_id(&entry.id))
+                .await
+                .is_none(),
+            "explicit vault deletion must tombstone sync record"
+        );
+        import_credentials(Some(&dst), &e).await.unwrap();
+        assert!(matches!(
+            dst.get(&entry.id).await,
+            Err(VaultError::NotFound(_))
+        ));
     }
 
     #[test]

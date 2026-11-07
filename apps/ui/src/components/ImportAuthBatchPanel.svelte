@@ -119,7 +119,7 @@
 <div class="import-batch-auth mb-3 rounded border border-[var(--color-border-soft)] bg-[var(--color-panel-2)]">
   <button
     type="button"
-    class="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-[var(--color-fg)]"
+    class="w-full flex items-center gap-2 px-3 py-2 text-left text-[length:var(--text-ui,16px)] font-medium text-[var(--color-fg)]"
     onclick={() => { expanded = !expanded; }}
     aria-expanded={expanded}
   >
@@ -129,23 +129,23 @@
       <ChevronRight size={14} class="text-[var(--color-fg-muted)]" />
     {/if}
     {i18n.t('import.batchAuth.title')}
-    <span class="text-[11px] font-normal text-[var(--color-fg-muted)]">
+    <span class="text-[length:var(--text-compact,14px)] font-normal text-[var(--color-fg-muted)]">
       ({i18n.t('import.batchAuth.selected', { count: selectedCount })})
     </span>
   </button>
 
   {#if expanded}
     <div class="px-3 pb-3 pt-0 space-y-2 border-t border-[var(--color-border-soft)]">
-      <p class="text-[10.5px] text-[var(--color-fg-muted)] pt-2">{i18n.t('import.batchAuth.hint')}</p>
+      <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] pt-2">{i18n.t('import.batchAuth.hint')}</p>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <label class="block">
-          <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.userOverride')}</span>
-          <input type="text" class="input w-full text-[12px]" bind:value={userOverride} placeholder={i18n.t('import.batchAuth.userPlaceholder')} />
+          <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.userOverride')}</span>
+          <input type="text" class="input w-full text-[length:var(--text-ui,16px)]" bind:value={userOverride} placeholder={i18n.t('import.batchAuth.userPlaceholder')} />
         </label>
         <label class="block">
-          <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.authMode')}</span>
-          <select class="input w-full text-[12px]" bind:value={mode}>
+          <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.authMode')}</span>
+          <select class="input w-full text-[length:var(--text-ui,16px)]" bind:value={mode}>
             <option value="keep">{i18n.t('import.batchAuth.modeKeep')}</option>
             <option value="password">{i18n.t('import.batchAuth.modePassword')}</option>
             <option value="key">{i18n.t('import.batchAuth.modeKey')}</option>
@@ -157,30 +157,30 @@
 
       {#if mode === 'password'}
         <label class="block">
-          <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.password')}</span>
-          <input type="password" class="input w-full text-[12px]" bind:value={password} autocomplete="new-password" />
+          <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.password')}</span>
+          <input type="password" class="input w-full text-[length:var(--text-ui,16px)]" bind:value={password} autocomplete="new-password" />
         </label>
       {:else if mode === 'key'}
         <div class="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2 items-end">
           <label class="block min-w-0">
-            <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.keyPath')}</span>
-            <input type="text" class="input w-full text-[12px] font-mono" bind:value={keyPath} placeholder="~/.ssh/id_ed25519" />
+            <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('import.batchAuth.keyPath')}</span>
+            <input type="text" class="input w-full text-[length:var(--text-ui,16px)] font-mono" bind:value={keyPath} placeholder="~/.ssh/id_ed25519" />
           </label>
-          <button type="button" class="btn-secondary text-[11px] px-2 py-1.5 shrink-0" onclick={() => { void browseKey(); }}>
+          <button type="button" class="btn-secondary text-[length:var(--text-compact,14px)] px-2 py-1.5 shrink-0" onclick={() => { void browseKey(); }}>
             {i18n.t('profileModal.browsePrivateKey')}
           </button>
         </div>
         <label class="block">
-          <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.keyPassphrase')}</span>
-          <input type="password" class="input w-full text-[12px]" bind:value={keyPassphrase} autocomplete="new-password" />
+          <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.keyPassphrase')}</span>
+          <input type="password" class="input w-full text-[length:var(--text-ui,16px)]" bind:value={keyPassphrase} autocomplete="new-password" />
         </label>
       {:else if mode === 'vault'}
         {#if !vaultUnlocked}
-          <p class="text-[10.5px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.vaultLockedHint')}</p>
+          <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]">{i18n.t('profileModal.vaultLockedHint')}</p>
         {:else}
           <label class="block">
-            <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.vaultEntry')}</span>
-            <select class="input w-full text-[12px]" bind:value={vaultEntryId}>
+            <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.vaultEntry')}</span>
+            <select class="input w-full text-[length:var(--text-ui,16px)]" bind:value={vaultEntryId}>
               <option value="">{i18n.t('import.batchAuth.vaultEntryPlaceholder')}</option>
               {#each vaultEntries as ve (ve.id)}
                 <option value={ve.id}>{ve.label} ({ve.kind})</option>
@@ -188,8 +188,8 @@
             </select>
           </label>
           <label class="block">
-            <span class="block text-[11px] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.vaultPassphraseEntry')}</span>
-            <select class="input w-full text-[12px]" bind:value={vaultPassphraseEntryId}>
+            <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-1">{i18n.t('profileModal.vaultPassphraseEntry')}</span>
+            <select class="input w-full text-[length:var(--text-ui,16px)]" bind:value={vaultPassphraseEntryId}>
               <option value="">{i18n.t('import.batchAuth.vaultPassOptional')}</option>
               {#each vaultEntries.filter((e) => e.kind === 'password') as ve (ve.id)}
                 <option value={ve.id}>{ve.label}</option>
@@ -200,10 +200,10 @@
       {/if}
 
       <div class="flex flex-wrap gap-2 pt-1">
-        <button type="button" class="btn-secondary text-[11px] px-2.5 py-1" disabled={!canApply} onclick={applyBatch}>
+        <button type="button" class="btn-secondary text-[length:var(--text-compact,14px)] px-2.5 py-1" disabled={!canApply} onclick={applyBatch}>
           {i18n.t('import.batchAuth.apply', { count: selectedCount })}
         </button>
-        <button type="button" class="btn-ghost text-[11px] px-2.5 py-1" disabled={disabled || selectedCount === 0} onclick={onMatchExisting}>
+        <button type="button" class="btn-ghost text-[length:var(--text-compact,14px)] px-2.5 py-1" disabled={disabled || selectedCount === 0} onclick={onMatchExisting}>
           {i18n.t('import.batchAuth.matchExisting')}
         </button>
       </div>

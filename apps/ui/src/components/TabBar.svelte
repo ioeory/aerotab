@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree, ArrowLeftRight, PanelLeft, PanelTop } from '@lucide/svelte';
+  import { workspaceMenu } from '../lib/workspaceMenu';
+  import { X, Terminal as TerminalIcon, Server, Usb, Columns2, Rows2, Plus, FolderOpen, ListTree, ArrowLeftRight, PanelLeft, PanelTop, Pencil, RotateCcw, Copy, XCircle } from '@lucide/svelte';
   import { tabs, type SplitDir, type Tab } from '../lib/tabs.svelte';
   import { dispatchFocusPane } from '../lib/focusPane';
+  import { isOverlayBlockingInput } from '../lib/modalFocus';
   import {
     endPaneDrag,
     getPaneDragHit,
@@ -166,7 +168,9 @@
   function activateTab(tabId: string) {
     tabs.activate(tabId);
     const tab = tabs.tabs.find((candidate) => candidate.id === tabId);
-    requestAnimationFrame(() => dispatchFocusPane(tab?.activePaneId));
+    requestAnimationFrame(() => {
+      if (!isOverlayBlockingInput()) dispatchFocusPane(tab?.activePaneId);
+    });
   }
 
   async function renameTab(tab: Tab) {
@@ -187,7 +191,7 @@
 <svelte:window onclick={closeMenu} onkeydown={onTabListKeydown} />
 
 <div data-aerotab-context-menu="" class="tabbar-shell flex items-stretch gap-1 px-2 pt-2 select-none">
-  <div class="tab-strip flex items-stretch gap-1 min-w-0 overflow-x-auto">
+  <div class="tab-strip flex items-stretch gap-1 min-w-0 overflow-x-auto" role="tablist" aria-label={i18n.t('tabbar.tabList')}>
   {#each tabs.tabs as tab, i (tab.id)}
     {@const tabChromeRev = tabs.revision}
     {@const first = tabs.firstPane(tab)}
@@ -222,7 +226,7 @@
       <Icon size={13} class={isActive ? 'text-[var(--color-accent)]' : ''} />
       <span class="truncate max-w-[180px]" title={tabs.displayTitle(tab)}>{tabs.displayTitle(tab)}</span>
       {#if tab.kind !== 'transfer' && tab.panes.length > 1}
-        <span class="text-[10px] px-1 rounded bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]">
+        <span class="text-[12px] px-1 rounded bg-[var(--color-panel-2)] text-[var(--color-fg-muted)]">
           {tab.panes.length}
         </span>
       {/if}
@@ -297,6 +301,7 @@
     onclick={() => { tabListOpen = false; }}
   ></div>
   <div
+    use:workspaceMenu={closeMenu}
     data-aerotab-tab-list=""
     data-aerotab-context-menu=""
     data-aerotab-menu-open=""
@@ -304,7 +309,7 @@
     style="z-index: var(--z-menu);"
     role="menu"
   >
-    <div class="px-3 py-1.5 text-[10px] uppercase tracking-wide text-[var(--color-fg-muted)]">
+    <div class="px-3 py-1.5 text-[12px] uppercase tracking-wide text-[var(--color-fg-muted)]">
       {i18n.t('tabbar.tabListCount', { count: tabs.tabs.length })}
     </div>
     {#each tabs.tabs as tab, i (tab.id)}
@@ -321,7 +326,7 @@
         <Icon size={13} class="shrink-0" />
         <span class="min-w-0 flex-1 truncate text-left">{i + 1}. {tabs.displayTitle(tab)}</span>
         {#if tab.panes.length > 1}
-          <span class="shrink-0 text-[10px] text-[var(--color-fg-muted)]">{tab.panes.length}</span>
+          <span class="shrink-0 text-[12px] text-[var(--color-fg-muted)]">{tab.panes.length}</span>
         {/if}
         {#if act === 'bell'}
           <span class="shrink-0 w-1.5 h-1.5 rounded-full bg-[var(--color-danger)]"></span>
@@ -336,6 +341,7 @@
 {#if menuOpen && menuTab}
   <div
     bind:this={menuEl}
+    use:workspaceMenu={closeMenu}
     data-aerotab-context-menu=""
     data-aerotab-menu-open=""
     class="panel fixed z-[200] min-w-[180px] py-1 text-[12px]"
@@ -344,42 +350,42 @@
   >
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const t = menuTab!; closeMenu(); void renameTab(t); }}>
-      {i18n.t('tabbar.renameTab')}
+      <Pencil size={15} /> {i18n.t('tabbar.renameTab')}
     </button>
     {#if menuTab.customTitle?.trim()}
       <button type="button" class="ctx-item" role="menuitem"
               onclick={() => { const t = menuTab!; closeMenu(); resetTabTitle(t); }}>
-        {i18n.t('tabbar.resetTabTitle')}
+        <RotateCcw size={15} /> {i18n.t('tabbar.resetTabTitle')}
       </button>
     {/if}
     <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const t = menuTab!; closeMenu(); void closeTab(t); }}>
-      {menuTab.kind === 'transfer' ? i18n.t('tabbar.closeTransferTab') : i18n.t('tabbar.closeTab')}
+      <X size={15} /> {menuTab.kind === 'transfer' ? i18n.t('tabbar.closeTransferTab') : i18n.t('tabbar.closeTab')}
     </button>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const id = menuTab!.id; closeMenu(); onCloseOthers?.(id); }}>
-      {i18n.t('tabbar.closeOthers')}
+      <XCircle size={15} /> {i18n.t('tabbar.closeOthers')}
     </button>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { const idx = menuTabIndex; closeMenu(); onCloseToRight?.(idx); }}
             disabled={menuTabIndex >= tabs.tabs.length - 1}>
-      {i18n.t('tabbar.closeToRight')}
+      <PanelLeft size={15} /> {i18n.t('tabbar.closeToRight')}
     </button>
     <button type="button" class="ctx-item" role="menuitem"
             onclick={() => { closeMenu(); onCloseAll?.(); }}>
-      {i18n.t('tabbar.closeAll')}
+      <XCircle size={15} /> {i18n.t('tabbar.closeAll')}
     </button>
     {#if menuTab.kind === 'terminal'}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       <button type="button" class="ctx-item" role="menuitem"
               onclick={() => { const t = menuTab!; closeMenu(); onDuplicateTab?.(t); }}>
-        {i18n.t('tabbar.duplicateTab')}
+        <Copy size={15} /> {i18n.t('tabbar.duplicateTab')}
       </button>
       <button type="button" class="ctx-item" role="menuitem"
               onclick={() => { const t = menuTab!; closeMenu(); activateTab(t.id); onOpenSftp?.(); }}
               disabled={!menuTab.panes.some((p) => p.kind === 'Ssh' || p.profileId || p.sshProfile)}>
-        {i18n.t('tabbar.openSftpTab')}
+        <FolderOpen size={15} /> {i18n.t('tabbar.openSftpTab')}
       </button>
     {/if}
   </div>
@@ -389,17 +395,76 @@
 <style>
   .tabbar-shell {
     min-width: 0;
+    gap: 4px;
+    padding: 6px 8px 0;
+    background: var(--color-bg-soft);
+    border-bottom: 1px solid var(--color-border-soft);
+    font-size: var(--text-compact, 14px);
   }
-  .tab-strip {
-    scrollbar-width: thin;
-  }
+  .tab-strip { scrollbar-width: thin; }
   .tab-actions {
     position: sticky;
     right: 0;
-    background: var(--color-panel);
-    box-shadow: -10px 0 12px color-mix(in srgb, var(--color-panel) 80%, transparent);
+    margin-bottom: 5px;
+    padding-left: 8px;
+    border-left: 1px solid var(--color-border-soft);
+    background: var(--color-bg-soft);
   }
   .tab-shell {
-    flex: 0 0 auto;
+    position: relative;
+    flex: 0 1 auto;
+    min-width: 112px;
+    min-height: 38px;
+    max-width: 280px;
+    font-size: var(--text-compact, 14px);
+    font-weight: 500;
+    border-radius: 7px 7px 0 0;
+    transition: background 120ms ease;
   }
+  .tab-shell[aria-selected='true'] {
+    background: var(--color-panel);
+    border-color: var(--color-border-soft);
+    box-shadow: inset 0 2px var(--color-accent);
+  }
+  .tab-shell > span:not(.truncate) { font-size: var(--text-meta, 12px); }
+  .tab-shell > button { min-width: 24px; min-height: 24px; border-radius: 4px; }
+  .tab-shell > button:hover { background: var(--color-panel-2); }
+  .tab-new-button { align-self: center; margin-bottom: 4px; }
+  .tab-new-button, .tab-actions button { min-width: 30px; min-height: 30px; }
+  :global(.workspace-menu) {
+    padding: 5px;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    border: 1px solid var(--color-border);
+    border-radius: 9px;
+    background: var(--color-surface-raised);
+    color: var(--color-fg);
+    font-size: var(--text-compact, 14px);
+    line-height: 1.5;
+    box-shadow: var(--shadow-panel);
+  }
+  :global(.workspace-menu button) {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 34px;
+    padding: 6px 10px;
+    border-radius: 5px;
+    text-align: left;
+    font-size: inherit;
+  }
+  :global(.workspace-menu button:hover:not(:disabled)),
+  :global(.workspace-menu button:focus-visible) { background: var(--color-panel-2); }
+  :global(.workspace-menu button:focus-visible) { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+  :global(.workspace-menu button:disabled) { opacity: 0.5; cursor: not-allowed; }
+  :global(.workspace-menu svg) { flex-shrink: 0; }
+  :global(.workspace-menu kbd) { margin-left: auto; font-size: var(--text-meta, 12px); color: var(--color-fg-muted); }
+  .tab-shell:focus-visible, .tabbar-shell button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+  @media (max-width: 900px) {
+    .tab-actions { gap: 0; padding-left: 4px; }
+    .tab-actions button { min-width: 26px; }
+    .tab-shell { min-width: 96px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .tab-shell { transition: none; } }
 </style>

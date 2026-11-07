@@ -107,7 +107,7 @@
   <div use:portal class="contents">
     <dialog
       bind:this={dialog}
-      class="app-confirm-dialog {pending?.position ? 'app-confirm-dialog--anchored' : ''} min-w-[360px] max-w-[min(440px,calc(100vw-32px))]"
+      class="app-confirm-dialog {pending?.position ? 'app-confirm-dialog--anchored' : ''} w-[min(520px,calc(100vw-32px))] min-w-0 max-h-[calc(100vh-32px)] overflow-y-auto"
       style={dialogStyle()}
       onclose={onDialogClose}
       onkeydown={onKeydown}
@@ -116,11 +116,11 @@
     >
       <div class="p-5">
         {#if pending.title}
-          <h2 id="app-confirm-title" class="text-[14px] font-semibold text-[var(--color-fg)] mb-2">
+          <h2 id="app-confirm-title" class="text-[length:var(--text-section,20px)] font-semibold text-[var(--color-fg)] mb-2">
             {pending.title}
           </h2>
         {/if}
-        <p id="app-confirm-message" class="text-[13px] leading-relaxed text-[var(--color-fg)] whitespace-pre-wrap">
+        <p id="app-confirm-message" class="text-[length:var(--text-ui,16px)] [overflow-wrap:anywhere] leading-relaxed text-[var(--color-fg)] whitespace-pre-wrap">
           {pending.message}
         </p>
         {#if isPrompt && pending.kind === 'prompt'}
@@ -131,6 +131,7 @@
               class="input w-full mt-4 resize-y min-h-[72px]"
               rows={pending.rows}
               placeholder={pending.placeholder ?? ''}
+              aria-labelledby="app-confirm-message"
               onkeydown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault();
@@ -145,6 +146,7 @@
               type="text"
               class="input w-full mt-4"
               placeholder={pending.placeholder ?? ''}
+              aria-labelledby="app-confirm-message"
               onkeydown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
@@ -154,7 +156,7 @@
             />
           {/if}
         {/if}
-        <div class="flex justify-end gap-2 mt-5">
+        <div class="flex flex-wrap justify-end gap-2 mt-5">
           <button type="button" class="btn-secondary" onclick={onCancel}>
             {cancelLabel()}
           </button>

@@ -157,6 +157,9 @@ mod apply_tests {
                     user: user.into(),
                     auth,
                     jump_via: vec![],
+                    jump_profile_ids: vec![],
+                    proxy_id: None,
+                    resolved_proxy: None,
                 },
             },
         }
@@ -202,6 +205,9 @@ mod apply_tests {
                         passphrase: None,
                     },
                     jump_via: vec![],
+                    jump_profile_ids: vec![],
+                    proxy_id: None,
+                    resolved_proxy: None,
                 },
             },
         };

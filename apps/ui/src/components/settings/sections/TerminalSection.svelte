@@ -47,9 +47,14 @@
   let rightClickAction = $state<RightClick>('menu');
   let middleClickPaste = $state(false);
 
-  function markDirty() { settingsCoord.markDirty(); }
+  function markDirty() { settingsCoord.markDirty('terminal'); }
 
+  let loaded = $state(false);
+  let loading = $state(false);
+  let loadError = $state('');
   async function load() {
+    if (loading) return;
+    loading = true; loaded = false; loadError = '';
     try {
       const t = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminal' });
       if (t.value && typeof t.value === 'object') {
@@ -87,12 +92,15 @@
         }
         if (typeof v.middleClickPaste === 'boolean') middleClickPaste = v.middleClickPaste;
       }
+      loaded = true;
     } catch (e) {
-      onError(`terminal load: ${(e as Error).message}`);
-    }
+      loadError = (e as Error).message ?? String(e);
+      onError(`terminal load: ${loadError}`);
+    } finally { loading = false; }
   }
 
   async function save() {
+    if (!loaded) throw new Error(loadError || i18n.t('common.loading'));
     await rpc.call('settings.set', {
       key: 'terminal',
       value: {
@@ -123,7 +131,10 @@
 </script>
 
 <div class="settings-section">
-  <h2>Terminal</h2>
+  <h2>{i18n.t('settings.nav.terminal')}</h2>
+  {#if loadError}<div role="alert"><p>{loadError}</p><button type="button" class="btn-secondary" disabled={loading} onclick={load}>{i18n.t('common.refresh')}</button></div>
+  {:else if loading}<p role="status">{i18n.t('common.loading')}</p>{/if}
+  <fieldset disabled={!loaded || settingsCoord.saving} class="settings-fields">
 
   <div>
     <div class="section-h">Rendering</div>
@@ -261,4 +272,6 @@
       Restore previous tabs &amp; panes (requires M9 session-restore backend)
     </label>
   </div>
+  </fieldset>
 </div>
+<style>.settings-fields { border: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 24px; }</style>

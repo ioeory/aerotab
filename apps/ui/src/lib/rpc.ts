@@ -28,7 +28,22 @@ class HttpRpcClient implements RpcClient {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(req),
     });
-    const json: RpcResponse<T> = await resp.json();
+    const desktopHint = 'Open AeroTab desktop or connect a JSON-RPC backend; Vite alone only provides UI preview.';
+    if (!resp.ok) throw new Error(`RPC backend unavailable (HTTP ${resp.status}). ${desktopHint}`);
+    const body = await resp.text();
+    if (!body.trim()) throw new Error(`RPC backend returned an empty response. ${desktopHint}`);
+    let json: RpcResponse<T>;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      // Never include response bodies: they can contain credentials or proxy error details.
+      throw new Error(`RPC backend returned invalid JSON. ${desktopHint}`);
+    }
+    if (!json || typeof json !== 'object' || json.jsonrpc !== '2.0' || json.id !== req.id
+      || (Object.hasOwn(json, 'result') === Object.hasOwn(json, 'error'))
+      || (Object.hasOwn(json, 'error') && (!json.error || typeof json.error.code !== 'number' || typeof json.error.message !== 'string'))) {
+      throw new Error(`RPC backend returned an invalid JSON-RPC response. ${desktopHint}`);
+    }
     if (json.error) throw new Error(`${json.error.code}: ${json.error.message}`);
     return json.result as T;
   }

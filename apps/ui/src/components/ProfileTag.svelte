@@ -17,3 +17,17 @@
   {style}
   title={tag}
 >{tag}</span>
+
+<style>
+  .profile-tag {
+    font-family: var(--font-sans, system-ui, sans-serif);
+    font-size: var(--text-compact, 14px);
+    line-height: 1.5;
+    max-width: min(240px, 100%);
+    min-width: 0;
+  }
+  .profile-tag--compact {
+    font-size: var(--text-meta, 12px);
+    line-height: 1.5;
+  }
+</style>

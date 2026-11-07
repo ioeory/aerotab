@@ -155,6 +155,9 @@ fn map_row(line_no: usize, cells: &[String], field_map: &HashMap<&str, usize>) -
                 user: user.unwrap_or_else(|| "root".into()),
                 auth,
                 jump_via: vec![],
+                jump_profile_ids: vec![],
+                proxy_id: None,
+                resolved_proxy: None,
             };
             (
                 "ssh".to_string(),

@@ -1,6 +1,19 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import Sidebar from './components/Sidebar.svelte';
+  import ResourceWorkspace from './components/hosts/ResourceWorkspace.svelte';
+  import PrimaryNav from './components/PrimaryNav.svelte';
+  import type { WorkspacePage } from './lib/workspacePages';
+  import { toggleAuxiliaryPanel, type AuxiliaryPanels } from './lib/sessionAuxiliary';
+  import { getHostMonitoring } from './lib/hostMonitoring.svelte';
+  import MonitoringWorkspace from './components/MonitoringWorkspace.svelte';
+  import HostSystemPanel from './components/HostSystemPanel.svelte';
+  import NotesWorkspace from './components/notes/NotesWorkspace.svelte';
+  import SessionNotesPanel from './components/notes/SessionNotesPanel.svelte';
+  import ScriptsWorkspace from './components/ScriptsWorkspace.svelte';
+  import ProxyWorkspace from './components/ProxyWorkspace.svelte';
+  import ForwardingWorkspace from './components/ForwardingWorkspace.svelte';
+  import ResourcesWorkspace from './components/ResourcesWorkspace.svelte';
+  import FilesWorkspace from './components/FilesWorkspace.svelte';
   import TabBar from './components/TabBar.svelte';
   import PaneGrid from './components/PaneGrid.svelte';
   import AppConfirmDialog from './components/AppConfirmDialog.svelte';
@@ -9,21 +22,20 @@
   import VaultUnlockModal from './components/VaultUnlockModal.svelte';
   import SerialModal from './components/SerialModal.svelte';
   import SftpBrowser from './components/SftpBrowser.svelte';
-  import FileTransferWindow from './components/FileTransferWindow.svelte';
   import BatchCommandModal from './components/BatchCommandModal.svelte';
   import ImportConnectionsWizard from './components/ImportConnectionsWizard.svelte';
   import SettingsLayout from './components/settings/SettingsLayout.svelte';
   import CommandPalette, { type Action } from './components/CommandPalette.svelte';
   import ProfileSelector, { type PickerItem } from './components/ProfileSelector.svelte';
   import { selectClient, uuidv4 } from './lib/rpc';
-  import { tabs, type PaneNode, type SplitDir, type SplitSide, type Tab, type TransferBootstrap } from './lib/tabs.svelte';
+  import { tabs, type PaneNode, type SplitDir, type SplitSide, type Tab } from './lib/tabs.svelte';
   import { applyStoredSettingsToUi } from './lib/applyStoredSettings';
-  import { applyTheme, BUILTIN_THEMES } from './lib/theme';
+  import { loadAppliedAppearance } from './lib/appliedAppearance';
   import { applyCustomCss, applyLigatures } from './lib/customCss';
   import { applyWindowSettings, getWindowSettings } from './lib/windowSettings';
   import { settingsCoord } from './lib/settingsStore.svelte';
   import { i18n } from './lib/i18n.svelte';
-  import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient } from './lib/diagnostics.svelte';
+  import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient, sanitizeMessage } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
@@ -45,6 +57,8 @@
   import { profileVisualsStore } from './lib/profileVisualsStore.svelte';
   import { sshProfileFromSshConfig, type SshConfigEntry } from './lib/sshConfigJump';
   import { PROFILES_CHANGED } from './lib/profileEvents';
+  import { getProfileCatalog } from './lib/profileCatalog.svelte';
+  import { getNotesStore } from './lib/notes.svelte';
   import { IMPORT_CONNECTIONS_OPEN } from './lib/importConnections';
   import { profileEndpointLabel } from './lib/profileMeta';
   import { startHorizontalPanelResize } from './lib/panelResize';
@@ -78,7 +92,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.28-ui-20261104-native-shortcuts';
+  const buildId = '0.2.30-ui-20261107-host-stats-effect-fix';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -130,10 +144,56 @@
   let batchCommandOpen = $state(false);
   let importWizardOpen = $state(false);
   let pickerOpen = $state(false);
-  let savedProfiles = $state<StoredProfile[]>([]);
+  const sharedCatalog = getProfileCatalog(rpc);
+  let savedProfiles = $derived(sharedCatalog.profiles);
+  $effect(() => { getHostMonitoring(rpc).setProfiles(savedProfiles); });
   let sessionWorkspaces = $state<SessionWorkspace[]>([]);
   let workspaceOpening = $state(false);
   const WORKSPACE_SESSION_TIMEOUT_MS = 20_000;
+  let workspacePage = $state<WorkspacePage>('hosts');
+  let filesWorkspace: { openEndpoint: (side: 'left' | 'right', profileId: string, path?: string) => void } | null = $state(null);
+  let auxiliaryPanels = $state<AuxiliaryPanels>({});
+  function toggleSessionAuxiliary(panel: 'system' | 'notes') {
+    if (!tabs.activeId) return;
+    auxiliaryPanels = toggleAuxiliaryPanel(auxiliaryPanels, tabs.activeId, panel);
+    sftpDockCollapsed = { ...sftpDockCollapsed, [tabs.activeId]: true };
+    requestAnimationFrame(() => {
+      dispatchFitAllPanes(tabs.tabs.flatMap(tab => tab.panes.map(pane => pane.id)));
+      focusActivePane();
+    });
+  }
+  let observedActiveTab: string | null = null;
+  let observedSessionIds = new Set<string>();
+  // A new or explicitly activated tab reveals the workspace without unmounting it.
+  $effect(() => {
+    const active = tabs.activeId;
+    const ids = tabs.tabs.flatMap(tab => tab.panes.map(pane => pane.id));
+    const openedSession = ids.some(id => !observedSessionIds.has(id));
+    if ((active && active !== observedActiveTab) || openedSession) workspacePage = 'sessions';
+    const legacyTransfer = tabs.tabs.find(tab => tab.id === active && tab.kind === 'transfer');
+    if (legacyTransfer) {
+      const bootstrap = legacyTransfer.transferBootstrap;
+      workspacePage = 'files';
+      requestAnimationFrame(() => {
+        if (bootstrap?.leftId) filesWorkspace?.openEndpoint('left', bootstrap.leftId);
+        const right = bootstrap?.rightId ?? bootstrap?.rightProfileId;
+        if (right) filesWorkspace?.openEndpoint('right', right);
+        tabs.remove(legacyTransfer.id);
+        observedActiveTab = tabs.activeId;
+        workspacePage = 'files';
+      });
+    }
+    observedActiveTab = active;
+    observedSessionIds = new Set(ids);
+  });
+  function navigateWorkspace(page: WorkspacePage) {
+    if (page === 'files') {
+      workspacePage = 'files';
+    } else {
+      workspacePage = page;
+      if (page === 'sessions') requestAnimationFrame(() => { dispatchFitAllPanes(tabs.tabs.flatMap(tab => tab.panes.map(pane => pane.id))); focusActivePane(); });
+    }
+  }
   let sidebarVisible = $state(true);
   const SIDEBAR_WIDTH_MIN = 180;
   const SIDEBAR_WIDTH_MAX = 480;
@@ -696,10 +756,7 @@
     }
     // Pull the persisted theme (if any) and apply before first paint of panes.
     try {
-      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'theme' });
-      const name = typeof r.value === 'string' ? r.value : 'tokyo-night';
-      const theme = BUILTIN_THEMES.find((t) => t.name === name) ?? BUILTIN_THEMES[0];
-      if (theme) applyTheme(theme);
+      await loadAppliedAppearance(rpc);
     } catch {
       /* settings store may not be available — keep CSS defaults. */
     }
@@ -799,12 +856,14 @@
     setStatus(i18n.t('app.status.idle'));
   }
 
-  function onError(msg: string) {
-    diagnostics.record(categoryForStatus(msg), 'status', msg, 'error');
-    setStatus(msg, 'error', 6000);
+  function onError(error: unknown) {
+    const message = sanitizeMessage(error);
+    diagnostics.record(categoryForStatus(message), 'status', message, 'error');
+    setStatus(message, 'error', 6000);
   }
 
   function focusActivePane() {
+    if (workspacePage !== 'sessions') return;
     const tab = tabs.tabs.find((candidate) => candidate.id === tabs.activeId);
     const pane = tab ? tabs.activePane(tab) : undefined;
     if (pane) dispatchFocusPane(pane.id);
@@ -817,6 +876,7 @@
 
   function closeSettings() {
     settingsOpen = false;
+    void loadAppliedAppearance(rpc).catch(onError);
     requestAnimationFrame(() => focusActivePane());
   }
 
@@ -1239,6 +1299,9 @@
   }
 
   function openSftpDock(target: SftpDockTarget, tabId = tabs.activeId ?? GLOBAL_SFTP_KEY) {
+    const nextPanels = { ...auxiliaryPanels };
+    delete nextPanels[tabId];
+    auxiliaryPanels = nextPanels;
     sftpDockOpen = { ...sftpDockOpen, [tabId]: true };
     sftpDockCollapsed = { ...sftpDockCollapsed, [tabId]: false };
     sftpDockPinned = { ...sftpDockPinned, [tabId]: target };
@@ -1256,26 +1319,13 @@
     sftpWindows = sftpWindows.filter((window) => window.id !== id);
   }
 
-  function openFileTransferWindow(initialTarget: SftpDockTarget | null = null, initialProfileId: string | null = null) {
-    const bootstrap: TransferBootstrap | undefined = initialProfileId
-      ? { leftId: '__local__', rightId: initialProfileId, rightProfileId: initialProfileId }
-      : undefined;
-    const title = initialTarget?.name ?? i18n.t('transfer.tabTitle');
-    const existing = tabs.tabs.find((t) => t.kind === 'transfer');
-    if (existing) {
-      if (bootstrap) tabs.setTransferBootstrap(existing.id, bootstrap);
-      tabs.activate(existing.id);
-      return existing.id;
-    }
-    return tabs.addTransferTab(title, bootstrap).id;
+  function openFileTransferWindow(_initialTarget: SftpDockTarget | null = null, initialProfileId: string | null = null) {
+    workspacePage = 'files';
+    if (initialProfileId) requestAnimationFrame(() => filesWorkspace?.openEndpoint('right', initialProfileId));
+    return 'files';
   }
 
   function focusTransferTabId(): string {
-    const existing = tabs.tabs.find((t) => t.kind === 'transfer');
-    if (existing) {
-      tabs.activate(existing.id);
-      return existing.id;
-    }
     return openFileTransferWindow();
   }
 
@@ -1324,6 +1374,11 @@
 
   function setCurrentSftpCollapsed(collapsed: boolean) {
     if (!sftpDockOpen[activeSftpKey]) return;
+    if (!collapsed) {
+      const nextPanels = { ...auxiliaryPanels };
+      delete nextPanels[activeSftpKey];
+      auxiliaryPanels = nextPanels;
+    }
     sftpDockCollapsed = { ...sftpDockCollapsed, [activeSftpKey]: collapsed };
   }
 
@@ -1623,13 +1678,34 @@
   let kbdHandler: ((e: KeyboardEvent) => void) | null = null;
 
   const onProfilesChanged = () => {
-    void refreshProfileList();
+    void refreshProfileList(true);
     void sidebar?.refresh();
   };
 
-  async function refreshProfileList() {
-    try { savedProfiles = await rpc.call<StoredProfile[]>('profile.list'); } catch { savedProfiles = []; }
+  async function refreshProfileList(invalidate = false) {
+    try {
+      const catalog = getProfileCatalog(rpc);
+      await catalog.refresh({ invalidate });
+    } catch { /* Retain the last successful catalog on a transient refresh failure. */ }
   }
+
+  onMount(() => {
+    const internal = (window as unknown as { __TAURI_INTERNALS__?: { transformCallback(handler: () => void): number; unregisterCallback(id: number): void; invoke<T>(command: string, args: Record<string, unknown>): Promise<T> } }).__TAURI_INTERNALS__;
+    if (!internal) return;
+    let disposed = false;
+    let eventId: number | undefined;
+    let closing = false;
+    const callback = internal.transformCallback(() => {
+      if (closing || disposed) return;
+      closing = true;
+      void getNotesStore(rpc).prepareClose().then(() => internal.invoke('authorize_main_window_close', {})).catch(error => onError(String(error))).finally(() => { closing = false; });
+    });
+    void internal.invoke<number>('plugin:event|listen', { event: 'aerotab:prepare-close', target: { kind: 'Any' }, handler: callback }).then(id => {
+      eventId = id;
+      if (disposed) void internal.invoke('plugin:event|unlisten', { event: 'aerotab:prepare-close', eventId: id });
+    }).catch(error => onError(String(error)));
+    return () => { disposed = true; internal.unregisterCallback(callback); if (eventId !== undefined) void internal.invoke('plugin:event|unlisten', { event: 'aerotab:prepare-close', eventId }); };
+  });
 
   // MCP open_terminal only requests a visible connection. The backend must not
   // create a hidden session first: connectProfile owns session + tab creation.
@@ -1934,14 +2010,35 @@
     void hostStatsEnabled;
     void hostStatsIntervalSec;
     const key = activeHostStatsKey();
+    const pane = currentActivePane();
+    const visible = workspacePage === 'sessions';
     hostStatsSeq += 1;
     clearHostStatsPoll();
     hostStats = null;
-    if (!hostStatsEnabled || !key) {
+    if (!hostStatsEnabled || !key || !visible) {
       hostStatsStatus = 'idle';
       return;
     }
     hostStatsStatus = 'loading';
+    if (pane?.profileId) {
+      const monitoring = getHostMonitoring(rpc);
+      monitoring.setProfiles(savedProfiles);
+      const id = pane.profileId;
+      const update = () => {
+        const snapshot = monitoring.service.snapshot(id);
+        // Do not read hostStats here: update also runs synchronously inside the
+        // subscription effect. Reading its output makes every sample tear down
+        // and recreate that subscription (effect_update_depth_exceeded).
+        const stats = snapshot.latest?.stats ?? null;
+        hostStats = stats;
+        hostStatsStatus = snapshot.error ? 'unavailable' : stats ? 'ok' : 'loading';
+        hostStatsUpdatedAt = snapshot.latest?.at ?? null;
+      };
+      const unwatch = monitoring.service.watch(update);
+      const release = monitoring.service.subscribe(id, Math.max(10, hostStatsIntervalSec) * 1000);
+      update();
+      return () => { release(); unwatch(); };
+    }
     void refreshHostStats();
     hostStatsPollHandle = window.setInterval(() => {
       void refreshHostStats();
@@ -1950,32 +2047,49 @@
   });
 </script>
 
-<div class="h-full w-full flex flex-row overflow-hidden">
-  {#if sidebarVisible}
+<div class="h-full w-full flex flex-row overflow-hidden app-shell">
+  <PrimaryNav page={workspacePage} expanded={sidebarVisible} sessionCount={tabs.tabs.length}
+    onNavigate={navigateWorkspace} onToggle={() => { void setSidebarVisible(!sidebarVisible); }}
+    onSettings={() => openSettings('application')} onAppearance={() => openSettings('appearance')} />
+  <div class="resource-host" class:workspace-hidden={workspacePage !== 'hosts'} data-native-view-blocker={workspacePage === 'hosts' ? '' : undefined}>
     <div
-      class="shrink-0 flex flex-col h-full min-w-0 border-r border-[var(--color-border-soft)]"
-      style="width: {sidebarWidthPx}px; min-width: {SIDEBAR_WIDTH_MIN}px; max-width: min({SIDEBAR_WIDTH_MAX}px, 40vw);"
+      class="flex flex-col h-full min-w-0 flex-1"
     >
-      <Sidebar
+      <ResourceWorkspace
+        active={workspacePage === 'hosts'}
+        onImportProfiles={() => { importWizardOpen = true; }}
         {rpc}
         bind:this={sidebar}
         openProfileModal={(p, opts) => profileModal?.open(p, opts)}
         openSerialModal={() => serialModal?.open()}
-        openSftp={(p) => { if (p.kind === 'ssh') openSftpDock({ name: p.name, ssh: p.ssh }); }}
+        openSftp={(p) => { if (p.kind === 'ssh') { workspacePage = 'sessions'; openSftpDock({ name: p.name, ssh: p.ssh }); } }}
         openSettings={() => openSettings()}
         onShowTransfer={() => openFileTransferWindow()}
         {onError}
       />
     </div>
-    <button
-      type="button"
-      aria-label={i18n.t('sidebar.resizeSidebar')}
-      class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
-      onpointerdown={onSidebarResizePointerDown}
-    ></button>
+  </div>
+  <section class="resource-host" class:workspace-hidden={workspacePage !== 'files'} data-native-view-blocker={workspacePage === 'files' ? '' : undefined}>
+    <FilesWorkspace {rpc} profiles={savedProfiles} {onError} bind:this={filesWorkspace} />
+  </section>
+  {#if workspacePage !== 'hosts' && workspacePage !== 'sessions' && workspacePage !== 'files'}
+    <section class="resource-host" data-native-view-blocker="">
+      {#if workspacePage === 'monitoring'}
+        <MonitoringWorkspace {rpc} profiles={savedProfiles} {onError} />
+      {:else if workspacePage === 'notes'}
+        <NotesWorkspace {rpc} profiles={savedProfiles} {onError} />
+      {:else if workspacePage === 'scripts'}
+        <ScriptsWorkspace {rpc} profiles={savedProfiles} {onError} />
+      {:else if workspacePage === 'proxies'}
+        <ProxyWorkspace {rpc} profiles={savedProfiles} {onError} />
+      {:else if workspacePage === 'forwarding'}
+        <ForwardingWorkspace {rpc} profiles={savedProfiles} {onError} />
+      {:else}
+        <ResourcesWorkspace {rpc} profiles={savedProfiles} {onError} section={workspacePage === 'keychain' ? 'vault' : workspacePage === 'knownHosts' ? 'known-hosts' : 'logs'} />
+      {/if}
+    </section>
   {/if}
-
-  <main class="flex flex-col flex-1 min-w-0 bg-[var(--color-panel)]">
+  <main class="session-workspace flex flex-col flex-1 min-w-0 bg-[var(--color-panel)]" class:workspace-hidden={workspacePage !== 'sessions'}>
     <div class="flex flex-col flex-1 min-h-0 min-w-0">
       <TabBar
         {rpc}
@@ -1992,26 +2106,22 @@
         onCloseAll={() => { closeAllTabs(); }}
       />
 
+      <div class="session-auxiliary-toolbar">
+        <button class="btn-ghost" disabled={!activePane || !isSshPane(activePane)} aria-pressed={!!tabs.activeId && auxiliaryPanels[tabs.activeId] === 'system'} onclick={() => toggleSessionAuxiliary('system')}>{i18n.t('shell.system')}</button>
+        <button class="btn-ghost" disabled={!tabs.activeId} aria-pressed={!!tabs.activeId && auxiliaryPanels[tabs.activeId] === 'notes'} onclick={() => toggleSessionAuxiliary('notes')}>{i18n.t('shell.notes')}</button>
+      </div>
       <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">
         <div class="relative flex-1 min-w-0 min-h-0">
           {#each tabs.tabs as tab (tab.id)}
             <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
-              {#if tab.kind === 'transfer'}
-                <FileTransferWindow
-                  {rpc}
-                  tabId={tab.id}
-                  transferBootstrap={tab.transferBootstrap}
-                  onOpenSftpDock={() => { void openSftpForActivePane(); }}
-                  {onError}
-                />
-              {:else}
+              {#if tab.kind !== 'transfer'}
                 <PaneGrid
                   {rpc}
                   {tab}
                   settingsRev={settingsRev}
                   {terminalViewChoices}
                   nativeSurfaceOccluded={nativeSurfaceBlocked}
-                  tabVisible={tabs.activeId === tab.id}
+                  tabVisible={workspacePage === 'sessions' && tabs.activeId === tab.id}
                   broadcastEnabled={broadcastOn}
                   broadcastTargetIds={broadcastTargets}
                   onOpenSftp={() => { void openSftpForActivePane(); }}
@@ -2032,6 +2142,15 @@
             </div>
           {/if}
         </div>
+        {#if tabs.activeId && auxiliaryPanels[tabs.activeId] && workspacePage === 'sessions'}
+          <aside class="session-auxiliary-panel" data-native-view-blocker="">
+            {#if auxiliaryPanels[tabs.activeId] === 'system'}
+              <HostSystemPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />
+            {:else if auxiliaryPanels[tabs.activeId] === 'notes'}
+              <SessionNotesPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />
+            {/if}
+          </aside>
+        {/if}
         <!-- Keep SFTP browsers mounted for every tab with an open dock (like terminal panes). -->
         {#if sftpDockKeepAliveTabs.length > 0}
           {#if hasOpenSftpDock && currentSftpCollapsed}
@@ -2048,11 +2167,11 @@
                 <PanelRightOpen size={15} />
               </button>
               {#if currentSftpDock}
-                <span class="text-[9px] text-[var(--color-fg-muted)] [writing-mode:vertical-rl] rotate-180 truncate max-h-[120px]" title={currentSftpDock.name}>
+                <span class="text-[12px] text-[var(--color-fg-muted)] [writing-mode:vertical-rl] rotate-180 truncate max-h-[120px]" title={currentSftpDock.name}>
                   {currentSftpDock.name}
                 </span>
                 {#if (dockTransferCounts[activeSftpKey] ?? 0) > 0}
-                  <span class="text-[9px] px-1 py-0.5 rounded bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
+                  <span class="text-[12px] px-1 py-0.5 rounded bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
                     {dockTransferCounts[activeSftpKey]}
                   </span>
                 {/if}
@@ -2131,7 +2250,7 @@
 
 
     <footer class="px-3 py-1.5 border-t border-[var(--color-border-soft)] bg-[var(--color-panel)] flex items-center gap-3
-                   text-[11px] text-[var(--color-fg-muted)] font-mono">
+                   text-[12px] text-[var(--color-fg-muted)]">
       <button type="button"
               class="btn-ghost p-0.5"
               title={sidebarVisible ? i18n.t('app.footer.hideSidebar') : i18n.t('app.footer.showSidebar')}
@@ -2154,7 +2273,7 @@
       {#if terminalFrontendKind}
         <button
           type="button"
-          class="px-1.5 py-0.5 rounded text-[10px] shrink-0 font-sans cursor-pointer
+          class="px-1.5 py-0.5 rounded text-[12px] shrink-0 font-sans cursor-pointer
                  hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]
                  {terminalFrontendKind === 'native-surface'
                    ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
@@ -2205,7 +2324,7 @@
         <span class="hidden lg:inline text-[var(--color-fg-muted)]" title={i18n.t('app.footer.hostStatsUnavailable')}>{i18n.t('app.footer.statsUnavailable')}</span>
       {/if}
       {#if broadcastOn}
-        <span class="px-1.5 py-0.5 rounded text-[10px] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" title={i18n.t('app.footer.broadcastOn')}>
+        <span class="px-1.5 py-0.5 rounded text-[12px] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" title={i18n.t('app.footer.broadcastOn')}>
           Bcast
         </span>
       {/if}
@@ -2295,3 +2414,12 @@
     {onError}
   />
 {/each}
+
+<style>
+  .resource-host{display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
+  .workspace-hidden{display:none!important}
+  .session-workspace{min-height:0}
+  .session-auxiliary-toolbar{display:flex;justify-content:flex-end;gap:8px;padding:3px 12px;border-top:1px solid var(--color-border-soft)}
+  .session-auxiliary-toolbar button[aria-pressed="true"]{color:var(--color-accent);background:var(--color-accent-soft)}
+  .session-auxiliary-panel{width:360px;max-width:45vw;min-width:260px;overflow:auto;border-left:1px solid var(--color-border-soft);background:var(--color-panel);flex-shrink:0}
+</style>

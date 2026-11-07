@@ -91,6 +91,7 @@ pub struct VaultStore {
 
 struct Inner {
     tree: sled::Tree,
+    deletions: sled::Tree,
     /// `None` when locked. `Some(password)` when unlocked.
     secret: RwLock<Option<Vec<u8>>>,
     params: KdfParams,
@@ -109,6 +110,7 @@ impl VaultStore {
         Ok(Self {
             inner: Arc::new(Inner {
                 tree,
+                deletions: db.open_tree("vault_deletions")?,
                 secret: RwLock::new(None),
                 params,
             }),
@@ -198,6 +200,8 @@ impl VaultStore {
         let json = serde_json::to_vec(&entry)?;
         let envelope = encrypt(&secret, &json, self.inner.params)?;
         self.inner.tree.insert(entry.id.as_bytes(), envelope)?;
+        self.inner.deletions.remove(entry.id.as_bytes())?;
+        self.inner.deletions.flush()?;
         self.inner.tree.flush()?;
         Ok(entry)
     }
@@ -205,8 +209,23 @@ impl VaultStore {
     pub async fn remove(&self, id: &str) -> Result<bool, VaultError> {
         let _ = self.read_secret().await?; // require unlock
         let prev = self.inner.tree.remove(id)?;
+        if prev.is_some() {
+            self.inner.deletions.insert(id, &[])?;
+            self.inner.deletions.flush()?;
+        }
         self.inner.tree.flush()?;
         Ok(prev.is_some())
+    }
+
+    pub fn explicit_deletions(&self) -> Result<Vec<String>, VaultError> {
+        self.inner
+            .deletions
+            .iter()
+            .map(|item| {
+                let (key, _) = item?;
+                Ok(String::from_utf8_lossy(&key).into_owned())
+            })
+            .collect()
     }
 
     /// Change master password by re-encrypting every entry + verifier.

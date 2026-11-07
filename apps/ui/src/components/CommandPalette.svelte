@@ -99,7 +99,7 @@
             aria-selected={i === selected}
             data-palette-index={i}
             tabindex="-1"
-            class="list-item mx-1 text-[12.5px] {i === selected ? 'list-item-active' : ''}"
+            class="list-item mx-1 text-[length:var(--text-compact,14px)] {i === selected ? 'list-item-active' : ''}"
             onmouseenter={() => (selected = i)}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
@@ -110,20 +110,20 @@
             }}
             onclick={() => { onClose(); void a.run(); }}>
           <div class="flex-1 min-w-0">
-            <div class="truncate">{a.title}</div>
+            <div class="[overflow-wrap:anywhere]">{a.title}</div>
             {#if a.subtitle}
-              <div class="text-[10.5px] text-[var(--color-fg-muted)] truncate">{a.subtitle}</div>
+              <div class="text-[length:var(--text-meta,12px)] text-[var(--color-fg-muted)] [overflow-wrap:anywhere]">{a.subtitle}</div>
             {/if}
           </div>
           {#if a.shortcut}
-            <kbd class="kbd">{a.shortcut}</kbd>
+            <kbd class="kbd shrink-0 text-[length:var(--text-meta,12px)]">{a.shortcut}</kbd>
           {/if}
         </li>
       {/each}
       {#if filtered.length === 0}
-        <li class="px-3 py-4 text-center text-[var(--color-fg-muted)] text-[12px]">
+        <li class="px-3 py-4 text-center text-[var(--color-fg-muted)] text-[length:var(--text-compact,14px)]">
           <div>{i18n.t('common.noMatches')}</div>
-          <div class="mt-1.5 text-[11px] opacity-80">{i18n.t('commandPalette.noMatchesHint')}</div>
+          <div class="mt-1.5 text-[length:var(--text-compact,14px)] opacity-80">{i18n.t('commandPalette.noMatchesHint')}</div>
         </li>
       {/if}
     </ul>

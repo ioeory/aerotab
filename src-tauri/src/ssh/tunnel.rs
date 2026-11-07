@@ -99,15 +99,15 @@ impl TunnelManager {
         };
 
         let task = match req.kind {
-            TunnelKind::Local => {
-                spawn_local_tunnel(req, known_hosts, meta.clone(), shutdown_rx).await?
-            }
-            TunnelKind::Remote => {
-                spawn_remote_tunnel(req, known_hosts, &mut meta, shutdown_rx).await?
-            }
-            TunnelKind::Dynamic => {
-                spawn_dynamic_tunnel(req, known_hosts, meta.clone(), shutdown_rx).await?
-            }
+            TunnelKind::Local => spawn_local_tunnel(req, known_hosts, &mut meta, shutdown_rx)
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?,
+            TunnelKind::Remote => spawn_remote_tunnel(req, known_hosts, &mut meta, shutdown_rx)
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?,
+            TunnelKind::Dynamic => spawn_dynamic_tunnel(req, known_hosts, &mut meta, shutdown_rx)
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?,
         };
 
         let running = RunningTunnel {
@@ -120,9 +120,18 @@ impl TunnelManager {
     }
 
     pub async fn close(&self, id: Uuid) -> bool {
-        if let Some(t) = self.tunnels.lock().await.remove(&id) {
+        let tunnel = self.tunnels.lock().await.remove(&id);
+        if let Some(mut t) = tunnel {
             let _ = t.shutdown_tx.send(());
-            t.task.abort();
+            // Let remote forwards cancel their server-side listener and disconnect.
+            // Aborting immediately would skip cancel_tcpip_forward entirely.
+            if tokio::time::timeout(std::time::Duration::from_secs(3), &mut t.task)
+                .await
+                .is_err()
+            {
+                t.task.abort();
+                let _ = t.task.await;
+            }
             true
         } else {
             false
@@ -134,7 +143,13 @@ impl TunnelManager {
             .lock()
             .await
             .values()
-            .map(|t| t.meta.clone())
+            .map(|t| {
+                let mut meta = t.meta.clone();
+                if t.task.is_finished() {
+                    meta.status = "stopped".into();
+                }
+                meta
+            })
             .collect()
     }
 }
@@ -216,15 +231,15 @@ fn parse_bind_addr(host: &str, port: u16) -> Result<SocketAddr, SshError> {
     } else {
         host
     };
-    format!("{host}:{port}")
-        .parse()
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| SocketAddr::new(ip, port))
         .map_err(|e| SshError::Connect(format!("bind address: {e}")))
 }
 
 async fn spawn_local_tunnel(
     req: TunnelOpenRequest,
     known_hosts: Option<KnownHosts>,
-    meta: TunnelMeta,
+    meta: &mut TunnelMeta,
     mut shutdown: watch::Receiver<()>,
 ) -> Result<JoinHandle<()>, SshError> {
     let bind = parse_bind_addr(&req.bind_host, req.bind_port)?;
@@ -248,35 +263,40 @@ async fn spawn_local_tunnel(
             )
         },
     )
-    .await?;
+    .await
+    .map_err(|e| SshError::Io(e.to_string()))?;
     let handle = Arc::new(Mutex::new(handle));
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|e| SshError::Connect(format!("tunnel local bind: {e}")))?;
+    meta.bind_host = bind.ip().to_string();
+    meta.bind_port = listener
+        .local_addr()
+        .map_err(|e| SshError::Io(e.to_string()))?
+        .port();
 
     Ok(tokio::spawn(async move {
-        let listener = match TcpListener::bind(bind).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("tunnel local bind: {e}");
-                return;
-            }
-        };
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
-                accept = listener.accept() => {
+                _ = connections.join_next(), if !connections.is_empty() => {},
+                accept = listener.accept(), if connections.len() < 256 => {
                     let Ok((tcp, _)) = accept else { continue };
                     let h = handle.clone();
                     let rh = remote_host.clone();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         bridge_direct(h, rh, remote_port, tcp).await;
                     });
                 }
             }
         }
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
         let h = handle.lock().await;
         let _ = h
             .disconnect(Disconnect::ByApplication, "tunnel closed", "en")
             .await;
-        let _ = meta;
     }))
 }
 
@@ -324,7 +344,8 @@ async fn spawn_remote_tunnel(
             }
         },
     )
-    .await?;
+    .await
+    .map_err(|e| SshError::Io(e.to_string()))?;
 
     let bound_port = handle
         .tcpip_forward(&remote_bind_host, remote_bind_port as u32)
@@ -347,7 +368,7 @@ async fn spawn_remote_tunnel(
 async fn spawn_dynamic_tunnel(
     req: TunnelOpenRequest,
     known_hosts: Option<KnownHosts>,
-    meta: TunnelMeta,
+    meta: &mut TunnelMeta,
     mut shutdown: watch::Receiver<()>,
 ) -> Result<JoinHandle<()>, SshError> {
     let bind = parse_bind_addr(&req.bind_host, req.bind_port)?;
@@ -369,24 +390,28 @@ async fn spawn_dynamic_tunnel(
             )
         },
     )
-    .await?;
+    .await
+    .map_err(|e| SshError::Io(e.to_string()))?;
     let handle = Arc::new(Mutex::new(handle));
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|e| SshError::Connect(format!("tunnel dynamic bind: {e}")))?;
+    meta.bind_host = bind.ip().to_string();
+    meta.bind_port = listener
+        .local_addr()
+        .map_err(|e| SshError::Io(e.to_string()))?
+        .port();
 
     Ok(tokio::spawn(async move {
-        let listener = match TcpListener::bind(bind).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("tunnel dynamic bind: {e}");
-                return;
-            }
-        };
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
-                accept = listener.accept() => {
+                _ = connections.join_next(), if !connections.is_empty() => {},
+                accept = listener.accept(), if connections.len() < 256 => {
                     let Ok((tcp, _)) = accept else { continue };
                     let h = handle.clone();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         if let Err(e) = socks5_relay(h, tcp).await {
                             tracing::debug!("socks5: {e}");
                         }
@@ -394,11 +419,12 @@ async fn spawn_dynamic_tunnel(
                 }
             }
         }
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
         let h = handle.lock().await;
         let _ = h
             .disconnect(Disconnect::ByApplication, "tunnel closed", "en")
             .await;
-        let _ = meta;
     }))
 }
 
@@ -410,40 +436,96 @@ where
     H: client::Handler + Send + 'static,
     H::Error: From<russh::Error> + Send + std::fmt::Debug + std::fmt::Display,
 {
-    let mut buf = [0u8; 512];
-    let n = client
-        .read(&mut buf)
+    let (host, port) = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        read_socks_connect(&mut client),
+    )
+    .await
+    .map_err(|_| SshError::Channel("socks handshake timeout".into()))??;
+    let channel = handle
+        .lock()
+        .await
+        .channel_open_direct_tcpip(&host, port as u32, "127.0.0.1", 0)
+        .await;
+    let channel = match channel {
+        Ok(channel) => channel,
+        Err(_) => {
+            client
+                .write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0])
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?;
+            return Err(SshError::Channel("socks target connection failed".into()));
+        }
+    };
+    client
+        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
-    if n < 2 || buf[0] != 5 {
+    bridge_tcp_channel(client, channel).await;
+    Ok(())
+}
+
+async fn read_socks_connect(client: &mut TcpStream) -> Result<(String, u16), SshError> {
+    let mut greeting = [0; 2];
+    client
+        .read_exact(&mut greeting)
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    if greeting[0] != 5 || greeting[1] == 0 {
         return Err(SshError::Channel("invalid socks greeting".into()));
+    }
+    let mut methods = vec![0; greeting[1] as usize];
+    client
+        .read_exact(&mut methods)
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    if !methods.contains(&0) {
+        client
+            .write_all(&[5, 255])
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?;
+        return Err(SshError::Channel(
+            "socks no supported authentication".into(),
+        ));
     }
     client
         .write_all(&[5, 0])
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
-
-    let n = client
-        .read(&mut buf)
+    let mut header = [0; 4];
+    client
+        .read_exact(&mut header)
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
-    if n < 7 || buf[0] != 5 || buf[1] != 1 {
+    if header[..3] != [5, 1, 0] {
         return Err(SshError::Channel("socks CONNECT required".into()));
     }
-    let atyp = buf[3];
-    let (host, port, consumed) = parse_socks_addr(&buf[4..n], atyp)?;
-    if 4 + consumed != n {
-        // ignore extra bytes for MVP
-    }
-
-    // success reply: VER REP RSV ATYP BND.ADDR BND.PORT
+    let (len, mut address) = match header[3] {
+        1 => (6, Vec::new()),
+        4 => (18, Vec::new()),
+        3 => {
+            let len = client
+                .read_u8()
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?;
+            if len == 0 {
+                return Err(SshError::Channel("empty socks domain".into()));
+            }
+            (len as usize + 2, vec![len])
+        }
+        _ => return Err(SshError::Channel("unsupported socks address".into())),
+    };
+    let start = address.len();
+    address.resize(start + len, 0);
     client
-        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        .read_exact(&mut address[start..])
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
-
-    bridge_direct(handle, host, port, client).await;
-    Ok(())
+    let (host, port, _) = parse_socks_addr(&address, header[3])?;
+    if port == 0 {
+        return Err(SshError::Channel("invalid socks target port".into()));
+    }
+    Ok((host, port))
 }
 
 fn parse_socks_addr(buf: &[u8], atyp: u8) -> Result<(String, u16, usize), SshError> {
@@ -489,5 +571,42 @@ fn parse_socks_addr(buf: &[u8], atyp: u8) -> Result<(String, u16, usize), SshErr
             Ok((host, port, 18))
         }
         _ => Err(SshError::Channel(format!("unsupported socks ATYP {atyp}"))),
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    #[tokio::test]
+    async fn socks_greeting_fragmentation_and_pipelined_payload_are_preserved() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut socket = TcpStream::connect(addr).await.unwrap();
+            socket.write_all(&[5]).await.unwrap();
+            tokio::task::yield_now().await;
+            socket.write_all(&[1, 0]).await.unwrap();
+            let mut selection = [0; 2];
+            socket.read_exact(&mut selection).await.unwrap();
+            assert_eq!(selection, [5, 0]);
+            socket
+                .write_all(&[5, 1, 0, 3, 3, b'f', b'o', b'o', 0, 22, b'S', b'S', b'H'])
+                .await
+                .unwrap();
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (host, port) = read_socks_connect(&mut socket).await.unwrap();
+        assert_eq!((host.as_str(), port), ("foo", 22));
+        let mut banner = [0; 3];
+        socket.read_exact(&mut banner).await.unwrap();
+        assert_eq!(&banner, b"SSH");
+        client.await.unwrap();
+    }
+    #[test]
+    fn ipv6_loopback_bind_is_supported() {
+        assert_eq!(
+            parse_bind_addr("::1", 8080).unwrap(),
+            "[::1]:8080".parse::<SocketAddr>().unwrap()
+        );
     }
 }

@@ -18,7 +18,7 @@
   const clients: McpClient[] = ['cursor', 'claude', 'generic', 'stdio'];
   const url = $derived(usableMcpUrl(status));
 
-  function dirty() { settingsCoord.markDirty(); message = ''; }
+  function dirty() { settingsCoord.markDirty('mcp'); message = ''; }
   function report(error: unknown) { onError(`MCP: ${error instanceof Error ? error.message : String(error)}`); }
 
   async function refresh() { status = await rpc.call<McpStatus>('mcp.status'); }

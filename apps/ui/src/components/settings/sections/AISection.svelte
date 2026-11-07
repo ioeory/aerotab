@@ -26,7 +26,7 @@
   let contextSource = $state(true);
   let contextLines = $state(200);
 
-  function markDirty() { settingsCoord.markDirty(); }
+  function markDirty() { settingsCoord.markDirty('ai'); }
 
   function defaultBaseFor(p: Provider): string {
     if (p === 'openai') return 'https://api.openai.com/v1';

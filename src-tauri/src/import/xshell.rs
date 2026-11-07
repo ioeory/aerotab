@@ -202,6 +202,9 @@ fn map_xsh_file(path: &Path, sessions_root: &Path, text: &str) -> ImportCandidat
         user,
         auth,
         jump_via: vec![],
+        jump_profile_ids: vec![],
+        proxy_id: None,
+        resolved_proxy: None,
     };
     let profile = build_profile(
         name.clone(),

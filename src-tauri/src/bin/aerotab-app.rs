@@ -18,6 +18,8 @@ use std::{
     time::Duration,
 };
 
+use tauri::Emitter;
+
 static FILE_DIALOG_GUARD: Mutex<()> = Mutex::new(());
 
 fn lock_file_dialog() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -66,6 +68,7 @@ struct AppRpc {
 struct DesktopWindowState {
     settings: Option<SettingsStore>,
     tray_available: bool,
+    close_authorized: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -231,6 +234,15 @@ fn open_file_transfer_window(
     disable_native_webview_context_menus(&window);
     let _ = window.set_focus();
     Ok(())
+}
+
+#[tauri::command]
+fn authorize_main_window_close(window: tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .state::<DesktopWindowState>()
+        .close_authorized
+        .store(true, std::sync::atomic::Ordering::Release);
+    window.close().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2376,6 +2388,71 @@ fn session_info(display: Option<String>) -> DesktopSessionInfo {
     desktop_session::desktop_session_info(display.as_deref())
 }
 
+fn runtime_diagnostics_enabled() -> bool {
+    std::env::var("AEROTAB_RUNTIME_DIAGNOSTICS").as_deref() == Ok("1")
+}
+
+/// Explicitly opted-in, main-webview-only, bounded metadata sink. No debug port.
+#[tauri::command]
+fn runtime_diagnostic_snapshot(
+    window: tauri::WebviewWindow,
+    snapshot: serde_json::Value,
+) -> Result<(), String> {
+    if !runtime_diagnostics_enabled() || window.label() != MAIN_WINDOW_LABEL {
+        return Err("diagnostics disabled".into());
+    }
+    let mut safe = serde_json::Map::new();
+    for key in [
+        "schema", "beats", "maxLagMs", "dialogs", "tabLists", "inert", "blockers",
+    ] {
+        if let Some(value) = snapshot.get(key).and_then(|v| v.as_u64()) {
+            safe.insert(key.into(), value.min(1_000_000_000).into());
+        }
+    }
+    for key in ["hidden", "modalOverlay", "nativeOccluded"] {
+        if let Some(value) = snapshot.get(key).and_then(|v| v.as_bool()) {
+            safe.insert(key.into(), value.into());
+        }
+    }
+    if let Some(phase @ ("boot" | "mounting" | "mounted" | "mount-failed")) =
+        snapshot.get("phase").and_then(|v| v.as_str())
+    {
+        safe.insert("phase".into(), phase.into());
+    }
+    let mut counts = serde_json::Map::new();
+    for key in ["click", "contextmenu", "keydown"] {
+        if let Some(value) = snapshot
+            .get("counts")
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_u64())
+        {
+            counts.insert(key.into(), value.min(1_000_000_000).into());
+        }
+    }
+    safe.insert("counts".into(), counts.into());
+    let events: Vec<_> = snapshot.get("events").and_then(|v| v.as_array()).into_iter().flatten().take(64).filter_map(|event| {
+        let kind = event.get("kind")?.as_str()?;
+        if !["error", "rejection"].contains(&kind) { return None; }
+        let code = event.get("code")?.as_str()?;
+        if !["effect_update_depth_exceeded", "state_unsafe_mutation", "hydration_mismatch", "initialization", "other"].contains(&code) { return None; }
+        Some(serde_json::json!({"kind":kind,"code":code,"line":event.get("line").and_then(|v|v.as_u64()).unwrap_or(0),"column":event.get("column").and_then(|v|v.as_u64()).unwrap_or(0)}))
+    }).collect();
+    safe.insert("events".into(), events.into());
+    let path = window
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "diagnostic path unavailable")?
+        .join("runtime-diagnostics.json");
+    std::fs::create_dir_all(path.parent().ok_or("diagnostic path unavailable")?)
+        .map_err(|_| "diagnostic directory failed")?;
+    std::fs::write(
+        path,
+        serde_json::to_vec(&safe).map_err(|_| "diagnostic serialization failed")?,
+    )
+    .map_err(|_| "diagnostic write failed".into())
+}
+
 fn main() {
     // Before any worker threads or stores: smoke must never migrate/open user data.
     #[cfg(all(feature = "native-view", target_os = "linux"))]
@@ -2415,7 +2492,18 @@ fn main() {
         }
     }
 
+    let diagnostic_script = if runtime_diagnostics_enabled() {
+        format!(
+            "window.__AEROTAB_RUNTIME_DIAGNOSTICS__ = true;\n{}",
+            include_str!("../../../apps/ui/public/runtime-diagnostics.js")
+        )
+    } else {
+        String::new()
+    };
     tauri::Builder::default()
+        .plugin(tauri::plugin::Builder::<tauri::Wry, ()>::new("runtime-diagnostics")
+            .js_init_script(diagnostic_script)
+            .build())
         .on_page_load(|window,payload| {
             #[cfg(all(debug_assertions,feature="native-view",target_os="linux"))]
             if std::env::var_os("AEROTAB_NATIVE_UI_E2E").is_some() {
@@ -2453,6 +2541,9 @@ fn main() {
                 if std::env::var_os("AEROTAB_NATIVE_HOST_SMOKE").is_none() && !(cfg!(debug_assertions) && (std::env::var_os("AEROTAB_NATIVE_UI_E2E").is_some() || (cfg!(target_os="windows") && std::env::var("AEROTAB_WINDOWS_NATIVE_UI_E2E").as_deref()==Ok("1")))) {
                     aerotab_core::migrate::migrate_app_data_if_needed(&data_dir);
                 }
+                *state.notes.lock().await = Some(aerotab_core::notes::NotesStore::open(data_dir.join("notes")).map_err(std::io::Error::other)?);
+                *state.scripts.lock().await = Some(Arc::new(aerotab_core::scripts::ScriptsService::new(aerotab_core::scripts::ScriptsStore::open(data_dir.join("scripts")).map_err(std::io::Error::other)?)));
+                *state.network_resources.lock().await = Some(aerotab_core::network_resources::NetworkResourceStore::open(&data_dir)?);
                 let profiles_path = data_dir.join("profiles.sled");
                 let open_profiles = || aerotab_core::profile::ProfileStore::open(&profiles_path);
                 let profile_locked = open_profiles()
@@ -2576,6 +2667,7 @@ fn main() {
             app.manage(DesktopWindowState {
                 settings: settings_store,
                 tray_available,
+                close_authorized: std::sync::atomic::AtomicBool::new(false),
             });
             set_app_handle(app.handle().clone());
             if tray_available {
@@ -2623,6 +2715,9 @@ fn main() {
                     if let Err(e) = window.hide() {
                         tracing::warn!(error = %e, "failed to hide closing window to tray");
                     }
+                } else if !state.close_authorized.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    api.prevent_close();
+                    if let Err(e) = window.emit("aerotab:prepare-close", ()) { tracing::warn!(error = %e, "failed to request safe window close"); }
                 }
             }
         })
@@ -2645,12 +2740,14 @@ fn main() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            runtime_diagnostic_snapshot,
             show_main_window,
             get_window_screen_rect,
             get_main_window_hwnd,
             session_info,
             open_file_transfer_window,
             close_current_window,
+            authorize_main_window_close,
             rpc,
             terminal_frames,
             native_view_capabilities,
@@ -2693,6 +2790,14 @@ fn main() {
             local_write_relative_chunk,
             local_stage_drop_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                let state = app.state::<AppRpc>().state.clone();
+                tauri::async_runtime::block_on(async {
+                    if let Some(service) = state.scripts.lock().await.clone() { service.shutdown().await; }
+                });
+            }
+        });
 }

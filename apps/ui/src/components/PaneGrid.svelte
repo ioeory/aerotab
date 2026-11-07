@@ -214,7 +214,7 @@
           <div
             role="button"
             tabindex="-1"
-            class="pane-drag-handle absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[10px]
+            class="pane-drag-handle absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[12px]
                    bg-[var(--color-panel)]/80 backdrop-blur border border-[var(--color-border-soft)]
                    cursor-grab active:cursor-grabbing select-none touch-none
                    opacity-0 pointer-events-none transition-opacity

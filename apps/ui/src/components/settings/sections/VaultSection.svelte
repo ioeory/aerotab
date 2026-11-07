@@ -8,6 +8,8 @@
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm } from '../../../lib/confirm.svelte';
   import { pickAndReadPrivateKeyFile } from '../../../lib/localFiles';
+  import { notifyResource, subscribeResource } from '../../../lib/resourceEvents';
+  import { resourceText as t } from '../../../lib/resourceMessages';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -47,28 +49,35 @@
   let newPw = $state('');
   let newPw2 = $state('');
 
+  let revision = 0;
   async function refreshStatus() {
+    const request = ++revision;
     try {
-      status = await rpc.call<Status>('vault.status', {});
+      const next = await rpc.call<Status>('vault.status', {});
+      if (request !== revision) return;
+      status = next;
       if (status.unlocked) await refreshList();
-      else entries = [];
+      else { entries = []; revealedId = null; revealedSecret = ''; editing = null; showChangePw = false; oldPw = ''; newPw = ''; newPw2 = ''; }
     } catch (e) { onError(`vault.status: ${(e as Error).message}`); }
   }
 
   async function refreshList() {
+    const request = revision;
     try {
-      entries = await rpc.call<EntryMeta[]>('vault.list', {});
+      const next = await rpc.call<EntryMeta[]>('vault.list', {});
+      if (request === revision && status.unlocked) entries = next;
     } catch (e) { onError(`vault.list: ${(e as Error).message}`); }
   }
 
   async function initialize() {
-    if (!password) { onError('Password required'); return; }
-    if (password !== confirmPassword) { onError('Passwords do not match'); return; }
+    if (!password) { onError(t('requiredPassword')); return; }
+    if (password !== confirmPassword) { onError(t('mismatch')); return; }
     busy = true;
     try {
       await rpc.call('vault.initialize', { password });
       await rpc.call('vault.unlock', { password });
       password = ''; confirmPassword = '';
+      notifyResource('vault');
       await refreshStatus();
     } catch (e) { onError(`vault.initialize: ${(e as Error).message}`); }
     finally { busy = false; }
@@ -80,6 +89,7 @@
     try {
       await rpc.call('vault.unlock', { password });
       password = '';
+      notifyResource('vault');
       await refreshStatus();
     } catch (e) { onError(`vault.unlock: ${(e as Error).message}`); }
     finally { busy = false; }
@@ -89,6 +99,7 @@
     try {
       await rpc.call('vault.lock', {});
       revealedId = null; revealedSecret = ''; editing = null;
+      notifyResource('vault');
       await refreshStatus();
     } catch (e) { onError(`vault.lock: ${(e as Error).message}`); }
   }
@@ -99,15 +110,17 @@
   }
 
   async function editEntry(meta: EntryMeta) {
+    const request = revision;
     try {
       const full = await rpc.call<Entry>('vault.get', { id: meta.id });
+      if (request !== revision || !status.unlocked) return;
       editing = { ...full, username: full.username ?? '' };
     } catch (e) { onError(`vault.get: ${(e as Error).message}`); }
   }
 
   async function saveEntry() {
     if (!editing) return;
-    if (!editing.label) { onError('Label required'); return; }
+    if (!editing.label) { onError(t('requiredLabel')); return; }
     busy = true;
     try {
       const payload = {
@@ -119,6 +132,7 @@
       };
       await rpc.call('vault.put', payload);
       editing = null;
+      notifyResource('vault');
       await refreshList();
     } catch (e) { onError(`vault.put: ${(e as Error).message}`); }
     finally { busy = false; }
@@ -129,22 +143,27 @@
     try {
       await rpc.call('vault.remove', { id });
       if (revealedId === id) { revealedId = null; revealedSecret = ''; }
+      notifyResource('vault');
       await refreshList();
     } catch (e) { onError(`vault.remove: ${(e as Error).message}`); }
   }
 
   async function reveal(meta: EntryMeta) {
     if (revealedId === meta.id) { revealedId = null; revealedSecret = ''; return; }
+    const request = revision;
     try {
       const full = await rpc.call<Entry>('vault.get', { id: meta.id });
+      if (request !== revision || !status.unlocked) return;
       revealedId = meta.id;
       revealedSecret = full.secret;
     } catch (e) { onError(`vault.get: ${(e as Error).message}`); }
   }
 
   async function copySecret(meta: EntryMeta) {
+    const request = revision;
     try {
       const full = await rpc.call<Entry>('vault.get', { id: meta.id });
+      if (request !== revision || !status.unlocked) return;
       await navigator.clipboard.writeText(full.secret);
     } catch (e) { onError(`copy: ${(e as Error).message}`); }
   }
@@ -166,105 +185,110 @@
   }
 
   async function changePassword() {
-    if (!oldPw || !newPw) { onError('Both passwords required'); return; }
-    if (newPw !== newPw2) { onError('New passwords do not match'); return; }
+    if (!oldPw || !newPw) { onError(t('bothPasswords')); return; }
+    if (newPw !== newPw2) { onError(t('mismatch')); return; }
     busy = true;
     try {
       await rpc.call('vault.changePassword', { oldPassword: oldPw, newPassword: newPw });
       oldPw = ''; newPw = ''; newPw2 = '';
       showChangePw = false;
+      notifyResource('vault');
     } catch (e) { onError(`vault.changePassword: ${(e as Error).message}`); }
     finally { busy = false; }
   }
 
-  onMount(() => { void refreshStatus(); });
+  onMount(() => {
+    void refreshStatus();
+    const stop = subscribeResource('vault', () => {
+      revealedId = null; revealedSecret = ''; editing = null;
+      void refreshStatus();
+    });
+    return () => { stop(); ++revision; revealedId = null; revealedSecret = ''; editing = null; };
+  });
 </script>
 
 <div class="settings-section">
-  <h2 class="flex items-center gap-2"><KeyRound size={16} /> Vault</h2>
+  <h2 class="flex items-center gap-2"><KeyRound size={16} /> {t('vault')}</h2>
 
   {#if !status.configured}
-    <p class="hint">Vault store not available. Restart the app to retry initialization.</p>
+    <p class="hint">{t('unavailable')}</p>
   {:else if !status.initialized}
-    <div class="section-h">Set up vault</div>
-    <p class="hint">
-      Choose a strong master password. It encrypts everything you store in the vault
-      using ChaCha20-Poly1305 + Argon2. If you lose it, the data is unrecoverable.
-    </p>
+    <div class="section-h">{t('setup')}</div>
+    <p class="hint">{t('encryptionHint')}</p>
     <label class="row">
-      <span class="row-label">Master password</span>
+      <span class="row-label">{t('master')}</span>
       <input type="password" bind:value={password} disabled={busy} />
     </label>
     <label class="row">
-      <span class="row-label">Confirm</span>
+      <span class="row-label">{t('confirm')}</span>
       <input type="password" bind:value={confirmPassword} disabled={busy} />
     </label>
     <div class="actions">
       <button class="btn primary" disabled={busy} onclick={() => void initialize()}>
-        <KeyRound size={14} /> Initialize vault
+        <KeyRound size={14} /> {t('initialize')}
       </button>
     </div>
   {:else if !status.unlocked}
-    <div class="section-h">Unlock vault</div>
+    <div class="section-h">{t('unlock')}</div>
     <label class="row">
-      <span class="row-label">Master password</span>
+      <span class="row-label">{t('master')}</span>
       <input type="password" bind:value={password} disabled={busy}
              onkeydown={(e) => { if (e.key === 'Enter') void unlock(); }} />
     </label>
     <div class="actions">
       <button class="btn primary" disabled={busy} onclick={() => void unlock()}>
-        <Unlock size={14} /> Unlock
+        <Unlock size={14} /> {t('unlock')}
       </button>
     </div>
   {:else}
     <div class="toolbar">
-      <button class="btn primary" onclick={newEntry}><Plus size={14} /> New entry</button>
-      <button class="btn" onclick={() => (showChangePw = !showChangePw)}>Change password</button>
-      <button class="btn" onclick={() => void lock()}><Lock size={14} /> Lock</button>
+      <button class="btn primary" onclick={newEntry}><Plus size={14} /> {t('newEntry')}</button>
+      <button class="btn" onclick={() => (showChangePw = !showChangePw)}>{t('changePassword')}</button>
+      <button class="btn" onclick={() => void lock()}><Lock size={14} /> {t('lock')}</button>
     </div>
 
     {#if showChangePw}
-      <div class="section-h">Change master password</div>
+      <div class="section-h">{t('changePassword')}</div>
       <label class="row">
-        <span class="row-label">Current password</span>
+        <span class="row-label">{t('currentPassword')}</span>
         <input type="password" bind:value={oldPw} disabled={busy} />
       </label>
       <label class="row">
-        <span class="row-label">New password</span>
+        <span class="row-label">{t('newPassword')}</span>
         <input type="password" bind:value={newPw} disabled={busy} />
       </label>
       <label class="row">
-        <span class="row-label">Confirm new password</span>
+        <span class="row-label">{t('confirm')}</span>
         <input type="password" bind:value={newPw2} disabled={busy} />
       </label>
       <div class="actions">
         <button class="btn primary" disabled={busy} onclick={() => void changePassword()}>
-          Apply
+          {t('apply')}
         </button>
       </div>
     {/if}
 
     {#if editing}
-      <div class="section-h">{editing.id ? 'Edit entry' : 'New entry'}</div>
+      <div class="section-h">{editing.id ? t('editEntry') : t('newEntry')}</div>
       <label class="row">
-        <span class="row-label">Label</span>
+        <span class="row-label">{t('label')}</span>
         <input type="text" bind:value={editing.label} disabled={busy} />
       </label>
       <label class="row">
-        <span class="row-label">Kind</span>
+        <span class="row-label">{t('kind')}</span>
         <select bind:value={editing.kind} disabled={busy}>
-          <option value="password">Password</option>
-          <option value="token">Token</option>
-          <option value="key">Private key</option>
-          <option value="note">Note</option>
+          <option value="password">{t('password')}</option>
+          <option value="token">{t('token')}</option>
+          <option value="key">{t('privateKey')}</option>
+          <option value="note">{t('note')}</option>
         </select>
       </label>
       <label class="row">
-        <span class="row-label">Username (optional)</span>
+        <span class="row-label">{t('username')}</span>
         <input type="text" bind:value={editing.username} disabled={busy} />
       </label>
       <label class="row">
-        <span class="row-label">Secret</span>
+        <span class="row-label">{t('secret')}</span>
         <div class="secret-field">
           {#if editing.kind === 'note' || editing.kind === 'key'}
             <textarea rows="6" bind:value={editing.secret} disabled={busy}></textarea>
@@ -285,18 +309,18 @@
         </div>
       </label>
       <div class="actions">
-        <button class="btn primary" disabled={busy} onclick={() => void saveEntry()}>Save</button>
-        <button class="btn" disabled={busy} onclick={() => (editing = null)}>Cancel</button>
+        <button class="btn primary" disabled={busy} onclick={() => void saveEntry()}>{t('save')}</button>
+        <button class="btn" disabled={busy} onclick={() => (editing = null)}>{t('cancel')}</button>
       </div>
     {/if}
 
-    <div class="section-h">Entries ({entries.length})</div>
+    <div class="section-h">{t('entries')} ({entries.length})</div>
     {#if entries.length === 0}
-      <p class="hint">No entries yet. Click <em>New entry</em> to add one.</p>
+      <p class="hint">{t('empty')}</p>
     {:else}
       <table class="entries">
         <thead>
-          <tr><th>Label</th><th>Kind</th><th>Username</th><th>Secret</th><th></th></tr>
+          <tr><th>{t('label')}</th><th>{t('kind')}</th><th>{t('username')}</th><th>{t('secret')}</th><th></th></tr>
         </thead>
         <tbody>
           {#each entries as e (e.id)}
@@ -312,12 +336,12 @@
                 {/if}
               </td>
               <td class="actions-col">
-                <button class="icon" title="Reveal" onclick={() => void reveal(e)}>
+                <button class="icon" title={t('reveal')} onclick={() => void reveal(e)}>
                   {#if revealedId === e.id}<EyeOff size={14} />{:else}<Eye size={14} />{/if}
                 </button>
-                <button class="icon" title="Copy" onclick={() => void copySecret(e)}>📋</button>
-                <button class="icon" title="Edit" onclick={() => void editEntry(e)}><Pencil size={14} /></button>
-                <button class="icon danger" title="Delete" onclick={() => void deleteEntry(e.id)}><Trash2 size={14} /></button>
+                <button class="icon" title={t('copy')} onclick={() => void copySecret(e)}>📋</button>
+                <button class="icon" title={t('edit')} onclick={() => void editEntry(e)}><Pencil size={14} /></button>
+                <button class="icon danger" title={t('remove')} onclick={() => void deleteEntry(e.id)}><Trash2 size={14} /></button>
               </td>
             </tr>
           {/each}

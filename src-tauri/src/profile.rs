@@ -35,6 +35,8 @@ pub enum ProfileError {
     Json(String),
     #[error("not found")]
     NotFound,
+    #[error("invalid resource reference: {0}")]
+    Reference(String),
 }
 
 impl From<sled::Error> for ProfileError {
@@ -240,12 +242,34 @@ impl ProfileStore {
     }
 
     pub async fn upsert(&self, profile: Profile) -> Result<(), ProfileError> {
+        self.write_profile(profile, true).await
+    }
+
+    /// Sync batches may arrive before their referenced bastions. References are
+    /// still checked at connection time; never rewrite IDs based on names.
+    pub(crate) async fn upsert_synced(&self, profile: Profile) -> Result<(), ProfileError> {
+        self.write_profile(profile, false).await
+    }
+
+    async fn write_profile(&self, profile: Profile, validate: bool) -> Result<(), ProfileError> {
         self.ensure_writable()?;
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
             me.with_tree(|tree| {
+                let mut catalog = read_catalog(tree)?;
+                catalog.retain(|p| p.id != profile.id);
+                catalog.push(profile.clone());
+                if validate {
+                    if let ProfileKind::Ssh { ssh } = &profile.spec {
+                        resolve_jump_references(ssh, &catalog, &mut vec![profile.id])?;
+                    }
+                }
                 let bytes = serde_json::to_vec(&profile)?;
                 tree.insert(profile.id.as_bytes(), bytes)?;
+                me.inner
+                    .db
+                    .open_tree("profile_deletions")?
+                    .remove(profile.id.as_bytes())?;
                 tree.flush()?;
                 Ok(())
             })
@@ -259,13 +283,127 @@ impl ProfileStore {
         let me = self.clone();
         tokio::task::spawn_blocking(move || {
             me.with_tree(|tree| {
+                let dependencies = profile_dependents(&read_catalog(tree)?, id);
+                if !dependencies.is_empty() {
+                    return Err(ProfileError::Reference(format!(
+                        "profile {id} is used by {}",
+                        dependencies.join(", ")
+                    )));
+                }
                 let removed = tree.remove(id.as_bytes())?.is_some();
+                if removed {
+                    me.inner
+                        .db
+                        .open_tree("profile_deletions")?
+                        .insert(id.as_bytes(), &[])?;
+                    me.inner.db.flush()?;
+                }
                 tree.flush()?;
                 Ok(removed)
             })
         })
         .await
         .map_err(|e| ProfileError::Sled(format!("join: {e}")))?
+    }
+}
+
+fn read_catalog(tree: &sled::Tree) -> Result<Vec<Profile>, ProfileError> {
+    tree.iter()
+        .map(|row| {
+            let (_, bytes) = row?;
+            serde_json::from_slice(&bytes).map_err(Into::into)
+        })
+        .collect()
+}
+
+fn ssh_references(ssh: &SshProfile, id: Uuid) -> bool {
+    ssh.jump_profile_ids.contains(&id) || ssh.jump_via.iter().any(|hop| ssh_references(hop, id))
+}
+
+pub fn profile_dependents(profiles: &[Profile], id: Uuid) -> Vec<String> {
+    profiles
+        .iter()
+        .filter(|p| p.id != id)
+        .filter(|p| match &p.spec {
+            ProfileKind::Ssh { ssh } => ssh_references(ssh, id),
+            ProfileKind::Rdp { rdp } => rdp.ssh_profile_id == Some(id),
+            ProfileKind::Vnc { spec } => spec.ssh_profile_id == Some(id),
+        })
+        .map(|p| format!("{} ({})", p.name, p.id))
+        .collect()
+}
+
+pub fn vault_dependents(profiles: &[Profile], id: &str) -> Vec<String> {
+    fn uses(ssh: &SshProfile, id: &str) -> bool {
+        matches!(&ssh.auth, crate::ssh::AuthMethod::VaultRef { entry_id, passphrase_entry_id }
+            if entry_id == id || passphrase_entry_id.as_deref() == Some(id))
+            || ssh.jump_via.iter().any(|hop| uses(hop, id))
+    }
+    profiles
+        .iter()
+        .filter(|p| matches!(&p.spec, ProfileKind::Ssh { ssh } if uses(ssh, id)))
+        .map(|p| format!("{} ({})", p.name, p.id))
+        .collect()
+}
+
+/// Resolve only explicit IDs. Legacy inline snapshots are retained, never name-matched.
+pub fn resolve_jump_references(
+    ssh: &SshProfile,
+    profiles: &[Profile],
+    path: &mut Vec<Uuid>,
+) -> Result<SshProfile, ProfileError> {
+    if path.len() > 32 {
+        return Err(ProfileError::Reference(
+            "jump chain exceeds 32 levels".into(),
+        ));
+    }
+    if !ssh.jump_profile_ids.is_empty() && !ssh.jump_via.is_empty() {
+        return Err(ProfileError::Reference(
+            "jump_profile_ids and jump_via are mutually exclusive".into(),
+        ));
+    }
+    let mut resolved = ssh.clone();
+    resolved.jump_profile_ids.clear();
+    resolved.jump_via.clear();
+    for id in &ssh.jump_profile_ids {
+        if path.contains(id) {
+            return Err(ProfileError::Reference(format!("jump cycle at {id}")));
+        }
+        let p = profiles
+            .iter()
+            .find(|p| p.id == *id)
+            .ok_or_else(|| ProfileError::Reference(format!("missing jump profile {id}")))?;
+        let ProfileKind::Ssh { ssh: hop } = &p.spec else {
+            return Err(ProfileError::Reference(format!(
+                "jump profile {id} is not SSH"
+            )));
+        };
+        path.push(*id);
+        let hop = resolve_jump_references(hop, profiles, path)?;
+        path.pop();
+        // The transport consumes a flat left-to-right chain.
+        resolved.jump_via.extend(hop.jump_via.clone());
+        let mut hop = hop;
+        hop.jump_via.clear();
+        resolved.jump_via.push(hop);
+    }
+    for hop in &ssh.jump_via {
+        resolved
+            .jump_via
+            .push(resolve_jump_references(hop, profiles, path)?);
+    }
+    Ok(resolved)
+}
+
+impl ProfileStore {
+    pub async fn explicit_deletions(&self) -> Result<Vec<Uuid>, ProfileError> {
+        let tree = self.inner.db.open_tree("profile_deletions")?;
+        tree.iter()
+            .map(|row| {
+                let (key, _) = row?;
+                Uuid::from_slice(&key).map_err(|e| ProfileError::Json(e.to_string()))
+            })
+            .collect()
     }
 }
 
@@ -297,9 +435,96 @@ mod tests {
                     user: "root".into(),
                     auth: AuthMethod::Password { secret: "x".into() },
                     jump_via: vec![],
+                    jump_profile_ids: vec![],
+                    proxy_id: None,
+                    resolved_proxy: None,
                 },
             },
         }
+    }
+
+    fn with_refs(mut profile: Profile, ids: &[Uuid]) -> Profile {
+        let ProfileKind::Ssh { ssh } = &mut profile.spec else {
+            unreachable!()
+        };
+        let mut raw = serde_json::to_value(&*ssh).unwrap();
+        raw["jump_profile_ids"] = serde_json::to_value(ids).unwrap();
+        *ssh = serde_json::from_value(raw).unwrap();
+        profile
+    }
+
+    #[tokio::test]
+    async fn stable_jump_reference_blocks_deletion() {
+        let s = ProfileStore::open(tmp()).unwrap();
+        let jump = ssh_profile(Uuid::new_v4(), "jump");
+        s.upsert(jump.clone()).await.unwrap();
+        let target = with_refs(ssh_profile(Uuid::new_v4(), "target"), &[jump.id]);
+        s.upsert(target).await.unwrap();
+        assert!(
+            s.delete(jump.id).await.is_err(),
+            "referenced jump must not be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn stable_jump_references_reject_missing_and_cycles() {
+        let s = ProfileStore::open(tmp()).unwrap();
+        let a = ssh_profile(Uuid::new_v4(), "a");
+        let b = ssh_profile(Uuid::new_v4(), "b");
+        assert!(
+            s.upsert(with_refs(a.clone(), &[b.id])).await.is_err(),
+            "missing jump must fail"
+        );
+        s.upsert(b.clone()).await.unwrap();
+        s.upsert(with_refs(a.clone(), &[b.id])).await.unwrap();
+        assert!(
+            s.upsert(with_refs(b, &[a.id])).await.is_err(),
+            "cycle must fail"
+        );
+    }
+
+    #[test]
+    fn stable_jump_resolution_uses_latest_profile_and_preserves_snapshots() {
+        let mut jump = ssh_profile(Uuid::new_v4(), "renamed");
+        let ProfileKind::Ssh { ssh } = &mut jump.spec else {
+            unreachable!()
+        };
+        ssh.host = "latest.example".into();
+        let target = with_refs(ssh_profile(Uuid::new_v4(), "target"), &[jump.id]);
+        let ProfileKind::Ssh { ssh } = target.spec else {
+            unreachable!()
+        };
+        let resolved = resolve_jump_references(&ssh, &[jump], &mut vec![]).unwrap();
+        assert_eq!(resolved.jump_via[0].host, "latest.example");
+        assert!(resolved.jump_profile_ids.is_empty());
+        let mut legacy = resolved;
+        legacy.jump_via[0].host = "snapshot.example".into();
+        assert_eq!(
+            resolve_jump_references(&legacy, &[], &mut vec![])
+                .unwrap()
+                .jump_via[0]
+                .host,
+            "snapshot.example"
+        );
+        legacy.jump_profile_ids.push(Uuid::new_v4());
+        assert!(resolve_jump_references(&legacy, &[], &mut vec![]).is_err());
+    }
+
+    #[test]
+    fn vault_dependencies_include_passphrase_and_legacy_hops() {
+        let mut p = ssh_profile(Uuid::new_v4(), "target");
+        let ProfileKind::Ssh { ssh } = &mut p.spec else {
+            unreachable!()
+        };
+        let mut hop = ssh.clone();
+        hop.auth = AuthMethod::VaultRef {
+            entry_id: "key".into(),
+            passphrase_entry_id: Some("passphrase".into()),
+        };
+        ssh.jump_via.push(hop);
+        assert_eq!(vault_dependents(&[p.clone()], "key").len(), 1);
+        assert_eq!(vault_dependents(&[p.clone()], "passphrase").len(), 1);
+        assert!(vault_dependents(&[p], "unrelated").is_empty());
     }
 
     #[tokio::test]

@@ -83,6 +83,14 @@ pub struct SshProfile {
     /// Empty = direct dial.
     #[serde(default)]
     pub jump_via: Vec<SshProfile>,
+    /// Stable bastion references, resolved from the profile store at connection time.
+    /// Mutually exclusive with legacy embedded `jump_via` snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump_profile_ids: Vec<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<uuid::Uuid>,
+    #[serde(skip)]
+    pub resolved_proxy: Option<std::sync::Arc<crate::proxy_transport::ResolvedProxy>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -846,10 +854,30 @@ where
         let handler = make_handler(hop, is_final);
         let cfg = ssh_config(&transport);
         let mut handle = match prev_handle.take() {
-            None => client::connect(cfg, (hop.host.as_str(), hop.port), handler)
-                .await
-                .map_err(|e| SshError::Connect(e.to_string()))?,
+            None => {
+                if let Some(proxy) = &hop.resolved_proxy {
+                    let stream = crate::proxy_transport::dial_proxy(
+                        &proxy.resource,
+                        &hop.host,
+                        hop.port,
+                        proxy.vault.as_ref(),
+                    )
+                    .await?;
+                    client::connect_stream(cfg, stream, handler)
+                        .await
+                        .map_err(|e| SshError::Connect(e.to_string()))?
+                } else {
+                    client::connect(cfg, (hop.host.as_str(), hop.port), handler)
+                        .await
+                        .map_err(|e| SshError::Connect(e.to_string()))?
+                }
+            }
             Some(prev) => {
+                if hop.resolved_proxy.is_some() {
+                    return Err(SshError::Connect(
+                        "external proxy must be on the first SSH hop".into(),
+                    ));
+                }
                 let channel = prev
                     .channel_open_direct_tcpip(&hop.host, hop.port as u32, "127.0.0.1", 0)
                     .await
@@ -1034,6 +1062,9 @@ mod tests {
             user: "x".into(),
             auth: AuthMethod::Agent,
             jump_via: vec![],
+            jump_profile_ids: vec![],
+            proxy_id: None,
+            resolved_proxy: None,
         };
         let err = match connect_shell(&p, 80, 24).await {
             Ok(_) => panic!("unexpected ok"),

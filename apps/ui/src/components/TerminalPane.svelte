@@ -51,6 +51,7 @@
 </script>
 
 <script lang="ts">
+  import { workspaceMenu } from '../lib/workspaceMenu';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { SESSIONS_CLOSING, type SessionsClosingDetail } from '../lib/sessionLifecycle';
   import { scheduleTerminalTeardown } from '../lib/terminalTeardown';
@@ -58,7 +59,7 @@
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { SearchAddon } from '@xterm/addon-search';
-  import { X, ChevronUp, ChevronDown, CaseSensitive, Regex, Upload, Download, Info, FolderOpen } from '@lucide/svelte';
+  import { X, ChevronUp, ChevronDown, CaseSensitive, Regex, Upload, Download, Info, FolderOpen, Copy, ClipboardPaste, ScanText, Search, Eraser, Columns2, Rows2, Maximize2, RotateCw, ExternalLink } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode } from '../lib/rpc';
   import type { SessionMeta } from '../lib/types';
@@ -176,7 +177,7 @@
   let nativeViewEpoch = $state(0);
   let nativeTheme: NativeThemeColors | undefined = $state(undefined);
   let nativeFontFamily = $state('JetBrains Mono, Menlo, monospace');
-  let nativeFontSize = $state(13);
+  let nativeFontSize = $state(15);
   let nativeFontWeight = $state(400);
   let nativeFontWeightBold = $state(700);
   let nativeLinePadding = $state(0);
@@ -355,7 +356,7 @@
     }
     if (!term) return;
     sessionFontDelta += delta;
-    const next = Math.min(32, Math.max(8, (term.options.fontSize ?? 13) + delta));
+    const next = Math.min(32, Math.max(8, (term.options.fontSize ?? 15) + delta));
     term.options.fontSize = next;
     scheduleSafeFit();
   }
@@ -531,7 +532,7 @@
   async function loadTermSettingsFresh() {
     const out = {
       fontFamily: 'JetBrains Mono, Menlo, monospace',
-      fontSize: 13,
+      fontSize: 15,
       scrollback: 2000,
       cursorBlink: true,
       theme: TOKYO_NIGHT,
@@ -1927,7 +1928,7 @@
       tabindex="0"
       role="toolbar"
       aria-label={i18n.t('terminal.sessionEnded')}
-      class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
+      class="terminal-status-chip pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
                 rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur outline-none"
       onkeydown={onExitedKeydown}
     >
@@ -1968,7 +1969,7 @@
 
 {#if transferNotice && active}
   <div class="absolute bottom-3 left-3 z-20 max-w-[min(380px,calc(100%-24px))] pointer-events-none">
-    <div class="pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
+    <div class="terminal-status-chip pointer-events-auto flex items-center gap-3 bg-[var(--color-panel)]/96 border border-[var(--color-border)]
                 rounded shadow-xl px-3 py-2 text-[12px] text-[var(--color-fg)] backdrop-blur">
       <div class="shrink-0 text-[var(--color-accent)]">
         {#if transferNotice.direction === 'upload'}
@@ -2002,32 +2003,32 @@
 {/if}
 
 {#if searchOpen}
-  <div class="absolute top-2 right-2 z-30 flex items-center gap-1 bg-[var(--color-panel)]/95
+  <div data-aerotab-focus-zone="" class="terminal-search absolute top-2 right-2 z-30 flex items-center gap-1 bg-[var(--color-panel)]/95
               border border-[var(--color-border)] rounded shadow-lg backdrop-blur p-1"
        class:pointer-events-none={!active}
        class:opacity-0={!active}>
     <input id="search-input-{session.id}"
-           type="search" placeholder={i18n.t('common.search')} bind:value={searchQuery}
+           type="search" aria-label={i18n.t('common.search')} placeholder={i18n.t('common.search')} bind:value={searchQuery}
            onkeydown={(e) => {
              if (e.key === 'Enter') { runSearch(e.shiftKey ? 'prev' : 'next'); }
              else if (e.key === 'Escape') { closeSearch(); }
            }}
            class="bg-[var(--color-bg)] text-[var(--color-fg)] text-[12px] px-2 py-1 rounded
                   border border-[var(--color-border)] outline-none w-[200px]" />
-    <button type="button" title={i18n.t('terminal.searchCaseSensitive')}
+    <button type="button" aria-label={i18n.t('terminal.searchCaseSensitive')} aria-pressed={searchCase} title={i18n.t('terminal.searchCaseSensitive')}
             class="p-1 rounded {searchCase ? 'text-[var(--color-accent)] bg-[var(--color-bg)]' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
             onclick={() => (searchCase = !searchCase)}>
       <CaseSensitive size={13} />
     </button>
-    <button type="button" title={i18n.t('terminal.searchRegex')}
+    <button type="button" aria-label={i18n.t('terminal.searchRegex')} aria-pressed={searchRegex} title={i18n.t('terminal.searchRegex')}
             class="p-1 rounded {searchRegex ? 'text-[var(--color-accent)] bg-[var(--color-bg)]' : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
             onclick={() => (searchRegex = !searchRegex)}>
       <Regex size={13} />
     </button>
-    <button type="button" title={i18n.t('common.previous')}
+    <button type="button" aria-label={i18n.t('common.previous')} title={i18n.t('common.previous')}
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={() => runSearch('prev')}><ChevronUp size={13} /></button>
-    <button type="button" title={i18n.t('common.next')}
+    <button type="button" aria-label={i18n.t('common.next')} title={i18n.t('common.next')}
             class="p-1 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
             onclick={() => runSearch('next')}><ChevronDown size={13} /></button>
     <button type="button" title={i18n.t('common.close')} aria-label={i18n.t('terminal.closeSearch')}
@@ -2047,6 +2048,7 @@
     ></div>
     <div
       bind:this={menuEl}
+      use:workspaceMenu={() => { menuOpen = false; }}
       role="menu"
       tabindex="-1"
       data-aerotab-context-menu=""
@@ -2057,54 +2059,54 @@
       onclick={(e) => e.stopPropagation()}
     >
       <button type="button" class="menu-item menu-item--shortcut" onclick={doCopy}>
-        <span>{i18n.t('common.copy')}</span>
+        <Copy size={15} /><span>{i18n.t('common.copy')}</span>
         {#if bindingLabel('terminal-copy')}<kbd class="kbd">{bindingLabel('terminal-copy')}</kbd>{/if}
       </button>
-      <button type="button" class="menu-item" onclick={doPaste}>{i18n.t('common.paste')}</button>
-      <button type="button" class="menu-item" onclick={doSelectAll}>{i18n.t('common.selectAll')}</button>
+      <button type="button" class="menu-item" onclick={doPaste}><ClipboardPaste size={15} />{i18n.t('common.paste')}</button>
+      <button type="button" class="menu-item" onclick={doSelectAll}><ScanText size={15} />{i18n.t('common.selectAll')}</button>
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       {#if exited && canReconnect}
         <button type="button" class="menu-item" onclick={() => { menuOpen = false; void reconnectSession(); }}>
-          {i18n.t('terminal.reconnect')}
+          <RotateCw size={15} />{i18n.t('terminal.reconnect')}
         </button>
         {#if onClosePane}
           <button type="button" class="menu-item" onclick={() => { menuOpen = false; onClosePane?.(); }}>
-            {i18n.t('common.close')}
+            <X size={15} />{i18n.t('common.close')}
           </button>
         {/if}
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       {/if}
       {#if onSplitRight}
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onSplitRight?.(); }}>
-          <span>{i18n.t('tabbar.splitRight')}</span>
+          <Columns2 size={15} /><span>{i18n.t('tabbar.splitRight')}</span>
           <kbd class="kbd">{bindingLabel('split-right')}</kbd>
         </button>
       {/if}
       {#if onSplitDown}
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onSplitDown?.(); }}>
-          <span>{i18n.t('tabbar.splitDown')}</span>
+          <Rows2 size={15} /><span>{i18n.t('tabbar.splitDown')}</span>
           <kbd class="kbd">{bindingLabel('split-down')}</kbd>
         </button>
       {/if}
       {#if onMaximize}
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onMaximize?.(); }}>
-          <span>{i18n.t('pane.maximizePane')}</span>
+          <Maximize2 size={15} /><span>{i18n.t('pane.maximizePane')}</span>
           <kbd class="kbd">{bindingLabel('maximize-pane')}</kbd>
         </button>
       {/if}
       {#if canOpenSftp}
         <button type="button" class="menu-item menu-item--shortcut" onclick={() => { menuOpen = false; onOpenSftp?.(); }}>
-          <span>{i18n.t('terminal.transferOpenSftp')}</span>
+          <FolderOpen size={15} /><span>{i18n.t('terminal.transferOpenSftp')}</span>
           <kbd class="kbd">{bindingLabel('open-sftp')}</kbd>
         </button>
       {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
-      <button type="button" class="menu-item" onclick={doSearchAction}>{i18n.t('terminal.searchAction')}</button>
-      <button type="button" class="menu-item" onclick={doClear}>{i18n.t('common.clearScreen')}</button>
+      <button type="button" class="menu-item" onclick={doSearchAction}><Search size={15} />{i18n.t('terminal.searchAction')}</button>
+      <button type="button" class="menu-item" onclick={doClear}><Eraser size={15} />{i18n.t('common.clearScreen')}</button>
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       {#if canOpenExternalNative}
         <button type="button" class="menu-item" onclick={() => { void openExternalNativeTerminal(); }}>
-          {i18n.t('terminal.openExternalNative')}
+          <ExternalLink size={15} />{i18n.t('terminal.openExternalNative')}
         </button>
       {/if}
     </div>
@@ -2112,17 +2114,37 @@
 {/if}
 
 <style>
-  :global(.menu-item) {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 6px 12px;
-    background: transparent;
-    color: inherit;
-    border: none;
-    cursor: pointer;
+  .terminal-search {
+    max-width: calc(100% - 16px);
+    gap: 4px;
+    padding: 6px;
+    border-radius: 9px;
+    background: var(--color-surface-raised);
+    box-shadow: var(--shadow-panel);
   }
-  :global(.menu-item:hover) {
-    background: var(--color-panel-2);
+  .terminal-search input {
+    flex: 1 1 180px;
+    min-width: 60px;
+    width: 220px;
+    min-height: 32px;
+    font-size: var(--text-compact, 14px);
+    background: var(--color-bg-soft);
   }
+  .terminal-search button { flex: 0 0 auto; min-width: 30px; min-height: 32px; border-radius: 5px; }
+  .terminal-search button[aria-pressed='true'] { background: var(--color-accent-soft); color: var(--color-accent); }
+  .terminal-search button:focus-visible, .terminal-search input:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+  .terminal-status-chip {
+    flex-wrap: wrap;
+    background: var(--color-surface-raised);
+    border-radius: 8px;
+    box-shadow: var(--shadow-panel);
+    font-size: var(--text-compact, 14px);
+    line-height: 1.5;
+  }
+  .terminal-status-chip button { min-height: 30px; font-size: var(--text-compact, 14px); }
+  .terminal-status-chip button span { font-size: var(--text-meta, 12px); }
+  .menu-item { width: 100%; text-align: left; color: inherit; background: transparent; border: 0; cursor: pointer; }
+  .menu-item--shortcut { display: flex; align-items: center; gap: 10px; }
+  .menu-item--shortcut > span { flex: 1; }
+  .menu-item--shortcut > .kbd { margin-left: auto; }
 </style>

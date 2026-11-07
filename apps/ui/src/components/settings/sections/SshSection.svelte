@@ -9,6 +9,7 @@
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import { appConfirm } from '../../../lib/confirm.svelte';
   import { getSessionInfo, type DesktopSessionInfo } from '../../../lib/sessionInfo';
+  import { notifyResource, subscribeResource } from '../../../lib/resourceEvents';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
   let { rpc, onError }: Props = $props();
@@ -61,7 +62,7 @@
     && !desktopSession.x11ForwardAvailable,
   );
 
-  function markDirty() { settingsCoord.markDirty(); }
+  function markDirty() { settingsCoord.markDirty('ssh'); }
 
   function tunnelKindLabel(kind: TunnelKind): string {
     if (kind === 'local') return i18n.t('ssh.tunnelKind.local');
@@ -129,7 +130,12 @@
     }
   }
 
+  let loaded = $state(false);
+  let loading = $state(false);
+  let loadError = $state('');
   async function load() {
+    if (loading) return;
+    loading = true; loaded = false; loadError = '';
     try {
       const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'ssh' });
       if (r.value && typeof r.value === 'object') {
@@ -152,10 +158,13 @@
         if (typeof v.hostStatsEnabled === 'boolean') hostStatsEnabled = v.hostStatsEnabled;
         if (typeof v.hostStatsIntervalSec === 'number') hostStatsIntervalSec = v.hostStatsIntervalSec;
       }
-    } catch (e) { onError(`ssh load: ${(e as Error).message}`); }
+      loaded = true;
+    } catch (e) { loadError = (e as Error).message ?? String(e); onError(`ssh load: ${loadError}`); }
+    finally { loading = false; }
   }
 
   async function save() {
+    if (!loaded) throw new Error(loadError || i18n.t('common.loading'));
     await rpc.call('settings.set', {
       key: 'ssh',
       value: {
@@ -189,8 +198,9 @@
     knownHostsBusy = true;
     try {
       await rpc.call('ssh.knownHosts.configure', { dir: knownHostsDir.trim() });
+      notifyResource('knownHosts');
       knownHostsStatus = i18n.t('ssh.backendDirApplied');
-      settingsCoord.markDirty();
+      settingsCoord.markDirty('ssh');
       await loadKnownHosts();
     } catch (e) {
       onError(`known_hosts configure: ${(e as Error).message}`);
@@ -204,6 +214,7 @@
     knownHostsBusy = true;
     try {
       const r = await rpc.call<{ removed: boolean }>('ssh.knownHosts.remove', { host });
+      notifyResource('knownHosts');
       knownHostsStatus = r.removed
         ? i18n.t('ssh.removedKnownHost', { host })
         : i18n.t('ssh.knownHostNotPresent', { host });
@@ -224,12 +235,16 @@
       await loadSshProfiles();
       await loadTunnels();
     })();
+    return subscribeResource('knownHosts', () => { void loadKnownHosts(); });
   });
   onDestroy(() => settingsCoord.unregisterSaver('ssh'));
 </script>
 
 <div class="settings-section">
   <h2 class="flex items-center gap-2"><Server size={16} /> SSH</h2>
+  {#if loadError}<div role="alert"><p>{loadError}</p><button type="button" class="btn-secondary" disabled={loading} onclick={load}>{i18n.t('common.refresh')}</button></div>
+  {:else if loading}<p role="status">{i18n.t('common.loading')}</p>{/if}
+  <fieldset disabled={!loaded || settingsCoord.saving} class="settings-fields">
 
   <div class="section-h">{i18n.t('ssh.connection')}</div>
   <label class="row">
@@ -425,9 +440,11 @@
       {/each}
     {/if}
   </div>
+  </fieldset>
 </div>
 
 <style>
+  .settings-fields { border: 0; padding: 0; min-width: 0; }
   .section-h {
     margin-top: 16px;
     margin-bottom: 6px;

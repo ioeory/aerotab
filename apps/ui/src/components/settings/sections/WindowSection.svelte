@@ -7,7 +7,7 @@
   import type { RpcClient } from '../../../lib/rpc';
   import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
-  import { applyWindowSettings } from '../../../lib/windowSettings';
+  import { applyWindowSettings, getWindowSettings } from '../../../lib/windowSettings';
   import { getSessionInfo, type DesktopSessionInfo } from '../../../lib/sessionInfo';
 
   interface Props { rpc: RpcClient; onError: (msg: string) => void }
@@ -59,14 +59,21 @@
     };
   }
 
+  let appliedWindow: Record<string, unknown> = { ...getWindowSettings() };
   function markDirty() {
-    settingsCoord.markDirty();
+    if (!loaded) return;
+    settingsCoord.markDirty('window');
     // Live-preview: apply CSS-affected fields immediately so the user sees
     // opacity/spaciness/tabs-location/etc. update as they tweak the slider.
     applyWindowSettings(currentValue() as unknown as Record<string, unknown>);
   }
 
+  let loaded = $state(false);
+  let loading = $state(false);
+  let loadError = $state('');
   async function load() {
+    if (loading) return;
+    loading = true; loaded = false; loadError = '';
     try {
       const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'window' });
       if (r.value && typeof r.value === 'object') {
@@ -88,15 +95,20 @@
         if (typeof v.confirmCloseWithMultipleTabs === 'boolean') confirmCloseWithMultipleTabs = v.confirmCloseWithMultipleTabs;
         if (typeof v.disableGpuAcceleration === 'boolean') disableGpuAcceleration = v.disableGpuAcceleration;
         if (typeof v.useNativeWindowControls === 'boolean') useNativeWindowControls = v.useNativeWindowControls;
-        applyWindowSettings(v);
       }
-    } catch (e) { onError(`window load: ${(e as Error).message}`); }
+      applyWindowSettings(r.value && typeof r.value === 'object' ? r.value as Record<string, unknown> : {}, { replace: true });
+      appliedWindow = { ...getWindowSettings() };
+      loaded = true;
+    } catch (e) { loadError = (e as Error).message ?? String(e); onError(`window load: ${loadError}`); }
+    finally { loading = false; }
   }
 
   async function save() {
+    if (!loaded) throw new Error(loadError || i18n.t('common.loading'));
     const value = currentValue();
     await rpc.call('settings.set', { key: 'window', value });
-    applyWindowSettings(value as unknown as Record<string, unknown>);
+    applyWindowSettings(value as unknown as Record<string, unknown>, { replace: true });
+    appliedWindow = { ...getWindowSettings() };
     // Notify open consumers (terminal panes etc.).
     settingsCoord.bumpRev();
   }
@@ -108,12 +120,18 @@
       await refreshDesktopSession();
     })();
   });
-  onDestroy(() => settingsCoord.unregisterSaver('window'));
+  onDestroy(() => {
+    applyWindowSettings(appliedWindow, { replace: true });
+    settingsCoord.unregisterSaver('window');
+  });
 </script>
 
 <div class="settings-section">
   <h2 class="flex items-center gap-2"><Monitor size={16} /> {i18n.t('window.title')}</h2>
   <p class="hint">{i18n.t('window.restartHint')}</p>
+  {#if loadError}<div role="alert"><p>{loadError}</p><button type="button" class="btn-secondary" disabled={loading} onclick={load}>{i18n.t('common.refresh')}</button></div>
+  {:else if loading}<p role="status">{i18n.t('common.loading')}</p>{/if}
+  <fieldset disabled={!loaded || settingsCoord.saving} class="settings-fields">
 
   <div class="section-h">{i18n.t('window.frameTransparency')}</div>
   <label class="row">
@@ -211,9 +229,11 @@
     <span class="row-label">{i18n.t('window.disableGpu')}</span>
     <input type="checkbox" bind:checked={disableGpuAcceleration} onchange={markDirty} />
   </label>
+  </fieldset>
 </div>
 
 <style>
+  .settings-fields { border: 0; padding: 0; min-width: 0; }
   .hint { font-size: 12px; color: var(--color-fg-muted); margin-bottom: 6px; }
   .hint.warn { color: var(--color-warning, #c9a227); }
   .section-h {

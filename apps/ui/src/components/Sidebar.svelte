@@ -65,6 +65,14 @@
   import { sidebarFocus } from '../lib/sidebarFocus.svelte';
   import { clearSidebarProfileHandlers, registerSidebarProfileHandlers } from '../lib/sidebarProfileBridge';
   import logoUrl from '../assets/logo.png';
+  import { getProfileCatalog, normalizeCatalogGroups } from '../lib/profileCatalog.svelte';
+  import { profileInScope, reconcileCatalogSelection } from '../lib/profileCatalogHelpers';
+  import ResourceViews from './hosts/ResourceViews.svelte';
+  import ResourceNavigation from './hosts/ResourceNavigation.svelte';
+  import ResourceViewSwitcher from './hosts/ResourceViewSwitcher.svelte';
+  import ResourceBreadcrumbs from './hosts/ResourceBreadcrumbs.svelte';
+  import { sortProfiles } from '../lib/profileMeta';
+  import { hostLabel } from './hosts/hostLabels';
 
   interface Props {
     rpc: RpcClient;
@@ -74,6 +82,11 @@
     openSftp: (p: StoredProfile) => void;
     openSettings: () => void;
     onShowTransfer?: () => void;
+    /** Resource workspace uses the exact same CRUD, menus, bulk and drag actions as the sidebar. */
+    variant?: 'sidebar' | 'workspace';
+    onImportProfiles?: () => void;
+    /** Hide inactive instances without remounting their state or taking global shortcut ownership. */
+    active?: boolean;
   }
   let {
     rpc,
@@ -83,19 +96,30 @@
     openSftp,
     openSettings,
     onShowTransfer,
+    variant = 'sidebar',
+    onImportProfiles,
+    active = true,
   }: Props = $props();
 
-  let profiles = $state<StoredProfile[]>([]);
-  let profilesRefreshing = $state(false);
-  let profileQuery = $state('');
+  const catalog = $derived(getProfileCatalog(rpc));
+  const profiles = $derived(catalog.profiles);
+  const profilesRefreshing = $derived(catalog.refreshing);
+  const profileQuery = $derived(catalog.query);
   let collapsedPaths = $state<Set<string>>(loadCollapsedPaths());
-  let explicitGroupPaths = $state<string[]>([]);
+  const explicitGroupPaths = $derived(catalog.groups);
+  let showGroups = $state(true);
 
-  const PROFILE_GROUPS_SETTINGS_KEY = 'profile.groups';
+  const filteredProfiles = $derived(sortProfiles(
+    profiles.filter((p) => matchesProfileQuery(p, profileQuery)
+      && (variant !== 'workspace' || (profileInScope(p, catalog.group, catalog.favoritesOnly)
+        && (!catalog.recentOnly || catalog.recentIds.includes(p.id))))),
+  ));
 
-  const filteredProfiles = $derived(
-    profiles.filter((p) => matchesProfileQuery(p, profileQuery)),
-  );
+  $effect(() => {
+    if (!active) return;
+    const next = reconcileCatalogSelection(catalog.selectedIds, filteredProfiles);
+    if (next.size !== catalog.selectedIds.size) catalog.selectedIds = next;
+  });
   const allGroupPaths = $derived.by(() => {
     const groups = new Set<string>(explicitGroupPaths);
     for (const group of collectProfileGroupPaths(profiles)) groups.add(group);
@@ -113,33 +137,11 @@
       : new Set<string>(),
   );
   const hasVisibleProfiles = $derived(
-    filteredProfiles.length > 0 || profileTree.folders.length > 0,
+    filteredProfiles.length > 0 || ((variant !== 'workspace' || catalog.view === 'tree') && profileTree.folders.length > 0),
   );
 
-  function normalizeGroupList(value: unknown): string[] {
-    if (!Array.isArray(value)) return [];
-    const out = new Set<string>();
-    for (const raw of value) {
-      if (typeof raw !== 'string') continue;
-      const normalized = normalizeGroupPath(raw);
-      if (normalized) out.add(normalized);
-    }
-    return [...out].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  }
-
-  async function loadExplicitGroups() {
-    try {
-      const r = await rpc.call<{ value: unknown }>('settings.get', { key: PROFILE_GROUPS_SETTINGS_KEY });
-      explicitGroupPaths = normalizeGroupList(r.value);
-    } catch {
-      explicitGroupPaths = [];
-    }
-  }
-
   async function saveExplicitGroups(paths: string[]) {
-    const normalized = normalizeGroupList(paths);
-    explicitGroupPaths = normalized;
-    await rpc.call('settings.set', { key: PROFILE_GROUPS_SETTINGS_KEY, value: normalized });
+    await catalog.saveGroups(normalizeCatalogGroups(paths));
   }
 
   async function ensureExplicitGroup(group: string | null | undefined) {
@@ -157,7 +159,7 @@
   }
 
   function clearProfileSearch() {
-    profileQuery = '';
+    catalog.query = '';
   }
 
   async function createGroup(parentPath: string | null = null) {
@@ -223,6 +225,8 @@
       await refresh();
     } catch (e) {
       onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
+      notifyProfilesChanged();
+      await refresh();
     } finally {
       bulkBusy = false;
     }
@@ -311,23 +315,10 @@
   }
 
   export async function refresh() {
-    if (profilesRefreshing) return;
-    profilesRefreshing = true;
     try {
-      const [profileList] = await Promise.all([
-        withRpcTimeout(
-          rpc.call<StoredProfile[]>('profile.list'),
-          20_000,
-          'profile.list',
-        ),
-        loadExplicitGroups(),
-      ]);
-      profiles = profileList;
+      await catalog.refresh({ invalidate: true });
     } catch (e) {
-      profiles = [];
       onError(`profile.list: ${(e as Error).message}`);
-    } finally {
-      profilesRefreshing = false;
     }
   }
 
@@ -344,13 +335,13 @@
     document.addEventListener(PROFILES_CHANGED, onProfilesChanged);
     document.addEventListener('aerotab:settings-changed', onHotkeysChanged);
     document.addEventListener('aerotab:settings-synced', onHotkeysChanged);
-    registerSidebarProfileHandlers(profileShortcutHandlers);
+    // Shortcut registration follows the visible instance below.
   });
   onDestroy(() => {
     document.removeEventListener(PROFILES_CHANGED, onProfilesChanged);
     document.removeEventListener('aerotab:settings-changed', onHotkeysChanged);
     document.removeEventListener('aerotab:settings-synced', onHotkeysChanged);
-    clearSidebarProfileHandlers();
+    closeMenu();
   });
 
   async function openLocal() {
@@ -478,6 +469,7 @@
   }
 
   async function openProfile(p: StoredProfile, mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab') {
+    catalog.recordRecent(p.id);
     if (p.kind === 'rdp' || p.kind === 'vnc') {
       try {
         await rpc.call('remote.openProfile', { profile_id: p.id });
@@ -509,17 +501,18 @@
     | { kind: 'group'; folder: ProfileTreeFolder; groupLabel: string };
 
   let menuOpen = $state(false);
+  let menuReturnFocus: HTMLElement | null = null;
   let menuX = $state(0);
   let menuY = $state(0);
   let menuTarget = $state<SidebarMenu | null>(null);
   let menuEl = $state<HTMLDivElement | null>(null);
   let jumpSubmenuQuery = $state('');
-  let jumpSearchInput: HTMLInputElement | null = null;
+  let jumpSearchInput = $state<HTMLInputElement | null>(null);
   type SubmenuKey = 'move' | 'tagColors' | 'jump';
   let activeSubmenu = $state<SubmenuKey | null>(null);
   let submenuCloseTimer: ReturnType<typeof setTimeout> | null = null;
   let lastMenuPosition = $state<{ x: number; y: number } | null>(null);
-  let selectedProfileIds = $state<Set<string>>(new Set());
+  const selectedProfileIds = $derived(catalog.selectedIds);
   let selectionAnchorId = $state<string | null>(null);
   let bulkBusy = $state(false);
   let bulkMenuOpen = $state(false);
@@ -570,6 +563,7 @@
   async function openMenu(target: SidebarMenu, ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
+    menuReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     lastMenuPosition = { x: ev.clientX, y: ev.clientY };
     menuTarget = target;
     menuX = ev.clientX;
@@ -592,25 +586,25 @@
   }
 
   function clearProfileSelection() {
-    selectedProfileIds = new Set();
+    catalog.selectedIds = new Set();
     selectionAnchorId = null;
   }
 
   function onProfileRowClick(p: StoredProfile, ev: MouseEvent) {
     if (ev.shiftKey && selectionAnchorId) {
-      selectedProfileIds = rangeSelectProfiles(filteredProfiles, selectionAnchorId, p.id);
+      catalog.selectedIds = rangeSelectProfiles(filteredProfiles, selectionAnchorId, p.id);
     } else if (ev.ctrlKey || ev.metaKey) {
-      selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
+      catalog.selectedIds = toggleProfileInSelection(selectedProfileIds, p.id);
       selectionAnchorId = p.id;
     } else {
       focusProfile(p);
-      selectedProfileIds = new Set([p.id]);
+      catalog.selectedIds = new Set([p.id]);
       selectionAnchorId = p.id;
     }
   }
 
   function toggleProfileCheckbox(p: StoredProfile) {
-    selectedProfileIds = toggleProfileInSelection(selectedProfileIds, p.id);
+    catalog.selectedIds = toggleProfileInSelection(selectedProfileIds, p.id);
     selectionAnchorId = p.id;
     focusProfile(p);
   }
@@ -741,6 +735,8 @@
       await refresh();
     } catch (e) {
       onError(i18n.t('profiles.moveToGroupFailed', { message: (e as Error).message }));
+      notifyProfilesChanged();
+      await refresh();
     } finally {
       bulkBusy = false;
     }
@@ -786,6 +782,8 @@
       await refresh();
     } catch (e) {
       onError((e as Error).message);
+      notifyProfilesChanged();
+      await refresh();
     } finally {
       bulkBusy = false;
     }
@@ -797,7 +795,7 @@
 
   function showProfileMenu(p: StoredProfile, ev: MouseEvent) {
     if (!selectedProfileIds.has(p.id)) {
-      selectedProfileIds = new Set([p.id]);
+      catalog.selectedIds = new Set([p.id]);
       selectionAnchorId = p.id;
     }
     focusProfile(p);
@@ -809,6 +807,8 @@
   }
 
   function closeMenu() {
+    if (menuOpen && menuReturnFocus?.isConnected) menuReturnFocus.focus({ preventScroll: true });
+    menuReturnFocus = null;
     menuOpen = false;
     menuTarget = null;
     jumpSubmenuQuery = '';
@@ -1099,7 +1099,7 @@
   }
 
   async function editProfile(p: StoredProfile) {
-    focusProfileInTabs(p.id);
+    if (variant !== 'workspace') focusProfileInTabs(p.id);
     openProfileModal(await latestProfile(p));
   }
 
@@ -1127,8 +1127,15 @@
     onOpenSftp: (p: StoredProfile) => { openSftp(p); },
   };
 
+  $effect(() => {
+    if (!active) { closeMenu(); bulkMenuOpen = false; return; }
+    registerSidebarProfileHandlers(profileShortcutHandlers);
+    return () => clearSidebarProfileHandlers();
+  });
+
   function moveProfileFocus(delta: number) {
-    const visible = collectVisibleProfiles(profileTree, collapsedPaths, forceExpandedPaths);
+    const visible = variant === 'workspace' && catalog.view !== 'tree'
+      ? filteredProfiles : collectVisibleProfiles(profileTree, collapsedPaths, forceExpandedPaths);
     if (visible.length === 0) return;
     const currentId = sidebarFocus.focusedProfileId;
     let idx = currentId ? visible.findIndex((p) => p.id === currentId) : -1;
@@ -1136,7 +1143,7 @@
     const next = visible[Math.max(0, Math.min(visible.length - 1, idx + delta))];
     if (!next) return;
     focusProfile(next);
-    selectedProfileIds = new Set([next.id]);
+    catalog.selectedIds = new Set([next.id]);
     selectionAnchorId = next.id;
   }
 
@@ -1189,7 +1196,7 @@
 
   function onProfileDragStart(p: StoredProfile, ev: DragEvent) {
     const list = profileDragList(p);
-    selectedProfileIds = new Set(list.map((x) => x.id));
+    catalog.selectedIds = new Set(list.map((x) => x.id));
     selectionAnchorId = p.id;
     focusProfile(p);
     setProfileDragData(ev, { kind: 'profiles', ids: list.map((x) => x.id) });
@@ -1255,7 +1262,8 @@
   }
 </script>
 
-<aside data-aerotab-context-menu="" class="w-full min-w-0 h-full bg-[var(--color-panel)] flex flex-col shadow-[inset_-1px_0_0_var(--color-border-soft)]">
+<aside data-aerotab-context-menu="" class:resource-workspace={variant === 'workspace'} class="host-catalog w-full min-w-0 h-full bg-[var(--color-panel)] flex flex-col shadow-[inset_-1px_0_0_var(--color-border-soft)]">
+  {#if variant === 'sidebar'}
   <div class="px-4 py-3 border-b border-[var(--color-border-soft)] flex items-center gap-2">
     <img src={logoUrl} alt="" class="aerotab-logo" width="24" height="24" />
     <h1 class="text-[13px] font-semibold tracking-wide font-mono">AeroTab</h1>
@@ -1287,7 +1295,7 @@
     <button
       type="button"
       onclick={openLocal}
-      class="list-item w-full text-[12.5px] text-left"
+      class="list-item w-full text-[14px] text-left"
     >
       <TerminalIcon size={14} class="text-[var(--color-accent)]" />
       <span class="flex-1">{i18n.t('sidebar.newLocalShell')}</span>
@@ -1296,7 +1304,7 @@
     <button
       type="button"
       onclick={() => openProfileModal()}
-      class="list-item w-full text-[12.5px] text-left"
+      class="list-item w-full text-[14px] text-left"
     >
       <Server size={14} class="text-[var(--color-accent)]" />
       <span class="flex-1">{i18n.t('sidebar.newSshProfile')}</span>
@@ -1305,7 +1313,7 @@
     <button
       type="button"
       onclick={openSerialModal}
-      class="list-item w-full text-[12.5px] text-left"
+      class="list-item w-full text-[14px] text-left"
     >
       <Usb size={14} class="text-[var(--color-accent)]" />
       <span class="flex-1">{i18n.t('sidebar.newSerialConnection')}</span>
@@ -1313,7 +1321,26 @@
     </button>
   </div>
 
-  <div class="px-2 pt-2 pb-1 flex flex-col gap-1.5">
+  {:else}
+    <header class="resource-heading">
+      <div><h1>{i18n.t('profiles.title')}</h1><p>{profiles.length} {hostLabel('resources')} · {i18n.t('profiles.groups', { count: allGroupPaths.length })}</p></div>
+      <div class="resource-heading-actions">
+        <button type="button" class="btn-secondary" onclick={openLocal}><TerminalIcon size={17} />{i18n.t('sidebar.newLocalShell')}</button>
+        <button type="button" class="btn-secondary" onclick={openSerialModal}><Usb size={17} />{i18n.t('sidebar.newSerialConnection')}</button>
+        {#if onImportProfiles}<button type="button" class="btn-secondary" onclick={onImportProfiles}>{i18n.t('profiles.importConnections')}</button>{/if}
+        <button type="button" class="btn-primary" onclick={() => openProfileModal(undefined, { group: catalog.group ?? undefined })}><Plus size={17} />{i18n.t('sidebar.newProfileEmpty')}</button>
+      </div>
+    </header>
+  {/if}
+  <div class="catalog-toolbar px-2 pt-2 pb-1 flex flex-col gap-1.5">
+    {#if variant === 'workspace'}
+      <div class="resource-toolbar">
+        <button type="button" class="btn-secondary" aria-pressed={showGroups} title={hostLabel('toggleGroups')} onclick={() => { showGroups = !showGroups; }}>{hostLabel('groups')}</button>
+        <ResourceViewSwitcher value={catalog.view} onChange={(value) => catalog.setView(value)} />
+        <ResourceBreadcrumbs group={catalog.group} favorites={catalog.favoritesOnly} recent={catalog.recentOnly}
+          onSelect={(group) => { catalog.group = group; catalog.favoritesOnly = false; catalog.recentOnly = false; }} />
+      </div>
+    {/if}
     <div class="px-1 flex items-center gap-1 min-h-[22px]">
       <div class="shell-section-title flex-1 min-w-0">{i18n.t('sidebar.sshProfiles')}</div>
       <button
@@ -1340,7 +1367,7 @@
       <Search size={12} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-fg-muted)] pointer-events-none" />
       <input
         type="search"
-        bind:value={profileQuery}
+        bind:value={catalog.query}
         placeholder={i18n.t('sidebar.searchProfiles')}
         class="input w-full pl-8 pr-7 py-1.5 text-[12px]"
         aria-label={i18n.t('sidebar.searchProfiles')}
@@ -1356,25 +1383,25 @@
         </button>
       {/if}
     </div>
-    <div class="help px-1 text-[10px] leading-snug">{i18n.t('sidebar.groupPathHint')}</div>
+    <div class="help px-1 text-[12px] leading-snug">{i18n.t('sidebar.groupPathHint')}</div>
     {#if hasProfileSelection}
       <div class="relative flex flex-wrap items-center gap-1 px-1 py-1 border border-[var(--color-border-soft)] rounded-md bg-[var(--color-panel-2)]">
-        <span class="text-[10px] text-[var(--color-fg-muted)]">{i18n.t('profiles.selectedCount', { count: selectedProfileIds.size })}</span>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
-                onclick={() => { selectedProfileIds = selectAllProfiles(filteredProfiles); }}>
+        <span class="text-[12px] text-[var(--color-fg-muted)]">{i18n.t('profiles.selectedCount', { count: selectedProfileIds.size })}</span>
+        <button type="button" class="btn-secondary text-[12px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { catalog.selectedIds = selectAllProfiles(filteredProfiles); }}>
           {i18n.t('profiles.selectAll')}
         </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
-                onclick={() => { selectedProfileIds = invertProfileSelection(selectedProfileIds, filteredProfiles); }}>
+        <button type="button" class="btn-secondary text-[12px] py-0.5 px-1.5" disabled={bulkBusy}
+                onclick={() => { catalog.selectedIds = invertProfileSelection(selectedProfileIds, filteredProfiles); }}>
           {i18n.t('profiles.invertSelection')}
         </button>
-        <button type="button" class="btn-secondary text-[10px] py-0.5 px-1.5" disabled={bulkBusy}
+        <button type="button" class="btn-secondary text-[12px] py-0.5 px-1.5" disabled={bulkBusy}
                 onclick={clearProfileSelection}>
           {i18n.t('profiles.clearSelection')}
         </button>
         <button
           type="button"
-          class="btn-secondary text-[10px] py-0.5 px-1.5 inline-flex items-center gap-0.5"
+          class="btn-secondary text-[12px] py-0.5 px-1.5 inline-flex items-center gap-0.5"
           disabled={bulkBusy}
           aria-expanded={bulkMenuOpen}
           onclick={(ev) => { ev.stopPropagation(); bulkMenuOpen = !bulkMenuOpen; }}
@@ -1392,8 +1419,10 @@
           <div
             data-aerotab-context-menu=""
             data-aerotab-menu-open=""
-            class="panel absolute left-1 right-1 top-full mt-0.5 z-[var(--z-menu)] py-1 text-[11px] shadow-lg"
+            class="panel absolute left-1 right-1 top-full mt-0.5 z-[var(--z-menu)] py-1 text-[14px] shadow-lg"
             role="menu"
+            tabindex="-1"
+            onkeydown={(ev) => { if (ev.key === 'Escape') { ev.preventDefault(); bulkMenuOpen = false; } }}
             onclick={(ev) => ev.stopPropagation()}
           >
             <button type="button" class="ctx-item w-full text-left" role="menuitem" disabled={bulkBusy}
@@ -1426,26 +1455,41 @@
       </div>
     {/if}
   </div>
-  <div role="presentation" class="flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" data-aerotab-sidebar-profiles="" ondragover={onRootDragOver} ondrop={onRootDrop}>
+  <div class="catalog-content" class:with-groups={variant === 'workspace' && showGroups}>
+    {#if variant === 'workspace' && showGroups}
+      <ResourceNavigation groups={buildProfileTree(profiles, explicitGroupPaths)} {profiles} group={catalog.group} favorites={catalog.favoritesOnly} recent={catalog.recentOnly}
+        onRecent={() => { catalog.recentOnly = !catalog.recentOnly; catalog.favoritesOnly = false; catalog.group = null; }}
+        onSelect={(group) => { catalog.group = group; catalog.favoritesOnly = false; catalog.recentOnly = false; }} onFavorites={() => { catalog.favoritesOnly = !catalog.favoritesOnly; catalog.group = null; catalog.recentOnly = false; }}
+        onMenu={showFolderMenu} onDragStart={onFolderDragStart} onDragOver={onFolderDragOver} onDrop={onFolderDrop}
+        renaming={inlineEditGroupPath} renameDraft={inlineEditGroupDraft} onRenameDraft={(value) => { inlineEditGroupDraft = value; }}
+        onRenameCommit={(path) => { void commitInlineGroupRename(path); }} onRenameCancel={cancelInlineGroupRename} />
+    {/if}
+  <div role="presentation" class="catalog-results flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" data-aerotab-sidebar-profiles="" ondragover={onRootDragOver} ondrop={onRootDrop}>
     {#if !hasVisibleProfiles}
-      <div class="px-3 py-2 text-[11.5px] text-[var(--color-fg-muted)]">
+      <div class="px-3 py-2 text-[14px] text-[var(--color-fg-muted)]">
         {#if profileQuery.trim()}
           <p class="italic mb-2">{i18n.t('sidebar.noSearchResults')}</p>
           <div class="flex flex-wrap items-center gap-1.5 not-italic">
-            <button type="button" class="btn-secondary text-[10px] py-0.5 px-2" onclick={clearProfileSearch}>
+            <button type="button" class="btn-secondary text-[12px] py-0.5 px-2" onclick={clearProfileSearch}>
               {i18n.t('sidebar.clearSearch')}
             </button>
-            <button type="button" class="btn-secondary text-[10px] py-0.5 px-2" onclick={() => openProfileModal()}>
+            <button type="button" class="btn-secondary text-[12px] py-0.5 px-2" onclick={() => openProfileModal()}>
               {i18n.t('sidebar.newProfileEmpty')}
             </button>
           </div>
         {:else}
           <p class="italic mb-2">{i18n.t('sidebar.noProfiles')}</p>
-          <button type="button" class="btn-secondary text-[10px] py-0.5 px-2 not-italic" onclick={() => openProfileModal()}>
+          <button type="button" class="btn-secondary text-[12px] py-0.5 px-2 not-italic" onclick={() => openProfileModal()}>
             {i18n.t('sidebar.newProfileEmpty')}
           </button>
         {/if}
       </div>
+    {:else if variant === 'workspace' && catalog.view !== 'tree'}
+      <ResourceViews profiles={filteredProfiles} view={catalog.view} selectedIds={selectedProfileIds} focusedId={sidebarFocus.focusedProfileId}
+        health={profileHealth} onOpen={(p) => { void openProfilesForAction(p, 'new-tab'); }} onSelect={onProfileRowClick}
+        onCheck={toggleProfileCheckbox} onMenu={showProfileMenu} onDrag={onProfileDragStart} onKeydown={onProfileKeydown} onQuickAction={onProfileQuickAction}
+        renaming={inlineEditProfileId} renameDraft={inlineEditProfileDraft} onRenameDraft={(value) => { inlineEditProfileDraft = value; }}
+        onRenameCommit={(p) => { void commitInlineProfileRename(p); }} onRenameCancel={cancelInlineProfileRename} />
     {:else}
       <SidebarProfileTree
         folder={profileTree}
@@ -1469,7 +1513,7 @@
         onFolderDragOver={onFolderDragOver}
         onFolderDrop={onFolderDrop}
         showUngroupedLabel={profileTree.folders.length > 0}
-        inlineEditGroupPath={inlineEditGroupPath}
+        inlineEditGroupPath={variant === 'workspace' && showGroups ? null : inlineEditGroupPath}
         inlineEditGroupDraft={inlineEditGroupDraft}
         onInlineGroupDraftChange={(value) => { inlineEditGroupDraft = value; }}
         onInlineGroupRenameCommit={(path) => { void commitInlineGroupRename(path); }}
@@ -1482,6 +1526,7 @@
         onInlineProfileRenameCancel={cancelInlineProfileRename}
       />
     {/if}
+  </div>
   </div>
 </aside>
 
@@ -1514,7 +1559,7 @@
     tabindex="-1"
     data-aerotab-context-menu=""
     data-aerotab-menu-open=""
-    class="panel context-menu-scroll fixed min-w-[220px] py-1 text-[12.5px] text-[var(--color-fg)]"
+    class="panel context-menu-scroll fixed min-w-[220px] py-1 text-[14px] text-[var(--color-fg)]"
     style="left: {menuX}px; top: {menuY}px; z-index: var(--z-menu);"
     onkeydown={onContextMenuKeydown}
     onscroll={realignActiveSubmenu}
@@ -1542,7 +1587,7 @@
           </button>
           <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         {/if}
-        <div class="menu-section-label px-3 py-1 text-[10px] uppercase tracking-[0.08em] text-[var(--color-fg-muted)]">
+        <div class="menu-section-label px-3 py-1 text-[12px] uppercase tracking-[0.08em] text-[var(--color-fg-muted)]">
           {i18n.t('profiles.groupColor')}
         </div>
         <VisualColorPicker
@@ -1577,6 +1622,7 @@
           <div
             class="submenu-panel {activeSubmenu === 'move' ? 'submenu-panel--open' : ''}"
             role="menu"
+            tabindex="-1"
             onmouseenter={() => keepSubmenuOpen('move')}
             onmouseleave={scheduleSubmenuClose}
           >
@@ -1615,6 +1661,8 @@
             <div
               class="submenu-panel tag-color-submenu {activeSubmenu === 'tagColors' ? 'submenu-panel--open' : ''}"
               role="menu"
+              tabindex="-1"
+              onkeydown={onContextMenuKeydown}
               onmouseenter={() => keepSubmenuOpen('tagColors')}
               onmouseleave={scheduleSubmenuClose}
             >
@@ -1679,16 +1727,18 @@
             <div
               class="submenu-panel jump-host-submenu {activeSubmenu === 'jump' ? 'submenu-panel--open' : ''}"
               role="menu"
+              tabindex="-1"
+              onkeydown={onContextMenuKeydown}
               onmouseenter={() => keepSubmenuOpen('jump')}
               onmouseleave={scheduleSubmenuClose}
               onclick={(e) => e.stopPropagation()}
             >
-              <p class="jump-host-hint px-3 pt-1 pb-0 text-[10px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpHint')}</p>
+              <p class="jump-host-hint px-3 pt-1 pb-0 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpHint')}</p>
               <div class="jump-host-search px-2 py-1.5">
                 <input
                   bind:this={jumpSearchInput}
                   type="search"
-                  class="input text-[11px] py-1"
+                  class="input text-[14px] py-1"
                   placeholder={i18n.t('sidebar.jumpHostSearch')}
                   aria-label={i18n.t('sidebar.jumpHostSearch')}
                   bind:value={jumpSubmenuQuery}
@@ -1707,7 +1757,7 @@
                   <span class="jump-menu-sub truncate">{profileEndpointLabel(jump)}</span>
                 </button>
               {:else}
-                <div class="px-3 py-2 text-[11px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpEmpty')}</div>
+                <div class="px-3 py-2 text-[14px] text-[var(--color-fg-muted)]">{i18n.t('sidebar.connectViaJumpEmpty')}</div>
               {/each}
             </div>
           </div>
@@ -1723,6 +1773,29 @@
 {/if}
 
 <style>
+  .host-catalog { font-size: 14px; line-height: 1.5; }
+  .host-catalog :global(button), .host-catalog :global(input) { font-size: 14px; }
+  .host-catalog :global(.help) { font-size: 12px; }
+  .catalog-content { flex: 1; min-height: 0; display: flex; min-width: 0; }
+  .catalog-content.with-groups { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); }
+  .catalog-results { min-width: 0; }
+  .resource-workspace { background: var(--color-bg); }
+  .resource-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; padding: 24px 28px 16px; }
+  .resource-heading h1 { font-size: 26px; line-height: 1.3; font-weight: 600; }
+  .resource-heading p { margin-top: 8px; font-size: 14px; color: var(--color-fg-muted); }
+  .resource-heading-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .resource-heading-actions button { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-ui, 16px) !important; min-height: 44px !important; }
+  .resource-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .resource-workspace .catalog-toolbar { padding: 12px 28px 16px; border-bottom: 1px solid var(--color-border-soft); }
+  .resource-workspace .catalog-toolbar :global(input) { min-height: 42px; font-size: 16px; }
+  .resource-workspace .catalog-results { padding: 18px 24px; }
+  .resource-workspace :global(button) { min-height: 34px; }
+  .resource-workspace :global(.btn-primary), .resource-workspace :global(.btn-secondary) { min-height: 40px; font-size: 14px; }
+  @media (max-width: 760px) {
+    .catalog-content.with-groups { grid-template-columns: 150px minmax(0, 1fr); }
+    .resource-heading, .resource-workspace .catalog-toolbar { padding: 16px; }
+    .resource-workspace .catalog-results { padding: 12px; }
+  }
   .workspace-switch {
     min-width: 0;
     height: 30px;
@@ -1798,7 +1871,7 @@
     max-width: 280px;
   }
   .jump-menu-sub {
-    font-size: 10px;
+    font-size: 14px;
     color: var(--color-fg-muted);
     max-width: 100%;
   }

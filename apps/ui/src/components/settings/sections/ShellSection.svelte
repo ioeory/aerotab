@@ -46,7 +46,7 @@
 
   function markDefault(s: ShellEntry) {
     defaultId = s.id;
-    settingsCoord.markDirty();
+    settingsCoord.markDirty('shell');
   }
 
   async function openInTab(s: ShellEntry) {

@@ -144,12 +144,12 @@ jobs:
       - name: Build deb
         if: matrix.bundle == 'deb' || matrix.bundle == 'deb-arm64'
         working-directory: src-tauri
-        run: cargo tauri build --bundles deb --features desktop
+        run: cargo tauri build --bundles deb --features native-view
       - name: Build nsis
         if: matrix.bundle == 'nsis'
         working-directory: src-tauri
         # Native Windows runner — do not use cargo-xwin (Linux→Windows cross only).
-        run: cargo tauri build --bundles nsis
+        run: cargo tauri build --bundles nsis --features native-view
       - name: Build dmg (Intel)
         if: matrix.bundle == 'dmg-intel'
         working-directory: src-tauri

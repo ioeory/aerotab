@@ -4,7 +4,7 @@
  */
 
 import type { RpcClient } from './rpc';
-import { applyTheme, BUILTIN_THEMES } from './theme';
+import { loadAppliedAppearance } from './appliedAppearance';
 import { applyCustomCss, applyLigatures } from './customCss';
 import { applyWindowSettings } from './windowSettings';
 import { hotkeys } from './hotkeys';
@@ -16,30 +16,23 @@ export async function applyStoredSettingsToUi(rpc: RpcClient): Promise<void> {
   await profileVisualsStore.load(rpc);
 
   try {
-    const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'theme' });
-    const name = typeof r.value === 'string' ? r.value : 'tokyo-night';
-    const theme = BUILTIN_THEMES.find((t) => t.name === name) ?? BUILTIN_THEMES[0];
-    if (theme) applyTheme(theme);
+    await loadAppliedAppearance(rpc);
   } catch {
     /* keep current theme */
   }
 
   try {
     const a = await rpc.call<{ value: unknown }>('settings.get', { key: 'appearance' });
-    if (a.value && typeof a.value === 'object') {
-      const v = a.value as Record<string, unknown>;
-      if (typeof v.customCss === 'string') applyCustomCss(v.customCss);
-      if (typeof v.ligatures === 'boolean') applyLigatures(v.ligatures);
-    }
+    const v = a.value && typeof a.value === 'object' ? a.value as Record<string, unknown> : {};
+    applyCustomCss(typeof v.customCss === 'string' ? v.customCss : '');
+    applyLigatures(v.ligatures === true);
   } catch {
     /* ignore */
   }
 
   try {
     const w = await rpc.call<{ value: unknown }>('settings.get', { key: 'window' });
-    if (w.value && typeof w.value === 'object') {
-      applyWindowSettings(w.value as Record<string, unknown>);
-    }
+    applyWindowSettings(w.value && typeof w.value === 'object' ? w.value as Record<string, unknown> : {}, { replace: true });
   } catch {
     /* ignore */
   }
@@ -48,7 +41,7 @@ export async function applyStoredSettingsToUi(rpc: RpcClient): Promise<void> {
     const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'hotkeys' });
     if (r.value && typeof r.value === 'object') {
       hotkeys.loadFromMap(r.value as Record<string, string[]>);
-    }
+    } else { hotkeys.resetToDefaults(); }
   } catch {
     /* ignore */
   }

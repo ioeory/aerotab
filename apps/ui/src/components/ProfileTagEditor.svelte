@@ -113,7 +113,8 @@
     gap: 6px;
   }
   .profile-tag-editor-label {
-    font-size: 10px;
+    font-size: var(--text-compact, 14px);
+    line-height: 1.5;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--color-fg-muted);
@@ -154,14 +155,15 @@
   .profile-tag-editor-input {
     flex: 1;
     min-width: 0;
-    font-size: 11.5px;
+    font-size: var(--text-ui, 16px);
+    line-height: 1.5;
     padding: 4px 8px;
   }
   .profile-tag-editor-add-btn {
     display: grid;
     place-items: center;
-    width: 26px;
-    height: 26px;
+    width: 36px;
+    height: 36px;
     border-radius: 4px;
     border: 1px solid var(--color-border-soft);
     background: var(--color-panel-2);

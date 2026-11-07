@@ -74,6 +74,41 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_resource_rpcs_are_not_implicitly_exposed() {
+        let mut cfg = McpConfig::default();
+        // Even granting all existing categories must not open new content or execution APIs.
+        for permission in [
+            "callRpc",
+            "listProfiles",
+            "manageProfiles",
+            "runCommand",
+            "readFiles",
+            "writeFiles",
+            "tunnels",
+            "openSession",
+        ] {
+            cfg.permissions.insert(permission.into(), true);
+        }
+        for method in [
+            "notes.list",
+            "notes.upsert",
+            "notes.export",
+            "scripts.list",
+            "scripts.run",
+            "scripts.tasks",
+            "proxy.list",
+            "proxy.upsert",
+            "vault.get",
+            "vault.list",
+        ] {
+            assert!(
+                authorize(&cfg, "call_rpc", &json!({"method": method})).is_err(),
+                "new resource method unexpectedly exposed: {method}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_tools_and_rpc_methods_fail_closed() {
         let mut cfg = McpConfig::default();
         cfg.permissions.insert("callRpc".into(), true);

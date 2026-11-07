@@ -409,8 +409,10 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="import-wizard-title"
+      tabindex="-1"
       class="panel fixed z-[71] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(920px,calc(100vw-32px))] max-h-[min(720px,calc(100vh-48px))] flex flex-col overflow-hidden"
       onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => { if (e.key === 'Escape') onClose(); }}
     >
       <header class="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border-soft)]">
         {#if step !== 'source'}
@@ -421,7 +423,7 @@
             <ChevronLeft size={16} />
           </button>
         {/if}
-        <h2 id="import-wizard-title" class="text-[14px] font-semibold flex-1">{i18n.t('import.title')}</h2>
+        <h2 id="import-wizard-title" class="text-[length:var(--text-section,20px)] font-semibold flex-1">{i18n.t('import.title')}</h2>
         <button type="button" class="btn-ghost p-1" aria-label={i18n.t('common.close')} onclick={onClose}>
           <X size={16} />
         </button>
@@ -429,7 +431,7 @@
 
       <div class="flex-1 min-h-0 overflow-y-auto p-4">
         {#if step === 'source'}
-          <p class="text-[12px] text-[var(--color-fg-muted)] mb-4">{i18n.t('import.subtitle')}</p>
+          <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-4">{i18n.t('import.subtitle')}</p>
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {#each IMPORT_SOURCE_CARDS as card (card.id)}
               <button
@@ -440,18 +442,18 @@
                 disabled={!card.enabled}
                 onclick={() => { void pickSource(card.id, card.enabled); }}
               >
-                <div class="text-[12px] font-semibold text-[var(--color-fg)]">{i18n.t(card.titleKey)}</div>
-                <div class="text-[10.5px] text-[var(--color-fg-muted)] mt-1 line-clamp-2">{i18n.t(card.descKey)}</div>
+                <div class="text-[length:var(--text-compact,14px)] font-semibold text-[var(--color-fg)]">{i18n.t(card.titleKey)}</div>
+                <div class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mt-1 [overflow-wrap:anywhere]">{i18n.t(card.descKey)}</div>
                 {#if !card.enabled}
-                  <div class="text-[10px] text-[var(--color-accent)] mt-2">{i18n.t('import.comingSoon')}</div>
+                  <div class="text-[length:var(--text-meta,12px)] text-[var(--color-accent)] mt-2">{i18n.t('import.comingSoon')}</div>
                 {/if}
               </button>
             {/each}
           </div>
         {:else if step === 'file'}
-          <p class="text-[12px] text-[var(--color-fg-muted)] mb-3">{fileStepHint()}</p>
+          <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-3">{fileStepHint()}</p>
           {#if loading}
-            <div class="flex items-center gap-2 text-[12px] text-[var(--color-fg-muted)]">
+            <div class="flex items-center gap-2 text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]">
               <Loader2 size={14} class="animate-spin" />
               {i18n.t('common.loading')}
             </div>
@@ -462,45 +464,45 @@
                   <label class="flex items-start gap-2 p-2 rounded border border-[var(--color-border-soft)] cursor-pointer hover:bg-[var(--color-panel-2)]">
                     <input type="radio" bind:group={selectedPath} value={p.path} class="mt-1" />
                     <span class="min-w-0">
-                      <span class="block text-[12px] font-mono truncate">{p.path}</span>
-                      <span class="block text-[10.5px] text-[var(--color-fg-muted)]">{p.label}</span>
+                      <span class="block text-[length:var(--text-compact,14px)] font-mono [overflow-wrap:anywhere]">{p.path}</span>
+                      <span class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]">{p.label}</span>
                     </span>
                   </label>
                 {/each}
               </div>
             {:else}
-              <p class="text-[12px] text-[var(--color-fg-muted)] mb-3">{noAutoDetectHint()}</p>
+              <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-3">{noAutoDetectHint()}</p>
             {/if}
-            <button type="button" class="btn-secondary text-[12px] px-3 py-1.5 inline-flex items-center gap-1.5" onclick={() => { void browseFile(); }}>
+            <button type="button" class="btn-secondary text-[length:var(--text-compact,14px)] px-3 py-1.5 inline-flex items-center gap-1.5" onclick={() => { void browseFile(); }}>
               <FolderOpen size={14} />
               {source === 'xshell' ? i18n.t('import.browseFolder') : i18n.t('import.browseFile')}
             </button>
             {#if source === 'xshell'}
-              <button type="button" class="btn-ghost text-[12px] px-3 py-1.5 ml-2" onclick={() => { void browseFile(false); }}>
+              <button type="button" class="btn-ghost text-[length:var(--text-compact,14px)] px-3 py-1.5 ml-2" onclick={() => { void browseFile(false); }}>
                 {i18n.t('import.browseSingleFile')}
               </button>
             {/if}
             {#if selectedPath && !detectPaths.some((p) => p.path === selectedPath)}
-              <p class="text-[11px] font-mono text-[var(--color-fg-muted)] mt-2 truncate" title={selectedPath}>{selectedPath}</p>
+              <p class="text-[length:var(--text-compact,14px)] font-mono text-[var(--color-fg-muted)] mt-2 [overflow-wrap:anywhere]" title={selectedPath}>{selectedPath}</p>
             {/if}
           {/if}
         {:else if preview && previewTree}
-          <div class="flex flex-wrap items-center gap-2 mb-3 text-[11px] text-[var(--color-fg-muted)]">
+          <div class="flex flex-wrap items-center gap-2 mb-3 text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]">
             <span>{i18n.t('import.statsTotal', { count: preview.stats.total })}</span>
             <span class="text-[var(--color-success)]">{i18n.t('import.statsReady', { count: preview.stats.ready })}</span>
             <span>{i18n.t('import.statsDuplicate', { count: preview.stats.duplicate })}</span>
             <span class="text-[var(--color-danger)]">{i18n.t('import.statsError', { count: preview.stats['error'] })}</span>
             <span class="w-px h-3 bg-[var(--color-border-soft)]" aria-hidden="true"></span>
-            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={toggleAllImportable}>
+            <button type="button" class="btn-ghost text-[length:var(--text-compact,14px)] px-2 py-0.5" onclick={toggleAllImportable}>
               {i18n.t('profiles.selectAll')}
             </button>
-            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={invertSelection}>
+            <button type="button" class="btn-ghost text-[length:var(--text-compact,14px)] px-2 py-0.5" onclick={invertSelection}>
               {i18n.t('profiles.invertSelection')}
             </button>
-            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={expandAllGroups}>
+            <button type="button" class="btn-ghost text-[length:var(--text-compact,14px)] px-2 py-0.5" onclick={expandAllGroups}>
               {i18n.t('import.expandAll')}
             </button>
-            <button type="button" class="btn-ghost text-[11px] px-2 py-0.5" onclick={collapseAllGroups}>
+            <button type="button" class="btn-ghost text-[length:var(--text-compact,14px)] px-2 py-0.5" onclick={collapseAllGroups}>
               {i18n.t('import.collapseAll')}
             </button>
           </div>
@@ -510,12 +512,12 @@
               type="search"
               bind:value={previewQuery}
               placeholder={i18n.t('import.searchPlaceholder')}
-              class="input pl-7 text-[12px]"
+              class="input pl-7 text-[length:var(--text-compact,14px)]"
               aria-label={i18n.t('import.searchPlaceholder')}
             />
             {#if previewQuery.trim()}
               <div class="flex flex-wrap items-center gap-2 mt-1">
-                <p class="text-[10.5px] text-[var(--color-fg-muted)]">
+                <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]">
                   {i18n.t('import.searchFiltered', {
                     shown: previewMatchCount,
                     total: preview.stats.total,
@@ -524,7 +526,7 @@
                 {#if filteredImportableCount > 0}
                   <button
                     type="button"
-                    class="btn-ghost text-[10.5px] px-2 py-0.5"
+                    class="btn-ghost text-[length:var(--text-compact,14px)] px-2 py-0.5"
                     onclick={selectFilteredImportable}
                   >
                     {i18n.t('import.selectFiltered', { count: filteredImportableCount })}
@@ -532,7 +534,7 @@
                 {/if}
               </div>
               {#if selectedIds.size > 0 && selectedVisibleCount < selectedIds.size}
-                <p class="text-[10.5px] text-[var(--color-warning,#d4a017)] mt-1">
+                <p class="text-[length:var(--text-compact,14px)] text-[var(--color-warning,#d4a017)] mt-1">
                   {i18n.t('import.searchSelectionMismatch', {
                     selected: selectedIds.size,
                     visible: selectedVisibleCount,
@@ -551,8 +553,8 @@
             {onError}
             {onSummary}
           />
-          <div class="border border-[var(--color-border-soft)] rounded overflow-hidden max-h-[min(480px,50vh)] overflow-y-auto">
-            <table class="w-full text-[11.5px]">
+          <div class="border border-[var(--color-border-soft)] rounded max-h-[min(480px,50vh)] overflow-auto">
+            <table class="w-full min-w-[640px] text-[length:var(--text-compact,14px)]">
               <thead class="bg-[var(--color-panel-2)] text-[var(--color-fg-muted)] sticky top-0 z-[1]">
                 <tr>
                   <th class="w-8 px-2 py-1.5"></th>
@@ -565,7 +567,7 @@
               <tbody>
                 {#if previewQuery.trim() && previewMatchCount === 0}
                   <tr>
-                    <td colspan="5" class="px-3 py-6 text-center text-[12px] text-[var(--color-fg-muted)]">
+                    <td colspan="5" class="px-3 py-6 text-center text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]">
                       {i18n.t('import.searchNoResults', { query: previewQuery.trim() })}
                     </td>
                   </tr>
@@ -583,20 +585,20 @@
               </tbody>
             </table>
           </div>
-          <p class="text-[10.5px] text-[var(--color-fg-muted)] mt-2">{i18n.t('import.duplicateHint')}</p>
+          <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mt-2">{i18n.t('import.duplicateHint')}</p>
           {#if showDuplicateConfirm}
             <div
               class="mt-3 rounded border border-[var(--color-accent)]/40 bg-[var(--color-panel-2)] px-3 py-2.5"
               role="region"
               aria-labelledby="import-dup-confirm-title"
             >
-              <p id="import-dup-confirm-title" class="text-[12px] text-[var(--color-fg)] mb-2">
+              <p id="import-dup-confirm-title" class="text-[length:var(--text-compact,14px)] text-[var(--color-fg)] mb-2">
                 {i18n.t('import.duplicateConfirmMessage', { count: pendingDuplicateCount })}
               </p>
-              <div class="flex justify-end gap-2">
+              <div class="flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
-                  class="btn-secondary text-[12px] px-3 py-1.5"
+                  class="btn-secondary text-[length:var(--text-compact,14px)] px-3 py-1.5"
                   disabled={applying}
                   onclick={cancelDuplicateConfirm}
                 >
@@ -604,7 +606,7 @@
                 </button>
                 <button
                   type="button"
-                  class="btn-secondary text-[12px] px-3 py-1.5"
+                  class="btn-secondary text-[length:var(--text-compact,14px)] px-3 py-1.5"
                   disabled={applying}
                   onclick={() => { void applyImport(false); }}
                 >
@@ -612,7 +614,7 @@
                 </button>
                 <button
                   type="button"
-                  class="btn-primary text-[12px] px-3 py-1.5"
+                  class="btn-primary text-[length:var(--text-compact,14px)] px-3 py-1.5"
                   disabled={applying}
                   onclick={() => { void applyImport(true); }}
                 >
@@ -626,16 +628,16 @@
 
       <footer class="flex flex-col gap-2 px-4 py-3 border-t border-[var(--color-border-soft)]">
         {#if applyError}
-          <p class="text-[11.5px] text-[var(--color-danger)] whitespace-pre-wrap">{applyError}</p>
+          <p class="text-[length:var(--text-compact,14px)] text-[var(--color-danger)] whitespace-pre-wrap">{applyError}</p>
         {/if}
-        <div class="flex justify-end gap-2">
-        <button type="button" class="btn-secondary text-[12px] px-3 py-1.5" onclick={onClose}>
+        <div class="flex flex-wrap justify-end gap-2">
+        <button type="button" class="btn-secondary text-[length:var(--text-compact,14px)] px-3 py-1.5" onclick={onClose}>
           {i18n.t('common.cancel')}
         </button>
         {#if step === 'file'}
           <button
             type="button"
-            class="btn-secondary text-[12px] px-3 py-1.5 text-[var(--color-accent)]"
+            class="btn-secondary text-[length:var(--text-compact,14px)] px-3 py-1.5 text-[var(--color-accent)]"
             disabled={loading || !canPreview()}
             onclick={() => { void runPreview(); }}
           >
@@ -644,7 +646,7 @@
         {:else if step === 'preview'}
           <button
             type="button"
-            class="btn-secondary text-[12px] px-3 py-1.5 text-[var(--color-accent)]"
+            class="btn-secondary text-[length:var(--text-compact,14px)] px-3 py-1.5 text-[var(--color-accent)]"
             disabled={applying || selectedIds.size === 0}
             onclick={() => { void applyImport(); }}
           >

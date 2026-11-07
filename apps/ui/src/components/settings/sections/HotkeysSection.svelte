@@ -44,7 +44,7 @@
     recordingFor = actionId;
   }
   function onRecordKey(ev: KeyboardEvent) {
-    if (!recordingFor) return;
+    if (!recordingFor || document.getElementById('settings-section-hotkeys')?.hidden) return;
     ev.preventDefault();
     ev.stopPropagation();
     if (ev.key === 'Escape') { recordingFor = null; return; }
@@ -53,22 +53,22 @@
     const cur = bindings[recordingFor] ?? [];
     if (!cur.includes(formatted)) bindings[recordingFor] = [...cur, formatted];
     recordingFor = null;
-    settingsCoord.markDirty();
+    settingsCoord.markDirty('hotkeys');
   }
   function removeBinding(actionId: string, idx: number) {
     const cur = bindings[actionId] ?? [];
     bindings[actionId] = cur.filter((_, i) => i !== idx);
-    settingsCoord.markDirty();
+    settingsCoord.markDirty('hotkeys');
   }
   function resetAction(actionId: string) {
     const def = ACTIONS.find((a) => a.id === actionId)?.defaultBindings ?? [];
     bindings[actionId] = [...def];
-    settingsCoord.markDirty();
+    settingsCoord.markDirty('hotkeys');
   }
   function resetAll() {
     hotkeys.resetToDefaults();
     snapshot();
-    settingsCoord.markDirty();
+    settingsCoord.markDirty('hotkeys');
     settingsCoord.bumpRev();
   }
 

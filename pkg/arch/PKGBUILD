@@ -44,7 +44,7 @@ build() {
   npm ci --no-audit --no-fund
   npm run build
   cd ../../src-tauri
-  cargo tauri build --bundles deb --features desktop
+  cargo tauri build --bundles deb --features native-view
 }
 
 package() {

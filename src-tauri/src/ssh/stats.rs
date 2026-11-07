@@ -21,13 +21,20 @@ if [ ! -r /proc/uptime ]; then
     now_sec=$(date +%s 2>/dev/null || echo "");
     if [ -n "$boot_sec" ] && [ -n "$now_sec" ]; then awk -v boot="$boot_sec" -v now="$now_sec" 'BEGIN { if (now > boot) printf "uptime_seconds=%d\n", now - boot }'; fi;
 fi;
-awk '{ printf "load1=%.2f\n", $1 }' /proc/loadavg 2>/dev/null;
+awk '{ printf "load1=%.2f\nload5=%.2f\nload15=%.2f\n", $1, $2, $3 }' /proc/loadavg 2>/dev/null;
+if [ -r /etc/os-release ]; then
+    awk -F= '/^PRETTY_NAME=/ { value=substr($0,index($0,"=")+1); gsub(/^"|"$/, "", value); printf "os=%s\n", value }' /etc/os-release;
+else uname -s 2>/dev/null | awk '{ printf "os=%s\n", $0 }'; fi;
+awk '/^SwapTotal:/ { t=$2; found=1 } /^SwapFree:/ { f=$2 } END { if (found) printf "swap_total_kb=%.0f\nswap_used_kb=%.0f\n", t, t-f }' /proc/meminfo 2>/dev/null;
+awk -F: 'NR>2 && NF==2 { name=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", name); split($2,v," "); printf "network=%s|%s|%s\n", name, v[1], v[9] }' /proc/net/dev 2>/dev/null;
+awk 'NF>=14 { printf "disk_io=%s|%.0f|%.0f\n", $3, $6*512, $10*512 }' /proc/diskstats 2>/dev/null;
+df -Pk 2>/dev/null | awk 'NR>1 && $2 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+%$/ { pct=$5; sub(/%$/, "", pct); mount=$6; for(i=7;i<=NF;i++) mount=mount " " $i; printf "mount=%s|%s|%s|%s|%s\n", $1, $2, $3, pct, mount }';
 if [ ! -r /proc/loadavg ]; then
     sysctl -n vm.loadavg 2>/dev/null | awk '{ for (i=1; i<=NF; i++) { gsub(/[{}]/, "", $i); if ($i ~ /^[0-9.]+$/) { printf "load1=%.2f\n", $i; exit } } }';
 fi;
-read_cpu() { awk '/^cpu / { idle=$5+$6; total=0; for (i=2; i<=NF; i++) total += $i; printf "%s %s\n", idle, total; exit }' /proc/stat 2>/dev/null; }
-set -- $(read_cpu); idle1=$1; total1=$2; sleep 0.2; set -- $(read_cpu); idle2=$1; total2=$2;
-if [ -n "$total1" ] && [ -n "$total2" ]; then awk -v i1="$idle1" -v t1="$total1" -v i2="$idle2" -v t2="$total2" 'BEGIN { dt=t2-t1; di=i2-i1; if (dt > 0) printf "cpu_percent=%.1f\n", (1 - di / dt) * 100 }'; fi;
+read_cpu() { awk '/^cpu([0-9]+)? / { idle=$5+$6; total=0; for(i=2;i<=9 && i<=NF;i++) total+=$i; printf "%s %.0f %.0f\n", $1, idle, total }' /proc/stat 2>/dev/null; }
+cpu_before=$(read_cpu); sleep 0.2;
+read_cpu | awk -v before="$cpu_before" 'BEGIN { n=split(before,lines,"\n"); for(i=1;i<=n;i++){ split(lines[i],v," "); idle[v[1]]=v[2]; total[v[1]]=v[3] } } { if(!($1 in total)) next; dt=$3-total[$1]; di=$2-idle[$1]; if(dt>0 && di>=0 && di<=dt){ pct=(1-di/dt)*100; if($1=="cpu") printf "cpu_percent=%.1f\n",pct; else printf "cpu_core=%s|%.1f\n",$1,pct } }';
 awk '/^MemTotal:/ { t=$2 } /^MemAvailable:/ { a=$2 } END { if (t > 0) { used=t-a; printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_percent=%.1f\n", t, used, used * 100 / t } }' /proc/meminfo 2>/dev/null;
 if [ ! -r /proc/meminfo ]; then
     page_size=$(pagesize 2>/dev/null || getconf PAGESIZE 2>/dev/null || echo "");
@@ -48,8 +55,43 @@ fi;
 df -Pk / 2>/dev/null | awk 'NR==2 { pct=$5; sub(/%$/, "", pct); printf "disk_total_kb=%s\ndisk_used_kb=%s\ndisk_percent=%s\n", $2, $3, pct }'
 "#;
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CpuCore {
+    pub name: String,
+    pub percent: f64,
+}
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct NetworkInterface {
+    pub name: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DiskIo {
+    pub name: String,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+}
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MountUsage {
+    pub device: String,
+    pub mount_point: String,
+    pub total_kb: u64,
+    pub used_kb: u64,
+    pub percent: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct HostStats {
+    pub os: Option<String>,
+    pub load5: Option<f64>,
+    pub load15: Option<f64>,
+    pub swap_total_kb: Option<u64>,
+    pub swap_used_kb: Option<u64>,
+    pub cpu_cores: Option<Vec<CpuCore>>,
+    pub network_interfaces: Option<Vec<NetworkInterface>>,
+    pub disk_io: Option<Vec<DiskIo>>,
+    pub mounts: Option<Vec<MountUsage>>,
     pub hostname: Option<String>,
     pub kernel: Option<String>,
     pub uptime_seconds: Option<u64>,
@@ -64,6 +106,18 @@ pub struct HostStats {
 }
 
 pub async fn probe_host_stats(
+    profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+) -> Result<HostStats, SshError> {
+    timeout(
+        Duration::from_secs(20),
+        probe_host_stats_inner(profile, known_hosts),
+    )
+    .await
+    .map_err(|_| SshError::Channel("host stats connection timed out".into()))?
+}
+
+async fn probe_host_stats_inner(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
 ) -> Result<HostStats, SshError> {
@@ -84,8 +138,15 @@ pub async fn probe_host_stats(
         let mut exit_status = None;
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-                ChannelMsg::ExtendedData { ref data, ext: _ } => stderr.extend_from_slice(data),
+                ChannelMsg::Data { ref data } => {
+                    if stdout.len().saturating_add(data.len()) > 1_048_576 {
+                        return Err(SshError::Channel("host stats output exceeded limit".into()));
+                    }
+                    stdout.extend_from_slice(data);
+                }
+                ChannelMsg::ExtendedData { ref data, ext: _ } if stderr.len() < 8192 => {
+                    stderr.extend_from_slice(&data[..data.len().min(8192 - stderr.len())]);
+                }
                 ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
                 ChannelMsg::Eof | ChannelMsg::Close => break,
                 _ => {}
@@ -93,12 +154,15 @@ pub async fn probe_host_stats(
         }
         Ok::<_, SshError>((stdout, stderr, exit_status))
     };
-    let (stdout, stderr, exit_status) = timeout(Duration::from_secs(10), collect)
-        .await
-        .map_err(|_| SshError::Channel("host stats timed out".into()))??;
-    let _ = handle
-        .disconnect(Disconnect::ByApplication, "host stats complete", "en")
-        .await;
+    let collected = timeout(Duration::from_secs(10), collect).await;
+    // Close even when collection fails, times out or exceeds the output bound.
+    let _ = timeout(
+        Duration::from_secs(1),
+        handle.disconnect(Disconnect::ByApplication, "host stats complete", "en"),
+    )
+    .await;
+    let (stdout, stderr, exit_status) =
+        collected.map_err(|_| SshError::Channel("host stats timed out".into()))??;
 
     if matches!(exit_status, Some(code) if code != 0) {
         let detail = String::from_utf8_lossy(&stderr).trim().to_string();
@@ -127,6 +191,62 @@ fn parse_host_stats(output: &str) -> HostStats {
         };
         let value = value.trim();
         match key.trim() {
+            "os" => stats.os = non_empty(value),
+            "load5" => stats.load5 = parse_f64(value),
+            "load15" => stats.load15 = parse_f64(value),
+            "swap_total_kb" => stats.swap_total_kb = parse_u64(value),
+            "swap_used_kb" => stats.swap_used_kb = parse_u64(value),
+            "cpu_core" => {
+                if let Some((name, percent)) = value.split_once('|') {
+                    if let Some(percent) = parse_f64(percent).filter(|v| (0.0..=100.0).contains(v))
+                    {
+                        stats.cpu_cores.get_or_insert_with(Vec::new).push(CpuCore {
+                            name: name.into(),
+                            percent,
+                        });
+                    }
+                }
+            }
+            "network" | "disk_io" => {
+                let fields: Vec<_> = value.split('|').collect();
+                if fields.len() == 3 {
+                    if let (Some(a), Some(b)) = (parse_u64(fields[1]), parse_u64(fields[2])) {
+                        if key.trim() == "network" {
+                            stats.network_interfaces.get_or_insert_with(Vec::new).push(
+                                NetworkInterface {
+                                    name: fields[0].into(),
+                                    rx_bytes: a,
+                                    tx_bytes: b,
+                                },
+                            );
+                        } else {
+                            stats.disk_io.get_or_insert_with(Vec::new).push(DiskIo {
+                                name: fields[0].into(),
+                                read_bytes: a,
+                                write_bytes: b,
+                            });
+                        }
+                    }
+                }
+            }
+            "mount" => {
+                let fields: Vec<_> = value.splitn(5, '|').collect();
+                if fields.len() == 5 {
+                    if let (Some(total_kb), Some(used_kb), Some(percent)) = (
+                        parse_u64(fields[1]),
+                        parse_u64(fields[2]),
+                        parse_f64(fields[3]),
+                    ) {
+                        stats.mounts.get_or_insert_with(Vec::new).push(MountUsage {
+                            device: fields[0].into(),
+                            mount_point: fields[4].into(),
+                            total_kb,
+                            used_kb,
+                            percent,
+                        });
+                    }
+                }
+            }
             "hostname" => stats.hostname = non_empty(value),
             "kernel" => stats.kernel = non_empty(value),
             "uptime_seconds" => stats.uptime_seconds = parse_u64(value),
@@ -163,6 +283,29 @@ fn parse_f64(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_extended_linux_metrics_and_keeps_missing_values_absent() {
+        let stats = parse_host_stats("os=Debian GNU/Linux 13\nload5=1.25\nload15=0.75\nswap_total_kb=2048\nswap_used_kb=512\ncpu_core=cpu0|12.5\ncpu_core=cpu1|25\nnetwork=eth0|123456|98765\ndisk_io=sda|1024|4096\nmount=/dev/sda1|100000|50000|50|/mnt/data disk\n");
+        assert_eq!(stats.os.as_deref(), Some("Debian GNU/Linux 13"));
+        assert_eq!(stats.load5, Some(1.25));
+        assert_eq!(stats.load15, Some(0.75));
+        assert_eq!(stats.swap_used_kb, Some(512));
+        assert_eq!(stats.cpu_cores.as_ref().unwrap()[1].percent, 25.0);
+        assert_eq!(
+            stats.network_interfaces.as_ref().unwrap()[0].rx_bytes,
+            123456
+        );
+        assert_eq!(stats.disk_io.as_ref().unwrap()[0].write_bytes, 4096);
+        assert_eq!(
+            stats.mounts.as_ref().unwrap()[0].mount_point,
+            "/mnt/data disk"
+        );
+        let absent = parse_host_stats("hostname=bsd\nnetwork=bad|nope|1\ncpu_core=cpu0|NaN\n");
+        assert!(absent.network_interfaces.is_none());
+        assert!(absent.cpu_cores.is_none());
+        assert!(absent.swap_total_kb.is_none());
+    }
 
     #[test]
     fn parses_linux_probe_output() {

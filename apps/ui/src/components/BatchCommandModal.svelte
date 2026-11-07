@@ -145,7 +145,7 @@
     onsubmit={submit}
   >
     <header class="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border-soft)]">
-      <h2 id="batch-cmd-title" class="text-[14px] font-semibold text-[var(--color-accent)]">
+      <h2 id="batch-cmd-title" class="text-[length:var(--text-section,20px)] font-semibold text-[var(--color-accent)]">
         {i18n.t('batchCommand.title')}
       </h2>
       <button type="button" class="btn-ghost ml-auto p-1" onclick={onClose} aria-label={i18n.t('common.close')}>
@@ -154,23 +154,23 @@
     </header>
 
     <div class="p-4 flex flex-col gap-3 overflow-y-auto min-h-0">
-      <label class="block text-[11px] text-[var(--color-fg-muted)]" for="batch-cmd-input">
+      <label class="block text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)]" for="batch-cmd-input">
         {i18n.t('batchCommand.command')}
       </label>
       <textarea
         id="batch-cmd-input"
         bind:this={commandInput}
-        class="input w-full min-h-[88px] font-mono text-[12px] resize-y"
+        class="input w-full min-h-[88px] font-mono text-[length:var(--text-compact,14px)] resize-y"
         bind:value={command}
         placeholder={i18n.t('batchCommand.placeholder')}
         spellcheck="false"
         onkeydown={onCommandKeydown}
       ></textarea>
-      <p class="text-[10px] text-[var(--color-fg-muted)] -mt-2">
+      <p class="text-[length:var(--text-meta,12px)] text-[var(--color-fg-muted)] -mt-2">
         {i18n.t('batchCommand.sendShortcut')}
       </p>
 
-      <fieldset class="flex flex-wrap gap-3 text-[12px]">
+      <fieldset class="flex flex-wrap gap-3 text-[length:var(--text-compact,14px)]">
         <label class="inline-flex items-center gap-1.5 cursor-pointer">
           <input type="radio" name="batch-scope" value="active-tab" bind:group={scope} />
           {i18n.t('batchCommand.scopeActiveTab')}
@@ -181,11 +181,11 @@
         </label>
       </fieldset>
 
-      <div class="flex flex-wrap gap-2 text-[11px]">
-        <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={selectAllPanes}>
+      <div class="flex flex-wrap gap-2 text-[length:var(--text-compact,14px)]">
+        <button type="button" class="btn-secondary text-[length:var(--text-compact,14px)] py-0.5 px-2" onclick={selectAllPanes}>
           {i18n.t('profiles.selectAll')}
         </button>
-        <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={invertPanes}>
+        <button type="button" class="btn-secondary text-[length:var(--text-compact,14px)] py-0.5 px-2" onclick={invertPanes}>
           {i18n.t('profiles.invertSelection')}
         </button>
         <span class="text-[var(--color-fg-muted)] self-center">
@@ -195,26 +195,26 @@
 
       <div class="border border-[var(--color-border-soft)] rounded-md max-h-[220px] overflow-y-auto divide-y divide-[var(--color-border-soft)]">
         {#if paneOptions.length === 0}
-          <div class="px-3 py-4 text-[12px] text-[var(--color-fg-muted)] italic">
+          <div class="px-3 py-4 text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] italic">
             {i18n.t('batchCommand.noSshPanes')}
           </div>
         {:else}
           {#each paneOptions as opt (opt.sessionId)}
-            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--color-panel-2)] cursor-pointer text-[12px]">
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--color-panel-2)] cursor-pointer text-[length:var(--text-compact,14px)]">
               <input
                 type="checkbox"
                 checked={selectedIds.has(opt.sessionId)}
                 onchange={() => togglePane(opt.sessionId)}
               />
-              <span class="truncate text-[var(--color-fg-muted)]">{opt.tabTitle}</span>
-              <span class="truncate font-mono text-[var(--color-fg)]">{opt.title}</span>
+              <span class="min-w-0 flex-1 [overflow-wrap:anywhere] text-[var(--color-fg-muted)]">{opt.tabTitle}</span>
+              <span class="min-w-0 flex-1 [overflow-wrap:anywhere] font-mono text-[var(--color-fg)]">{opt.title}</span>
             </label>
           {/each}
         {/if}
       </div>
     </div>
 
-    <footer class="flex justify-end gap-2 px-4 py-3 border-t border-[var(--color-border-soft)]">
+    <footer class="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-[var(--color-border-soft)]">
       <button type="button" class="btn-secondary" onclick={onClose} disabled={busy}>
         {i18n.t('common.cancel')}
       </button>

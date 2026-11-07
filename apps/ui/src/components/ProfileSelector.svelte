@@ -15,6 +15,7 @@
   import type { RpcClient } from '../lib/rpc';
   import type { StoredProfile } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
+  import { getProfileCatalog } from '../lib/profileCatalog.svelte';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, displayGroupName, isUngroupedGroupKey, UNGROUPED_GROUP_KEY } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
@@ -71,8 +72,10 @@
   onMount(() => {
     void (async () => {
       try {
-        profiles = await rpc.call<StoredProfile[]>('profile.list');
-      } catch { profiles = []; }
+        const catalog = getProfileCatalog(rpc);
+        await catalog.refresh();
+        profiles = catalog.profiles;
+      } catch { profiles = getProfileCatalog(rpc).profiles; }
       try {
         const d = await rpc.call<{ shells: ShellEntry[]; sshConfig: SshConfigEntry[] }>(
           'profile.discover',
@@ -366,7 +369,8 @@
 
 <style>
   .picker-shell {
-    width: min(560px, calc(100vw - 24px));
+    width: min(720px, calc(100vw - 24px));
+    font-family: var(--font-sans, system-ui, sans-serif);
     margin: 0 auto;
     background: var(--color-panel);
     border: 1px solid var(--color-border);
@@ -385,7 +389,7 @@
     background: transparent;
     color: var(--color-fg);
     padding: 12px 14px;
-    font-size: 13px;
+    font-size: var(--text-ui, 16px);
     font-family: inherit;
   }
   .picker-scroll {
@@ -394,7 +398,7 @@
   }
   .picker-cat {
     padding: 8px 14px 4px;
-    font-size: 10.5px;
+    font-size: var(--text-meta, 12px);
     text-transform: uppercase;
     letter-spacing: 0.12em;
     color: var(--color-fg-muted);
@@ -409,7 +413,10 @@
     border: none;
     color: var(--color-fg);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: var(--text-compact, 14px);
+    line-height: 1.5;
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
     text-align: left;
     font-family: inherit;
   }
@@ -419,32 +426,36 @@
     color: var(--color-fg);
     border-radius: var(--radius-md);
     margin: 1px 6px;
+    width: calc(100% - 12px);
     padding-left: 8px;
     outline: 1px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
     outline-offset: -1px;
   }
   .picker-row.active .picker-sub { color: var(--color-fg-muted); }
-  .picker-label { font-weight: 500; }
+  .picker-label { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+  .picker-row > :global(svg) { flex-shrink: 0; }
   .picker-pill {
-    font-size: 10px;
+    font-size: var(--text-meta, 12px);
     color: var(--color-fg-muted);
     border: 1px solid var(--color-border-soft);
     border-radius: 999px;
     padding: 0 5px;
-    line-height: 16px;
-    max-width: 88px;
+    line-height: 1.5;
+    max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .picker-sub {
     color: var(--color-fg-muted);
-    font-size: 11.5px;
+    font-size: var(--text-meta, 12px);
+    min-width: 0;
+    overflow-wrap: anywhere;
     margin-left: 4px;
   }
   .picker-kbd {
     margin-left: auto;
-    font-size: 10px;
+    font-size: var(--text-meta, 12px);
     font-family: var(--font-mono);
     background: var(--color-bg);
     color: var(--color-fg-muted);

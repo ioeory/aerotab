@@ -22,13 +22,27 @@ export interface WindowSettings {
   useNativeWindowControls?: boolean;
 }
 
-let cached: WindowSettings = {};
+export const DEFAULT_WINDOW_SETTINGS: Readonly<Required<WindowSettings>> = Object.freeze({
+  frameStyle: 'native', opacity: 100, acrylic: false, vibrancy: false,
+  spaciness: 1, tabsLocation: 'top', sidebarVisible: true, dockSide: 'off',
+  trayEnabled: false, trayMinimizeToTray: false, focusFollowsMouse: false,
+  confirmCloseWithMultipleTabs: true, disableGpuAcceleration: false, useNativeWindowControls: true,
+});
+let cached: WindowSettings = { ...DEFAULT_WINDOW_SETTINGS };
 
 export function getWindowSettings(): Readonly<WindowSettings> {
   return cached;
 }
 
-export function applyWindowSettings(v: Record<string, unknown>): void {
+export function applyWindowSettings(v: Record<string, unknown>, options: { replace?: boolean } = {}): void {
+  if (options.replace) {
+    const complete: Record<string, unknown> = { ...DEFAULT_WINDOW_SETTINGS };
+    for (const [key, value] of Object.entries(v)) {
+      if (value !== undefined && value !== null) complete[key] = value;
+    }
+    v = complete;
+    cached = { ...DEFAULT_WINDOW_SETTINGS };
+  }
   const out: WindowSettings = {};
   const root = document.documentElement;
   const body = document.body;

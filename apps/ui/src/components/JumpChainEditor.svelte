@@ -113,18 +113,18 @@
 
 <div class="jump-chain-editor mt-2 space-y-2">
   <section class="border border-[var(--color-border-soft)] rounded-md overflow-hidden">
-    <div class="px-2 py-1.5 text-[10.5px] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
+    <div class="px-2 py-1.5 text-[length:var(--text-compact)] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
       {i18n.t('profileModal.jumpChainTitle')}
     </div>
     {#if jumpChainLines.length === 0}
-      <div class="px-3 py-4 text-[11px] text-[var(--color-fg-muted)] text-center">
+      <div class="px-3 py-4 text-[length:var(--text-compact)] text-[var(--color-fg-muted)] text-center">
         {i18n.t('profileModal.jumpChainEmpty')}
       </div>
     {:else}
       <ol class="jump-chain-list list-none m-0 p-1 space-y-0.5" aria-label={i18n.t('profileModal.jumpChainTitle')}>
         {#each jumpChainLines as line, index (line + index)}
           <li
-            class="jump-chain-item flex items-center gap-1 px-1.5 py-1 rounded text-[11.5px]
+            class="jump-chain-item flex items-center gap-1 px-1.5 py-1 rounded text-[length:var(--text-ui)]
                    {dragOverIndex === index ? 'bg-[var(--color-accent)]/15 ring-1 ring-[var(--color-accent)]/40' : 'hover:bg-[var(--color-panel-2)]'}"
             draggable="true"
             ondragstart={(e) => onDragStart(index, e)}
@@ -139,10 +139,10 @@
             >
               <GripVertical size={13} />
             </span>
-            <span class="w-4 shrink-0 text-center text-[10px] font-medium text-[var(--color-accent)]">{index + 1}</span>
+            <span class="w-4 shrink-0 text-center text-[length:var(--text-compact)] font-medium text-[var(--color-accent)]">{index + 1}</span>
             <div class="min-w-0 flex-1">
-              <div class="truncate text-[var(--color-fg)]">{jumpLineTitle(line, profiles)}</div>
-              <div class="truncate text-[10px] text-[var(--color-fg-muted)]">{jumpLineSubtitle(line, profiles)}</div>
+              <div class="break-words [overflow-wrap:anywhere] text-[var(--color-fg)]">{jumpLineTitle(line, profiles)}</div>
+              <div class="break-words [overflow-wrap:anywhere] text-[length:var(--text-compact)] text-[var(--color-fg-muted)]">{jumpLineSubtitle(line, profiles)}</div>
             </div>
             <button
               type="button"
@@ -179,7 +179,7 @@
     {/if}
     {#if jumpChainLines.length > 0}
       <div class="px-2 py-1.5 border-t border-[var(--color-border-soft)] flex justify-end">
-        <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={clearChain}>
+        <button type="button" class="btn-secondary text-[length:var(--text-compact)] py-0.5 px-2" onclick={clearChain}>
           {i18n.t('profileModal.jumpClearChain')}
         </button>
       </div>
@@ -188,7 +188,7 @@
 
   {#if pickableProfiles.length > 0}
     <section class="border border-[var(--color-border-soft)] rounded-md overflow-hidden">
-      <div class="px-2 py-1.5 text-[10.5px] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
+      <div class="px-2 py-1.5 text-[length:var(--text-compact)] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
         {i18n.t('profileModal.jumpPickFromList')}
       </div>
       <div class="px-2 py-1.5 border-b border-[var(--color-border-soft)]">
@@ -198,22 +198,22 @@
             type="search"
             bind:value={pickerSearch}
             placeholder={i18n.t('profileModal.jumpSearchPlaceholder')}
-            class="flex-1 min-w-0 border-0 bg-transparent text-[11.5px] outline-none"
+            class="flex-1 min-w-0 border-0 bg-transparent text-[length:var(--text-ui)] outline-none"
             autocomplete="off"
           />
         </div>
       </div>
       <div class="jump-picker-list max-h-[160px] overflow-y-auto px-1 py-1">
         {#if filteredPickableProfiles.length === 0}
-          <div class="px-2 py-3 text-[11px] text-[var(--color-fg-muted)] text-center">
+          <div class="px-2 py-3 text-[length:var(--text-compact)] text-[var(--color-fg-muted)] text-center">
             {i18n.t('profileModal.jumpSearchEmpty')}
           </div>
         {:else}
           {#each filteredPickableProfiles as jp (jp.id)}
-            <div class="jump-picker-row flex items-center gap-2 px-2 py-1 rounded hover:bg-[var(--color-panel-2)] text-[11.5px]">
+            <div class="jump-picker-row flex items-center gap-2 px-2 py-1 rounded hover:bg-[var(--color-panel-2)] text-[length:var(--text-ui)]">
               <div class="min-w-0 flex-1">
-                <div class="truncate text-[var(--color-fg)]">{jp.name}</div>
-                <div class="truncate text-[10px] text-[var(--color-fg-muted)]">{profileEndpointLabel(jp)}</div>
+                <div class="break-words [overflow-wrap:anywhere] text-[var(--color-fg)]">{jp.name}</div>
+                <div class="break-words [overflow-wrap:anywhere] text-[length:var(--text-compact)] text-[var(--color-fg-muted)]">{profileEndpointLabel(jp)}</div>
               </div>
               <button
                 type="button"
@@ -235,24 +235,24 @@
     {#if !showManualForm}
       <button
         type="button"
-        class="text-[11px] text-[var(--color-accent)] hover:underline"
+        class="text-[length:var(--text-compact)] text-[var(--color-accent)] hover:underline"
         onclick={() => { showManualForm = true; }}
       >
         {i18n.t('profileModal.jumpAddManual')}
       </button>
     {:else}
       <div class="manual-hop-form border border-[var(--color-border-soft)] rounded-md p-2 space-y-2">
-        <div class="text-[10.5px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.jumpManualHint')}</div>
-        <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_72px] gap-2">
-          <input bind:value={manualUser} placeholder={i18n.t('profileModal.user')} class="input py-1 text-[11.5px]" />
-          <input bind:value={manualHost} placeholder={i18n.t('profileModal.host')} class="input py-1 text-[11.5px]" />
-          <input bind:value={manualPort} type="number" min="1" max="65535" class="input py-1 text-[11.5px]" />
+        <div class="text-[length:var(--text-compact)] text-[var(--color-fg-muted)]">{i18n.t('profileModal.jumpManualHint')}</div>
+        <div class="manual-hop-fields grid gap-2">
+          <input bind:value={manualUser} placeholder={i18n.t('profileModal.user')} class="input py-1 text-[length:var(--text-ui)]" />
+          <input bind:value={manualHost} placeholder={i18n.t('profileModal.host')} class="input py-1 text-[length:var(--text-ui)]" />
+          <input bind:value={manualPort} type="number" min="1" max="65535" class="input py-1 text-[length:var(--text-ui)]" />
         </div>
         <div class="flex justify-end gap-1.5">
-          <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={() => { showManualForm = false; }}>
+          <button type="button" class="btn-secondary text-[length:var(--text-compact)] py-0.5 px-2" onclick={() => { showManualForm = false; }}>
             {i18n.t('common.cancel')}
           </button>
-          <button type="button" class="btn-secondary text-[11px] py-0.5 px-2" onclick={submitManualHop}>
+          <button type="button" class="btn-secondary text-[length:var(--text-compact)] py-0.5 px-2" onclick={submitManualHop}>
             {i18n.t('profileModal.jumpAddManualSubmit')}
           </button>
         </div>
@@ -260,11 +260,55 @@
     {/if}
   </div>
 
-  <p class="text-[10.5px] text-[var(--color-fg-muted)]">{i18n.t('profileModal.jumpChainHint')}</p>
+  <p class="text-[length:var(--text-compact)] text-[var(--color-fg-muted)]">{i18n.t('profileModal.jumpChainHint')}</p>
 </div>
 
 <style>
+  .jump-chain-editor {
+    min-width: 0;
+    container-type: inline-size;
+    line-height: var(--leading-ui, 1.4);
+  }
+
   .jump-chain-item[draggable='true'] {
     user-select: none;
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .jump-chain-item > div {
+    flex-basis: 120px;
+  }
+
+  .jump-chain-item button,
+  .jump-picker-row button {
+    min-width: 28px;
+    min-height: 28px;
+  }
+
+  .manual-hop-fields {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) 96px;
+  }
+
+  .manual-hop-fields input {
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+  }
+
+  .manual-hop-form button {
+    min-height: 32px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .manual-hop-form > div:last-child {
+    flex-wrap: wrap;
+  }
+
+  @container (max-width: 440px) {
+    .manual-hop-fields {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 </style>

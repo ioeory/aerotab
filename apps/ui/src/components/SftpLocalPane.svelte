@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { workspaceMenu } from '../lib/workspaceMenu';
   import { tick } from 'svelte';
   import {
     Folder,
@@ -339,12 +340,12 @@
   <div class="local-pane-title px-2 py-1 shell-section-title border-b border-[var(--color-border-soft)]">
     {i18n.t('sftp.localPane')}
   </div>
-  <div class="local-pane-toolbar flex items-center gap-1 px-2 py-1 border-b border-[var(--color-border-soft)] text-[12px]">
+  <div class="local-pane-toolbar flex items-center gap-1 px-2 py-1 border-b border-[var(--color-border-soft)] text-[14px]">
     <button type="button" class="toolbtn" onclick={onGoHome} title={i18n.t('common.home')}><Home size={13} /></button>
     <button type="button" class="toolbtn" onclick={onGoUp} title={i18n.t('common.up')}><ArrowUp size={13} /></button>
     <button type="button" class="toolbtn" onclick={onRefresh} title={i18n.t('common.refresh')}><RefreshCw size={13} class={loading ? 'animate-spin' : ''} /></button>
     <button type="button" class="toolbtn" onclick={() => { void mkdirHere(); }} title={i18n.t('sftp.newFolder')}><FolderPlus size={13} /></button>
-    <div class="mx-1 flex items-center gap-0.5 flex-wrap text-[11px] text-[var(--color-fg-muted)] min-w-0">
+    <div class="local-breadcrumbs mx-1 flex items-center gap-0.5 text-[var(--color-fg-muted)] min-w-0" title={cwd}>
       {#each crumbs as bc, i (bc.path)}
         {#if i > 0}<ChevronRight size={11} class="text-[var(--color-border)]" />{/if}
         <button type="button" class="hover:text-[var(--color-accent)] px-0.5 truncate max-w-[80px]" onclick={() => onNavigate(bc.path)}>
@@ -355,17 +356,17 @@
   </div>
 
   {#if listError}
-    <div class="mx-2 mt-1 px-2 py-1 text-[11px] text-[var(--color-danger)] truncate">{listError}</div>
+    <div role="alert" class="mx-2 mt-1 px-2 py-2 text-[14px] text-[var(--color-danger)] break-words">{listError}</div>
   {/if}
 
   <div class="relative flex-1 min-h-0 overflow-y-auto {loading && entries.length > 0 ? 'pointer-events-none opacity-70' : ''}">
     {#if loading && entries.length === 0 && !listError}
-      <div class="px-3 py-4 text-[12px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
+      <div class="px-3 py-4 text-[14px] text-[var(--color-fg-muted)]">{i18n.t('common.loading')}</div>
     {:else if entries.length === 0 && !listError}
-      <div class="px-3 py-4 text-[12px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
+      <div class="px-3 py-4 text-[14px] text-[var(--color-fg-muted)] italic">{i18n.t('sftp.emptyDirectory')}</div>
     {:else}
-      <table class="w-full text-[12px]">
-        <thead class="sticky top-0 local-table-head text-[10px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
+      <table class="w-full text-[14px]">
+        <thead class="sticky top-0 local-table-head text-[12px] uppercase tracking-[0.12em] text-[var(--color-fg-muted)]">
           <tr>
             <th class="text-left px-2 py-1 font-normal">{i18n.t('sftp.name')}</th>
             <th class="text-right px-2 py-1 font-normal w-[72px]">{i18n.t('sftp.size')}</th>
@@ -401,7 +402,7 @@
                   {:else}
                     <FileText size={12} class="text-[var(--color-fg-muted)] shrink-0" />
                   {/if}
-                  <span class="truncate">{e.name}</span>
+                  <span class="truncate" title={e.name}>{e.name}</span>
                 </div>
               </td>
               <td class="px-2 py-0.5 text-right text-[var(--color-fg-muted)]">
@@ -419,8 +420,10 @@
   <div use:portal class="contents">
     <div
       bind:this={menuEl}
+      use:workspaceMenu={closeMenu}
+      data-aerotab-context-menu=""
       data-aerotab-menu-open=""
-      class="panel local-context-menu fixed z-[80] min-w-[176px] py-1 text-[12px] text-[var(--color-fg)]"
+      class="panel local-context-menu fixed z-[80] min-w-[176px] py-1 text-[14px] text-[var(--color-fg)]"
       style="left: {menuX}px; top: {menuY}px;"
       role="menu"
       tabindex="-1"
@@ -455,6 +458,19 @@
 {/if}
 
 <style>
+  .local-pane-shell { font-size: var(--text-compact, 14px); line-height: 1.5; }
+  .local-pane-title { display: flex; align-items: center; min-height: 36px; font-size: var(--text-compact, 14px); font-weight: 600; letter-spacing: 0; }
+  .local-pane-toolbar { flex-wrap: wrap; gap: 4px; padding: 6px 8px; }
+  .local-pane-toolbar button.toolbtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 5px; }
+  .local-breadcrumbs { flex: 1 1 100%; overflow-x: auto; flex-wrap: nowrap; padding: 4px 0; font-size: var(--text-compact, 14px); font-family: var(--font-mono); scrollbar-width: thin; }
+  .local-breadcrumbs button { flex-shrink: 0; max-width: 180px; }
+  .local-breadcrumbs button:last-child { color: var(--color-fg); font-weight: 500; }
+  .local-pane-shell table { table-layout: fixed; }
+  .local-pane-shell td { padding: 8px; font-size: var(--text-ui, 16px); }
+  .local-pane-shell td:last-child { font-size: var(--text-meta, 12px); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .local-pane-shell th { padding: 7px 8px; font-weight: 500; font-size: var(--text-meta, 12px); letter-spacing: 0; }
+  .local-pane-shell button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+
   .local-pane-shell {
     background: var(--color-bg-soft);
   }
