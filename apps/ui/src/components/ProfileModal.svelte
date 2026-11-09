@@ -60,10 +60,10 @@
 </dialog>
 
 <style>
-  dialog.profile-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(620px, 100vw); min-width: 0; max-width: 100vw; height: 100dvh; max-height: 100dvh; padding: 0; border: 0; border-left: 1px solid var(--color-border); border-radius: 0; background: var(--color-panel); color: var(--color-fg); overflow-y: auto; font-size: 16px; line-height: 1.5; }
+  dialog.profile-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(620px, 100vw); min-width: 0; max-width: 100vw; height: 100dvh; max-height: 100dvh; padding: 0; border: 0; border-left: 1px solid var(--color-border); border-radius: 0; background: var(--color-panel); color: var(--color-fg); overflow: hidden; font-size: var(--text-compact); line-height: var(--leading-ui); }
   .profile-drawer::backdrop { background: rgb(0 0 0 / 0.3); }
-  header { position: sticky; top: 0; z-index: 2; margin: 0 -24px 20px; padding: 20px 24px; background: var(--color-panel); border-bottom: 1px solid var(--color-border-soft); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  h2 { font-size: 20px; line-height: 1.5; font-weight: 600; }
+  header { flex-shrink: 0; padding: 12px 20px; background: var(--color-panel); border-bottom: 1px solid var(--color-border-soft); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  h2 { font-size: var(--text-ui); line-height: var(--leading-ui); font-weight: 600; }
   header button { min-width: 40px; min-height: 40px; display: grid; place-items: center; color: var(--color-fg); border-radius: 6px; background: transparent; cursor: pointer; }
   button:focus-visible { outline: 2px solid var(--color-accent); }
 </style>

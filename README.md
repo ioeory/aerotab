@@ -28,6 +28,11 @@
 - **Host stats** — CPU/memory/disk in the status area (separate exec channel)
 - **Connection import** — Settings → Profiles → **Import connections…** (or command palette). Sources: WindTerm, Termius, OpenSSH config, CSV, PuTTY `.reg`, MobaXterm, Xshell, SecureCRT, Tabby/AeroTab export. Preview step supports **search**, grouped folders (expand/collapse), select all/invert, **batch auth** (username, password, key, agent, Vault — applied on import), match auth from existing profiles, and **overwrite** confirmation for duplicates.
 
+## What's new in v0.3.1
+
+- **Persistent SSH group defaults** — share username, port, authentication, proxy, and jump-chain settings across nested groups. Hosts opt in per field; explicit host settings override group defaults, and legacy profiles keep their existing settings. Group authentication uses SSH agent, Vault references, or key paths without plaintext passphrases.
+- **Profile editor layout fix** — compact typography and spacing, a separately scrollable form, and fixed header / Cancel / Save actions keep lower fields accessible in smaller windows.
+
 ## Quick start
 
 ### Prerequisites

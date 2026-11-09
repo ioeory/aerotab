@@ -151,6 +151,7 @@
 
 <form onsubmit={submit} use:validation aria-busy={saving}>
   {@render header?.()}
+  <div class="editor-body">
   {#key revision}
   <details class="section" open>
     <summary>{i18n.t('profileModal.sectionIdentity')}</summary>
@@ -227,6 +228,7 @@
   </div></details>
   <details class="section"><summary>{i18n.t('profileModal.sectionNote')}</summary><div class="fields"><label for="pm-note">{i18n.t('profileModal.note')}</label><textarea id="pm-note" class="input" bind:value={draft.note} rows="4" placeholder={i18n.t('profileModal.notePlaceholder')}></textarea></div></details>
   {/key}
+  </div>
   <footer><button type="button" class="btn-secondary" disabled={saving} onclick={onCancel}>{i18n.t('common.cancel')}</button><button type="submit" class="btn-primary" disabled={saving}>{i18n.t('common.save')}</button></footer>
 </form>
 
@@ -244,18 +246,19 @@
 </script>
 
 <style>
-  form { min-height: 100%; padding: 0 24px; font-size: 16px; line-height: 1.5; }
-  .section { border: 1px solid var(--color-border-soft); border-radius: 8px; margin: 0 0 16px; min-width: 0; }
-  summary { padding: 14px 16px; font-weight: 600; cursor: pointer; }
+  form { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; font-size: var(--text-compact); line-height: var(--leading-ui); }
+  .editor-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px; overflow-wrap: anywhere; }
+  .section { border: 1px solid var(--color-border-soft); border-radius: 8px; margin: 0 0 12px; min-width: 0; }
+  summary { padding: 10px 12px; font-weight: 600; cursor: pointer; }
   summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
-  .fields { padding: 0 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .fields { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   label { color: var(--color-fg); }
   fieldset { border: 0; margin: 0; }
   fieldset:disabled { opacity: 0.55; }
   .inherit-row { display: flex; align-items: center; gap: 8px; }
-  .input { min-width: 0; font-size: 16px; min-height: 40px; }
-  button { min-height: 40px; font-size: 16px; }
-  p { font-size: 14px; }
+  .input { min-width: 0; font-size: inherit; min-height: 34px; }
+  button { min-height: 34px; font-size: inherit; }
+  p { font-size: inherit; }
   .endpoint { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; }
   .endpoint > div { display: flex; flex-direction: column; gap: 8px; }
   .color-row, .group-input-row, .path-field, .favorite-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -263,6 +266,6 @@
   .group-input-row .input, .path-field .input { flex: 1; min-width: 0; }
   .path-field button { display: flex; gap: 6px; align-items: center; }
   .group-color-preview { width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px; border: 1px solid var(--profile-tone-border); background: var(--profile-tone-bg); box-shadow: inset 3px 0 0 var(--profile-tone-fg); }
-  footer { display: flex; justify-content: flex-end; gap: 8px; position: sticky; bottom: 0; z-index: 2; background: var(--color-panel); padding: 16px 24px; margin: 24px -24px 0; border-top: 1px solid var(--color-border-soft); }
-  @media (max-width: 520px) { form { padding: 0 16px; } .path-field { flex-wrap: wrap; } }
+  footer { display: flex; flex-shrink: 0; justify-content: flex-end; gap: 8px; background: var(--color-panel); padding: 12px 20px; border-top: 1px solid var(--color-border-soft); }
+  @media (max-width: 520px) { .editor-body { padding: 12px; } footer { padding: 12px; } .endpoint { grid-template-columns: minmax(0, 1fr) 90px; } .path-field { flex-wrap: wrap; } }
 </style>
