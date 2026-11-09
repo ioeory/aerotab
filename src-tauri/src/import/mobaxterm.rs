@@ -132,6 +132,7 @@ fn map_chunk(chunk: &str, blob_idx: usize, idx: usize) -> Option<ImportCandidate
         jump_profile_ids: vec![],
         proxy_id: None,
         resolved_proxy: None,
+        inherit: vec![],
     };
     let profile = build_profile(
         name.clone(),

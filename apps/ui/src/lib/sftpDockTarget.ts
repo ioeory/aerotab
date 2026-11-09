@@ -23,6 +23,7 @@ export function resolveTabActivePane(
 }
 
 export interface SftpDockTarget {
+  profileId?: string;
   name: string;
   ssh: SshProfileSpec;
   sudo?: boolean;
@@ -47,7 +48,7 @@ export function resolveDockTargetState(
   if (pane?.sshProfile) {
     return {
       status: 'ready',
-      target: { name: pane.title || 'SSH session', ssh: pane.sshProfile },
+      target: { ...(pane.profileId ? { profileId: pane.profileId } : {}), name: pane.title || 'SSH session', ssh: pane.sshProfile },
     };
   }
 
@@ -83,5 +84,5 @@ export async function fetchProfileDockTarget(
 ): Promise<SftpDockTarget | null> {
   const profile = await rpc.call<StoredProfile>('profile.get', { id: profileId });
   if (profile.kind !== 'ssh') return null;
-  return { name: profile.name, ssh: profile.ssh };
+  return { profileId: profile.id, name: profile.name, ssh: profile.ssh };
 }

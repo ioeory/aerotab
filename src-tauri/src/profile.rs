@@ -438,6 +438,7 @@ mod tests {
                     jump_profile_ids: vec![],
                     proxy_id: None,
                     resolved_proxy: None,
+                    inherit: vec![],
                 },
             },
         }

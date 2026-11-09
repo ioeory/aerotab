@@ -217,6 +217,7 @@ fn map_tabby_native(
                 jump_profile_ids: vec![],
                 proxy_id: None,
                 resolved_proxy: None,
+                inherit: vec![],
             };
             let profile = build_profile(
                 name.clone(),

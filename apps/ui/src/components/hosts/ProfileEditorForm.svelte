@@ -3,9 +3,9 @@
   import type { Snippet } from 'svelte';
   import type { RpcClient } from '../../lib/rpc';
   import { uuidv4 } from '../../lib/rpc';
-  import type { StoredProfile } from '../../lib/types';
+  import type { StoredProfile, SshInheritField, ProfileGroupDefaults } from '../../lib/types';
   import { i18n } from '../../lib/i18n.svelte';
-  import { profileToEditorDraft, profileFromEditorDraft, authFromDraft, resolveProfileEditorJumps } from '../../lib/profileCatalogHelpers';
+  import { profileToEditorDraft, profileFromEditorDraft, authFromDraft, resolveProfileEditorJumps, previewProfileInheritance } from '../../lib/profileCatalogHelpers';
   import { defaultPortForKind } from '../../lib/profileDefaults';
   import { formatJumpLinesForEdit, splitJumpLines, joinJumpLines, parseJumpLines, loadProfilesForJumps } from '../../lib/jumpProfiles';
   import { BUILTIN_PROFILE_ICONS, collectProfileTags, normalizeTags, parseProfileIconInput, suggestDuplicateProfileName } from '../../lib/profileMeta';
@@ -41,10 +41,37 @@
   let iconKind = $state('builtin');
   let iconValue = $state('server');
   let iconGridExpanded = $state(false);
+  let groupDefaults = $state<ProfileGroupDefaults>({});
+  let inheritanceLoaded = $state(false);
+  const inheritanceFields: SshInheritField[] = ['user', 'port', 'auth', 'proxy_id', 'jump'];
+  const inheritanceLabels: Record<SshInheritField, string> = { user: 'profileModal.user', port: 'profileModal.port', auth: 'profileModal.authMethod', proxy_id: 'shell.proxies', jump: 'profileModal.proxyJump' };
+  const inheritedPreview = $derived(previewProfileInheritance(profileFromEditorDraft(draft, editingId ?? 'preview'), groupDefaults));
+  function toggleInheritance(field: SshInheritField, checked: boolean) {
+    draft.inherit = checked ? [...new Set([...draft.inherit, field])] : draft.inherit.filter(value => value !== field);
+  }
+  function inherited(field: SshInheritField): boolean {
+    return draft.inherit.includes(field) && !!inheritedPreview.sources[field];
+  }
+  function previewValue(field: SshInheritField): string {
+    if (inheritedPreview.profile.kind !== 'ssh') return '';
+    const ssh = inheritedPreview.profile.ssh;
+    if (field === 'user') return ssh.user || '—';
+    if (field === 'port') return String(ssh.port);
+    if (field === 'auth') return typeof ssh.auth === 'string' ? i18n.t('ssh.agent') : 'VaultRef' in ssh.auth ? i18n.t('profileModal.vault') : 'PublicKey' in ssh.auth ? i18n.t('profileModal.publicKey') : i18n.t('profileModal.password');
+    if (field === 'proxy_id') return proxies.find(proxy => proxy.id === ssh.proxy_id)?.name ?? ssh.proxy_id ?? i18n.t('groupDefaults.direct');
+    return ssh.jump_profile_ids?.map(id => profiles.find(profile => profile.id === id)?.name ?? id).join(' → ') || (ssh.jump_via.length ? ssh.jump_via.map(hop => hop.host).join(' → ') : i18n.t('groupDefaults.direct'));
+  }
 
   export function load(existing?: StoredProfile, options?: ProfileModalOpenOptions) {
     const current = ++revision;
     const source = options?.duplicateFrom ?? existing;
+    groupDefaults = {};
+    inheritanceLoaded = false;
+    void rpc.call<{ value: ProfileGroupDefaults | null }>('settings.get', { key: 'profile.groupDefaults' }).then(result => {
+      if (current !== revision) return;
+      groupDefaults = result.value ?? {};
+      inheritanceLoaded = true;
+    }).catch(error => { if (current === revision) onError((error as Error).message); });
     draft = profileToEditorDraft(source, options?.group?.trim());
     draft.tags = normalizeTags(draft.tags);
     editingId = options?.duplicateFrom ? undefined : existing?.id;
@@ -90,11 +117,11 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (saving) return;
-    if (draft.kind === 'ssh' && draft.auth.kind === 'vault' && !draft.auth.vaultEntryId.trim()) { onError(i18n.t('profileModal.vaultEntry')); return; }
+    if (draft.kind === 'ssh' && !inherited('auth') && draft.auth.kind === 'vault' && !draft.auth.vaultEntryId.trim()) { onError(i18n.t('profileModal.vaultEntry')); return; }
     saving = true;
     try {
       if (draft.kind === 'ssh') {
-        if (joinJumpLines(jumps) !== originalLines) {
+        if (!inherited('jump') && joinJumpLines(jumps) !== originalLines) {
           const list = await loadProfilesForJumps(rpc);
           // Only explicit @ references become IDs. Legacy literals remain snapshots.
           const references = jumps.map(line => line.trim()).filter(Boolean);
@@ -142,19 +169,31 @@
       </div>{/if}
     </div>
   </details>
+  {#if draft.kind === 'ssh'}
+    <details class="section" open>
+      <summary>{i18n.t('groupDefaults.title')}</summary>
+      <div class="fields">
+        <p>{i18n.t('groupDefaults.hostHint')}</p>
+        {#each inheritanceFields as field (field)}
+          <label class="inherit-row"><input type="checkbox" checked={draft.inherit.includes(field)} onchange={event => toggleInheritance(field, event.currentTarget.checked)} />{i18n.t('groupDefaults.inheritField', { field: i18n.t(inheritanceLabels[field]) })}</label>
+          {#if draft.inherit.includes(field)}<p>{i18n.t('groupDefaults.effectiveValue')}: {inheritanceLoaded ? previewValue(field) : '…'} · {i18n.t('groupDefaults.source')}: {inheritanceLoaded ? inheritedPreview.sources[field] ?? i18n.t('groupDefaults.fallback') : '…'}</p>{/if}
+        {/each}
+      </div>
+    </details>
+  {/if}
   <details class="section" open>
     <summary>{i18n.t('profileModal.sectionConnection')}</summary>
     <div class="fields">
       <label for="pm-kind">{i18n.t('profileModal.kind')}</label>
       <select id="pm-kind" class="input" bind:value={draft.kind} onchange={kindChanged}><option value="ssh">{i18n.t('profileModal.kindSsh')}</option><option value="rdp">{i18n.t('profileModal.kindRdp')}</option><option value="vnc">{i18n.t('profileModal.kindVnc')}</option></select>
-      <div class="endpoint"><div><label for="pm-host">{i18n.t('profileModal.host')}</label><input id="pm-host" class="input" bind:value={draft.host} required placeholder="example.com" /></div><div><label for="pm-port">{i18n.t('profileModal.port')}</label><input id="pm-port" class="input" bind:value={draft.port} type="number" min="1" max="65535" /></div></div>
-      {#if draft.kind === 'ssh'}<label for="pm-user">{i18n.t('profileModal.user')}</label><input id="pm-user" class="input" bind:value={draft.user} required placeholder="root" />{/if}
+      <div class="endpoint"><div><label for="pm-host">{i18n.t('profileModal.host')}</label><input id="pm-host" class="input" bind:value={draft.host} required placeholder="example.com" /></div><div><label for="pm-port">{i18n.t('profileModal.port')}</label><input id="pm-port" class="input" bind:value={draft.port} disabled={draft.kind === 'ssh' && inherited('port')} type="number" min="1" max="65535" /></div></div>
+      {#if draft.kind === 'ssh'}<label for="pm-user">{i18n.t('profileModal.user')}</label><input id="pm-user" class="input" bind:value={draft.user} disabled={inherited('user')} required={!inheritedPreview.sources.user} placeholder="root" />{/if}
     </div>
   </details>
   {#if draft.kind === 'ssh'}
     <details class="section" open>
       <summary>{i18n.t('profileModal.authMethod')}</summary>
-      <div class="fields">
+      <fieldset class="fields" disabled={inherited('auth')}>
         <label for="pm-auth">{i18n.t('profileModal.authMethod')}</label>
         <select id="pm-auth" class="input" bind:value={draft.auth.kind}><option value="password">{i18n.t('profileModal.password')}</option><option value="key">{i18n.t('profileModal.publicKey')}</option><option value="vault">{i18n.t('profileModal.vault')}</option><option value="agent">{i18n.t('ssh.agent')}</option></select>
         {#if draft.auth.kind === 'password'}<label for="pm-pw">{i18n.t('profileModal.passwordStoredLocally')}</label><input id="pm-pw" class="input" type="password" bind:value={draft.auth.password} />
@@ -168,10 +207,10 @@
             <label for="pm-vault-pass">{i18n.t('profileModal.vaultPassphraseEntry')}</label><select id="pm-vault-pass" class="input" bind:value={draft.auth.vaultPassphraseEntryId}><option value="">—</option>{#if draft.auth.vaultPassphraseEntryId && !vaultEntries.some(entry => entry.id === draft.auth.vaultPassphraseEntryId)}<option value={draft.auth.vaultPassphraseEntryId}>{draft.auth.vaultPassphraseEntryId}</option>{/if}{#each vaultEntries.filter(entry => entry.kind === 'password') as entry (entry.id)}<option value={entry.id}>{entry.label}</option>{/each}</select>
           {/if}
         {/if}
-      </div>
+      </fieldset>
     </details>
-    <label for="pm-proxy">{i18n.t('shell.proxies')}</label><select id="pm-proxy" class="input" bind:value={draft.proxyId}><option value="">—</option>{#if draft.proxyId && !proxies.some(proxy => proxy.id === draft.proxyId)}<option value={draft.proxyId}>{draft.proxyId}</option>{/if}{#each proxies as proxy (proxy.id)}<option value={proxy.id}>{proxy.name}</option>{/each}</select>
-    <details class="section"><summary>{i18n.t('profileModal.proxyJump')}</summary><div class="fields"><JumpChainEditor profiles={tunnels} excludeProfileId={editingId} bind:jumpChainLines={jumps} {onError} /></div></details>
+    <label for="pm-proxy">{i18n.t('shell.proxies')}</label><select id="pm-proxy" class="input" disabled={inherited('proxy_id')} bind:value={draft.proxyId}><option value="">—</option>{#if draft.proxyId && !proxies.some(proxy => proxy.id === draft.proxyId)}<option value={draft.proxyId}>{draft.proxyId}</option>{/if}{#each proxies as proxy (proxy.id)}<option value={proxy.id}>{proxy.name}</option>{/each}</select>
+    <details class="section"><summary>{i18n.t('profileModal.proxyJump')}</summary><div class="fields">{#if inherited('jump')}<p>{previewValue('jump')}</p>{:else}<JumpChainEditor profiles={tunnels} excludeProfileId={editingId} bind:jumpChainLines={jumps} {onError} />{/if}</div></details>
   {:else}
     <details class="section"><summary>{i18n.t('profileModal.sshTunnel')}</summary><div class="fields">
       <label for="pm-tunnel">{i18n.t('profileModal.sshTunnel')}</label><select id="pm-tunnel" class="input" bind:value={draft.remoteSshProfileId}><option value="">(direct)</option>{#if draft.remoteSshProfileId && !tunnels.some(profile => profile.id === draft.remoteSshProfileId)}<option value={draft.remoteSshProfileId}>{draft.remoteSshProfileId}</option>{/if}{#each tunnels as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}</select>
@@ -211,6 +250,9 @@
   summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
   .fields { padding: 0 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   label { color: var(--color-fg); }
+  fieldset { border: 0; margin: 0; }
+  fieldset:disabled { opacity: 0.55; }
+  .inherit-row { display: flex; align-items: center; gap: 8px; }
   .input { min-width: 0; font-size: 16px; min-height: 40px; }
   button { min-height: 40px; font-size: 16px; }
   p { font-size: 14px; }

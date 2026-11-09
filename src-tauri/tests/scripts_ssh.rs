@@ -101,6 +101,7 @@ async fn real_exec_completion_limit_timeout_cancel_and_disconnect() {
                     jump_profile_ids: vec![],
                     proxy_id: None,
                     resolved_proxy: None,
+                    inherit: vec![],
                 },
                 known_hosts: kh,
                 transport: ssh::SshTransportSettings::default(),

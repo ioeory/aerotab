@@ -37,6 +37,7 @@
   import { resolveDropFilePaths } from '../lib/terminalFileDrag';
 
   interface SftpSource {
+    profileId?: string;
     name: string;
     ssh: SshProfileSpec;
     sudo?: boolean;
@@ -374,7 +375,7 @@
   async function enqueueUploadFromLocal(payload: LocalDragPayload) {
     if (!sessionId) return;
     if (payload.kind === 'dir') {
-      fileService.queue.enqueue({ name: payload.name, source: { kind: 'local', path: payload.path }, destination: { kind: 'remote', sessionId, path: joinPath(cwd, payload.name), profileId: profile?.id }, entryKind: 'Dir', size: 0 });
+      fileService.queue.enqueue({ name: payload.name, source: { kind: 'local', path: payload.path }, destination: { kind: 'remote', sessionId, path: joinPath(cwd, payload.name), profileId: profile?.id ?? source?.profileId }, entryKind: 'Dir', size: 0 });
       return;
     }
     const id = nextTransferId();
@@ -503,14 +504,14 @@
   function sftpConnectKey(): string {
     if (!target) return '';
     const h = target.ssh;
-    return `${h.host}|${h.port}|${h.user}|${sudoMode ? 1 : 0}`;
+    return `${profile?.id ?? source?.profileId ?? ''}|${h.host}|${h.port}|${h.user}|${sudoMode ? 1 : 0}`;
   }
 
   async function openSftpBackend(): Promise<string> {
     if (!target) throw new Error('SFTP target is not set');
     // Always use a dedicated SFTP SSH connection. Reusing the interactive shell
     // session (openForSession) can reset the link on some servers (Windows 10054).
-    const lease = fileService.connections.acquire(`${registryId}:${connectSeq}`, { ...(profile?.id ? { profile_id: profile.id } : { profile: target.ssh }), sudo: sudoMode });
+    const lease = fileService.connections.acquire(`${registryId}:${connectSeq}`, { ...((profile?.id ?? source?.profileId) ? { profile_id: profile?.id ?? source?.profileId } : { profile: target.ssh }), sudo: sudoMode });
     browserLease = lease;
     return lease.ready;
   }
@@ -844,7 +845,7 @@
 
   function enqueueTransfer(task: TransferTask) {
     if (!sessionId) return;
-    const remote = { kind: 'remote' as const, sessionId, profileId: profile?.id, path: task.path, label: target?.name };
+    const remote = { kind: 'remote' as const, sessionId, profileId: profile?.id ?? source?.profileId, path: task.path, label: target?.name };
     if (task.kind === 'upload') {
       const file = uploadFiles.get(task.id);
       const sourcePath = task.localFilePath ?? file?.name;
@@ -1245,7 +1246,7 @@
       return;
     }
     try {
-      fileService.queue.enqueue({ name: payload.name, source: { kind: 'remote', sessionId: payload.sourceSessionId, path: payload.path, label: payload.sourceLabel }, destination: { kind: 'remote', sessionId, path: destPath, profileId: profile?.id }, entryKind: payload.kind, size: payload.size });
+      fileService.queue.enqueue({ name: payload.name, source: { kind: 'remote', sessionId: payload.sourceSessionId, path: payload.path, label: payload.sourceLabel }, destination: { kind: 'remote', sessionId, path: destPath, profileId: profile?.id ?? source?.profileId }, entryKind: payload.kind, size: payload.size });
     } catch (e) { onError(String(e)); }
   }
 
@@ -1272,7 +1273,7 @@
       return;
     }
     if (entry.kind !== 'File' && entry.kind !== 'Dir') return;
-    try { fileService.queue.enqueue({ name: entry.name, source: { kind: 'remote', sessionId, path: srcPath, profileId: profile?.id }, destination: { kind: 'remote', sessionId: dest.sessionId, path: destPath }, entryKind: entry.kind, size: entry.size }); }
+    try { fileService.queue.enqueue({ name: entry.name, source: { kind: 'remote', sessionId, path: srcPath, profileId: profile?.id ?? source?.profileId }, destination: { kind: 'remote', sessionId: dest.sessionId, path: destPath }, entryKind: entry.kind, size: entry.size }); }
     catch (e) { onError(String(e)); }
   }
 
@@ -1530,7 +1531,7 @@
     lastDownloadPath = baseDir;
     preparingTransfers = true;
     try {
-      if (sessionId) fileService.queue.enqueue({ name: e.name, source: { kind: 'remote', sessionId, profileId: profile?.id, path: joinPath(cwd, e.name) }, destination: { kind: 'local', path: joinLocalPath(baseDir, e.name) }, entryKind: 'Dir', size: 0 });
+      if (sessionId) fileService.queue.enqueue({ name: e.name, source: { kind: 'remote', sessionId, profileId: profile?.id ?? source?.profileId, path: joinPath(cwd, e.name) }, destination: { kind: 'local', path: joinLocalPath(baseDir, e.name) }, entryKind: 'Dir', size: 0 });
     } catch (err) {
       onError(`download folder ${e.name}: ${(err as Error).message}`);
     } finally {

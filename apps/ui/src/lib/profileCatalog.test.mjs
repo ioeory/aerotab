@@ -26,6 +26,35 @@ test('saving an unchanged profile preserves stable jump IDs without snapshot mig
   assert.deepEqual(saved.ssh.jump_profile_ids, ['jump-id']);
   assert.deepEqual(saved.ssh.jump_via, []);
 });
+test('inheritance choices round trip without opting legacy hosts into group settings', () => {
+  const original = { id: 'target', name: 'target', kind: 'ssh', group: 'prod/web', ssh: { host: 'h', port: 22, user: 'local', auth: 'Agent', jump_via: [], inherit: ['auth', 'proxy_id'] } };
+  const draft = api.profileToEditorDraft(original);
+  assert.deepEqual(draft.inherit, ['auth', 'proxy_id']);
+  assert.deepEqual(api.profileFromEditorDraft(draft, original.id).ssh.inherit, ['auth', 'proxy_id']);
+  const legacy = { ...original, ssh: { ...original.ssh, inherit: undefined } };
+  assert.deepEqual(api.profileToEditorDraft(legacy).inherit, []);
+  assert.deepEqual(api.profileToEditorDraft(undefined, 'prod').inherit, ['user', 'port', 'auth', 'proxy_id', 'jump']);
+});
+test('effective group preview applies ancestors by field and keeps explicit direct settings', () => {
+  const profile = { id: 'target', name: 'target', kind: 'ssh', group: 'prod/web', ssh: { host: 'h', port: 22, user: 'local', auth: 'Agent', proxy_id: 'local-proxy', jump_via: [], inherit: ['user', 'proxy_id', 'jump'] } };
+  const groups = { prod: { user: 'parent', port: 2222, proxy_id: 'proxy', jump_profile_ids: ['bastion'] }, 'prod/web': { user: 'child', proxy_id: null, jump_profile_ids: [] }, production: { user: 'wrong' } };
+  const result = api.previewProfileInheritance(profile, groups);
+  assert.equal(result.profile.ssh.user, 'child');
+  assert.equal(result.profile.ssh.port, 22);
+  assert.equal(result.profile.ssh.proxy_id, null);
+  assert.deepEqual(result.profile.ssh.jump_profile_ids, []);
+  assert.deepEqual(result.sources, { user: 'prod/web', proxy_id: 'prod/web', jump: 'prod/web' });
+  assert.equal(profile.ssh.user, 'local');
+});
+test('preview leaves legacy host values independent and falls back when groups have no value', () => {
+  const profile = { id: 'target', name: 'target', kind: 'ssh', group: 'prod', ssh: { host: 'h', port: 22, user: 'local', auth: 'Agent', jump_via: [] } };
+  assert.equal(api.previewProfileInheritance(profile, { prod: { user: 'group' } }).profile.ssh.user, 'local');
+  profile.ssh.inherit = ['user'];
+  const fallback = api.previewProfileInheritance(profile, {});
+  assert.equal(fallback.profile.ssh.user, 'local');
+  assert.deepEqual(fallback.sources, {});
+  assert.deepEqual(api.profileToEditorDraft().inherit, []);
+});
 test('group breadcrumbs retain each ancestor path', () => {
   assert.deepEqual(api.profileGroupBreadcrumbs(' prod / web / eu '), [
     { name: 'prod', path: 'prod' }, { name: 'web', path: 'prod/web' }, { name: 'eu', path: 'prod/web/eu' },

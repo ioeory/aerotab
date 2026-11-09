@@ -77,6 +77,8 @@ pub struct SshProfile {
     pub port: u16,
     pub user: String,
     pub auth: AuthMethod,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit: Vec<String>,
     /// Multi-hop proxy chain. Each entry is a fully-formed SSH profile
     /// describing one bastion. The chain is dialed left-to-right and the
     /// final hop reaches the target described by the outer profile.
@@ -1065,6 +1067,7 @@ mod tests {
             jump_profile_ids: vec![],
             proxy_id: None,
             resolved_proxy: None,
+            inherit: vec![],
         };
         let err = match connect_shell(&p, 80, 24).await {
             Ok(_) => panic!("unexpected ok"),

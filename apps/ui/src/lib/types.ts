@@ -53,7 +53,19 @@ export interface ProfileIcon {
   value: string;
 }
 
+export type SshInheritField = 'user' | 'port' | 'auth' | 'proxy_id' | 'jump';
+export interface GroupSshDefaults {
+  user?: string;
+  port?: number;
+  auth?: SshAuth;
+  proxy_id?: string | null;
+  jump_profile_ids?: string[];
+}
+export type ProfileGroupDefaults = Record<string, GroupSshDefaults>;
+
 export interface SshProfileSpec {
+  /** Explicit opt-in; absent means legacy, independently configured fields. */
+  inherit?: SshInheritField[];
   host: string;
   port: number;
   user: string;

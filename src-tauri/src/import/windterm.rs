@@ -199,6 +199,7 @@ fn map_windterm_object(obj: &Value) -> Option<ImportCandidate> {
                     jump_profile_ids: vec![],
                     proxy_id: None,
                     resolved_proxy: None,
+                    inherit: vec![],
                 };
                 (
                     "ssh".into(),

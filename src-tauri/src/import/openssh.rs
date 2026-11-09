@@ -70,6 +70,7 @@ fn map_entry(entry: &SshConfigEntry, idx: usize, catalog: &[SshConfigEntry]) -> 
         jump_profile_ids: vec![],
         proxy_id: None,
         resolved_proxy: None,
+        inherit: vec![],
     };
     let profile = build_profile(
         name.clone(),
@@ -125,6 +126,7 @@ fn jump_via_from_config(
             jump_profile_ids: vec![],
             proxy_id: None,
             resolved_proxy: None,
+            inherit: vec![],
         });
     }
     hops

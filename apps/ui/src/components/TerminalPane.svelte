@@ -394,7 +394,7 @@
     try {
       let meta: { id: string; kind: string; title: string };
       let next: SessionMeta;
-      if (session.sshProfile) {
+      if (session.sshProfile && !session.profileId) {
         meta = await rpc.call('session.openSsh', {
           title: session.title,
           profile: session.sshProfile,

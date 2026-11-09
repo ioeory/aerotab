@@ -54,6 +54,7 @@ async fn confirmation_expiry_changes_and_cancellation_are_enforced() {
                 jump_profile_ids: vec![],
                 proxy_id: None,
                 resolved_proxy: None,
+                inherit: vec![],
             },
             known_hosts: ssh::known_hosts::KnownHosts::open(
                 std::env::temp_dir().join(format!("scripts-kh-{}", uuid::Uuid::new_v4())),

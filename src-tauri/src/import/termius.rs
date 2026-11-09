@@ -238,6 +238,7 @@ fn map_host(
                 jump_profile_ids: vec![],
                 proxy_id: None,
                 resolved_proxy: None,
+                inherit: vec![],
             };
             let profile = build_profile(
                 name.clone(),

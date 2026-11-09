@@ -17,6 +17,8 @@ pub enum SettingsError {
     Sled(#[from] sled::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid settings: {0}")]
+    Invalid(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,11 +132,21 @@ impl SettingsStore {
     pub fn get(&self, key: &str) -> Result<Option<Value>, SettingsError> {
         match self.inner.tree.get(key)? {
             None => Ok(None),
-            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Some(bytes) => {
+                let value = serde_json::from_slice(&bytes)?;
+                if key == crate::profile_inheritance::SETTINGS_KEY {
+                    crate::profile_inheritance::parse_defaults(&value)
+                        .map_err(SettingsError::Invalid)?;
+                }
+                Ok(Some(value))
+            }
         }
     }
 
     pub fn set(&self, key: &str, value: &Value) -> Result<(), SettingsError> {
+        if key == crate::profile_inheritance::SETTINGS_KEY {
+            crate::profile_inheritance::parse_defaults(value).map_err(SettingsError::Invalid)?;
+        }
         if self.inner.read_only {
             return Err(SettingsError::Sled(sled::Error::Unsupported(
                 "settings store is read-only (another AeroTab instance holds the database lock)"
@@ -170,6 +182,10 @@ impl SettingsStore {
             let key = String::from_utf8(k.to_vec())
                 .map_err(|e| sled::Error::Unsupported(e.to_string()))?;
             let value: Value = serde_json::from_slice(&v)?;
+            if key == crate::profile_inheritance::SETTINGS_KEY {
+                crate::profile_inheritance::parse_defaults(&value)
+                    .map_err(SettingsError::Invalid)?;
+            }
             out.push(SettingEntry { key, value });
         }
         Ok(out)
@@ -194,6 +210,48 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("tabby-settings-test-{}", Uuid::new_v4()));
         p
+    }
+
+    #[test]
+    fn group_defaults_reject_plaintext_and_invalid_values() {
+        let dir = tmpdir();
+        let store = SettingsStore::open(&dir).unwrap();
+        for value in [
+            json!({"team":{"auth":{"Password":{"secret":"secret"}}}}),
+            json!({"team":{"auth":{"PublicKey":{"key_path":"key","passphrase":"secret"}}}}),
+            json!({"team":{"port":0}}),
+            json!({"team/":{"user":"u"}}),
+            json!({"team":{"password":"secret"}}),
+            json!({"team":{"auth":null}}),
+            json!([]),
+        ] {
+            assert!(
+                store.set("profile.groupDefaults", &value).is_err(),
+                "accepted {value}"
+            );
+        }
+        assert!(store
+            .set(
+                "profile.groupDefaults",
+                &json!({"team":{"auth":"Agent","proxy_id":null,"jump_profile_ids":[]}})
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn unsafe_legacy_group_defaults_fail_closed_on_read_and_export() {
+        let store = SettingsStore::open(tmpdir()).unwrap();
+        let unsafe_value = json!({"team":{"auth":{"Password":{"secret":"secret"}}}});
+        store
+            .inner
+            .tree
+            .insert(
+                crate::profile_inheritance::SETTINGS_KEY,
+                serde_json::to_vec(&unsafe_value).unwrap(),
+            )
+            .unwrap();
+        assert!(store.get(crate::profile_inheritance::SETTINGS_KEY).is_err());
+        assert!(store.all().is_err());
     }
 
     #[test]

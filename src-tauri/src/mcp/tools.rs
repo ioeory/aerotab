@@ -304,27 +304,6 @@ pub(super) async fn dispatch(
     }
     Ok(response.result.unwrap_or(Value::Null))
 }
-async fn saved_ssh(state: &AppState, id: &str) -> Result<Value, String> {
-    let id = uuid::Uuid::parse_str(id).map_err(|_| "invalid profile_id")?;
-    let store = state
-        .profiles
-        .lock()
-        .await
-        .clone()
-        .ok_or("profiles not configured")?;
-    let profile = store
-        .get(id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("profile not found")?;
-    match profile.spec {
-        crate::profile::ProfileKind::Ssh { ssh } => {
-            serde_json::to_value(ssh).map_err(|e| e.to_string())
-        }
-        _ => Err("profile is not SSH".into()),
-    }
-}
-
 pub async fn call(
     name: &str,
     args: Value,
@@ -381,10 +360,7 @@ async fn call_inner(
             }
             dispatch(dispatcher, "terminal.search", args).await
         }
-        "host_stats" => {
-            let profile = saved_ssh(state, text(&args, "profile_id")?).await?;
-            dispatch(dispatcher, "ssh.hostStats", json!({"profile":profile})).await
-        }
+        "host_stats" => dispatch(dispatcher, "ssh.hostStats", args).await,
         "run_command" => {
             let id = uuid::Uuid::parse_str(text(&args, "profile_id")?)
                 .map_err(|_| "invalid profile_id")?;
@@ -398,8 +374,7 @@ async fn call_inner(
             .await
         }
         "open_sftp" => {
-            let profile = saved_ssh(state, text(&args, "profile_id")?).await?;
-            let opened = dispatch(dispatcher, "sftp.open", json!({"profile":profile})).await?;
+            let opened = dispatch(dispatcher, "sftp.open", args).await?;
             Ok(json!({"sftp_id":opened["id"]}))
         }
         "close_sftp" => dispatch(dispatcher, "sftp.close", args).await,
@@ -417,13 +392,7 @@ async fn call_inner(
         "delete_profile" => dispatch(dispatcher, "profile.delete", args).await,
         "tunnel_list" => dispatch(dispatcher, "tunnel.list", args).await,
         "tunnel_close" => dispatch(dispatcher, "tunnel.close", args).await,
-        "tunnel_open" => {
-            let profile = saved_ssh(state, text(&args, "profile_id")?).await?;
-            let mut params = args;
-            params.as_object_mut().expect("args").remove("profile_id");
-            params["profile"] = profile;
-            dispatch(dispatcher, "tunnel.open", params).await
-        }
+        "tunnel_open" => dispatch(dispatcher, "tunnel.open", args).await,
         "remote_open" => dispatch(dispatcher, "remote.openProfile", args).await,
         "call_rpc" => {
             let method = text(&args, "method")?;
@@ -916,6 +885,31 @@ mod tests {
         assert_eq!(rpc_permission("terminal.exportText"), Some("readTerminal"));
         assert_eq!(rpc_permission("tunnel.open"), Some("tunnels"));
         assert_eq!(permission("call_rpc"), Some("callRpc"));
+    }
+
+    #[tokio::test]
+    async fn saved_connection_tools_keep_profile_ids_for_backend_inheritance() {
+        let dispatcher = Arc::new(Dispatcher::new());
+        for method in ["ssh.hostStats", "sftp.open", "tunnel.open"] {
+            dispatcher.register(method, |params: Value| async move {
+                assert_eq!(params["profile_id"], "11111111-1111-1111-1111-111111111111");
+                assert!(params.get("profile").is_none());
+                Ok(json!({"id":"sftp"}))
+            });
+        }
+        for tool in ["host_stats", "open_sftp", "tunnel_open"] {
+            let mut args = json!({"profile_id":"11111111-1111-1111-1111-111111111111"});
+            if tool == "tunnel_open" {
+                args["kind"] = json!("local");
+                args["bind_host"] = json!("127.0.0.1");
+                args["bind_port"] = json!(0);
+                args["target_host"] = json!("localhost");
+                args["target_port"] = json!(22);
+            }
+            assert!(call(tool, args, dispatcher.clone(), AppState::new())
+                .await
+                .is_ok());
+        }
     }
 
     #[test]

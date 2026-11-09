@@ -453,11 +453,10 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: OpenSshProfileParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let store = require_profiles(&st).await?;
-                let profile = store
-                    .get(p.profile_id)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?
+                let profile = load_effective_catalog(&st)
+                    .await?
+                    .into_iter()
+                    .find(|profile| profile.id == p.profile_id)
                     .ok_or_else(|| {
                         invalid_params(format!("profile not found: {}", p.profile_id))
                     })?;
@@ -1095,14 +1094,26 @@ fn register_resources(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     "forwarding.list" => serde_json::to_value(store.list_rules().map_err(|e| internal(e.to_string()))?).map_err(|e| internal(e.to_string())),
                     "proxy.save" => {
                         let resource: crate::network_resources::ProxyResource = serde_json::from_value(params.get("resource").cloned().unwrap_or(Value::Null)).map_err(|e| invalid_params(e.to_string()))?;
-                        if let crate::network_resources::ProxyConfig::SshJump { profile_id } = resource.config { resolve_ssh_profile(&st, profile_id).await?; }
+                        let profiles = require_profiles(&st).await?.list().await.map_err(|e| internal(e.to_string()))?;
+                        let mut proxies = store.list_proxies().map_err(|e| internal(e.to_string()))?;
+                        proxies.retain(|p| p.id != resource.id);
+                        proxies.push(resource.clone());
+                        let catalog = crate::profile_inheritance::merge_catalog(&profiles, &load_group_defaults(&st).await?).map_err(invalid_params)?;
+                        let mut affected = crate::profile_inheritance::proxy_dependents_ids(&catalog, resource.id);
+                        if let crate::network_resources::ProxyConfig::SshJump { profile_id } = resource.config {
+                            if !catalog.iter().any(|p| p.id == profile_id && matches!(p.spec, ProfileKind::Ssh { .. })) { return Err(invalid_params("proxy target is not a saved SSH profile")); }
+                            affected.insert(profile_id);
+                        }
+                        crate::profile_inheritance::validate_affected(&catalog, &proxies, affected).map_err(invalid_params)?;
                         store.save_proxy(resource).map_err(|e| invalid_params(e.to_string()))?;
                         Ok(Value::Null)
                     }
                     "proxy.delete" => {
                         let id = id()?;
-                        let profiles = require_profiles(&st).await?.list().await.map_err(|e| internal(e.to_string()))?;
-                        let deps = profiles.iter().filter(|p| matches!(&p.spec, ProfileKind::Ssh { ssh } if ssh.proxy_id == Some(id))).map(|p| p.name.clone()).collect::<Vec<_>>();
+                        let mut profiles = require_profiles(&st).await?.list().await.map_err(|e| internal(e.to_string()))?;
+                        profiles.extend(load_effective_catalog(&st).await?);
+                        let mut deps = crate::profile_inheritance::proxy_dependents(&profiles, id);
+                        deps.extend(crate::profile_inheritance::group_dependents(&load_group_defaults(&st).await?, "proxy_id", &id.to_string()));
                         Ok(json!({"removed": store.delete_proxy(id, &deps).map_err(|e| invalid_params(e.to_string()))?}))
                     }
                     "forwarding.save" => {
@@ -1204,14 +1215,53 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
     {
         let st = state.clone();
+        dispatcher.register("profile.effective", move |params| {
+            let st = st.clone();
+            async move {
+                let p: IdParams =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let store = require_profiles(&st).await?;
+                let raw = store
+                    .get(p.id)
+                    .await
+                    .map_err(|e| internal(e.to_string()))?
+                    .ok_or_else(|| invalid_params("profile not found"))?;
+                let defaults = load_group_defaults(&st).await?;
+                serde_json::to_value(
+                    crate::profile_inheritance::effective_profile(&raw, &defaults)
+                        .map_err(invalid_params)?,
+                )
+                .map_err(|e| internal(e.to_string()))
+            }
+        });
+    }
+    {
+        let st = state.clone();
         dispatcher.register("profile.upsert", move |params| {
             let st = st.clone();
             async move {
                 let profile: Profile =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_profiles(&st).await?;
+                let mut catalog = store.list().await.map_err(|e| internal(e.to_string()))?;
+                catalog.retain(|p| p.id != profile.id);
+                catalog.push(profile.clone());
+                let effective = crate::profile_inheritance::merge_catalog(
+                    &catalog,
+                    &load_group_defaults(&st).await?,
+                )
+                .map_err(invalid_params)?;
+                validate_affected_profiles(
+                    &st,
+                    &effective,
+                    std::collections::HashSet::from([profile.id]),
+                )
+                .await?;
                 if let ProfileKind::Ssh { ssh } = &profile.spec {
-                    if let Some(id) = ssh.proxy_id {
+                    if let Some(id) = ssh
+                        .proxy_id
+                        .filter(|_| !ssh.inherit.iter().any(|field| field == "proxy_id"))
+                    {
                         let network = st
                             .network_resources
                             .lock()
@@ -1228,7 +1278,7 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     }
                 }
                 store
-                    .upsert(profile)
+                    .upsert_synced(profile)
                     .await
                     .map_err(|e| internal(e.to_string()))?;
                 Ok(Value::Null)
@@ -1243,7 +1293,15 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: IdParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_profiles(&st).await?;
-                let mut dependencies = Vec::new();
+                let mut dependencies = crate::profile_inheritance::group_dependents(
+                    &load_group_defaults(&st).await?,
+                    "jump",
+                    &p.id.to_string(),
+                );
+                dependencies.extend(crate::profile::profile_dependents(
+                    &load_effective_catalog(&st).await?,
+                    p.id,
+                ));
                 if let Some(notes) = st.notes.lock().await.clone() {
                     dependencies.extend(
                         notes
@@ -1310,15 +1368,65 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: HealthCheckParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let store = require_profiles(&st).await?;
-                let mut profiles = store.list().await.map_err(|e| internal(e.to_string()))?;
+                let mut profiles = require_profiles(&st)
+                    .await?
+                    .list()
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
                 if !p.ids.is_empty() {
                     profiles.retain(|profile| p.ids.contains(&profile.id));
                 }
+                let defaults = load_group_defaults(&st).await?;
+                let catalog = crate::profile_inheritance::merge_catalog(&profiles, &defaults)
+                    .map_err(invalid_params)?;
+                let all_catalog = load_effective_catalog(&st).await?;
+                let proxies = load_proxies(&st).await?;
                 let kh = st.known_hosts.lock().await.clone();
                 let vault = st.vault.lock().await.clone();
-                let results =
-                    crate::profile_health::check_profiles(profiles, kh, p.connect, vault).await;
+                let mut results = Vec::new();
+                for mut profile in catalog {
+                    let preparation = async {
+                        if let ProfileKind::Ssh { ssh } = &mut profile.spec {
+                            crate::profile_inheritance::validate_ssh_graph(
+                                ssh,
+                                &all_catalog,
+                                &proxies,
+                                Some(profile.id),
+                            )
+                            .map_err(invalid_params)?;
+                            if p.connect {
+                                *ssh = materialize_ssh_profile(&st, ssh.clone()).await?;
+                            }
+                        }
+                        Ok::<_, RpcError>(())
+                    }
+                    .await;
+                    if preparation.is_err() {
+                        use crate::profile_health::{
+                            HealthStatus, ProfileHealthCheck, ProfileHealthResult,
+                        };
+                        results.push(ProfileHealthResult {
+                            id: profile.id,
+                            name: profile.name,
+                            status: HealthStatus::Error,
+                            checks: vec![ProfileHealthCheck {
+                                name: "Configuration".into(),
+                                status: HealthStatus::Error,
+                                message: "Invalid SSH inheritance or resource reference".into(),
+                            }],
+                        });
+                    } else {
+                        results.extend(
+                            crate::profile_health::check_profiles(
+                                vec![profile],
+                                kh.clone(),
+                                p.connect,
+                                vault.clone(),
+                            )
+                            .await,
+                        );
+                    }
+                }
                 serde_json::to_value(results).map_err(|e| internal(e.to_string()))
             }
         });
@@ -2672,14 +2780,55 @@ fn oauth_https_credentials(provider: OAuthProvider, token: String) -> (String, S
     }
 }
 
-async fn materialize_ssh_profile(
+async fn load_group_defaults(
     st: &AppState,
-    mut ssh: SshProfile,
-) -> Result<SshProfile, RpcError> {
+) -> Result<crate::profile_inheritance::GroupDefaults, RpcError> {
+    let Some(store) = st.settings.lock().await.clone() else {
+        return Ok(Default::default());
+    };
+    let Some(value) = store
+        .get(crate::profile_inheritance::SETTINGS_KEY)
+        .map_err(|e| internal(e.to_string()))?
+    else {
+        return Ok(Default::default());
+    };
+    crate::profile_inheritance::parse_defaults(&value).map_err(invalid_params)
+}
+
+async fn load_proxies(
+    st: &AppState,
+) -> Result<Vec<crate::network_resources::ProxyResource>, RpcError> {
+    match st.network_resources.lock().await.clone() {
+        Some(store) => store.list_proxies().map_err(|e| internal(e.to_string())),
+        None => Ok(vec![]),
+    }
+}
+
+async fn validate_affected_profiles(
+    st: &AppState,
+    catalog: &[Profile],
+    affected: std::collections::HashSet<Uuid>,
+) -> Result<(), RpcError> {
+    crate::profile_inheritance::validate_affected(catalog, &load_proxies(st).await?, affected)
+        .map_err(invalid_params)
+}
+
+async fn load_effective_catalog(st: &AppState) -> Result<Vec<Profile>, RpcError> {
     let profiles = match st.profiles.lock().await.clone() {
         Some(store) => store.list().await.map_err(|e| internal(e.to_string()))?,
         None => vec![],
     };
+    crate::profile_inheritance::merge_catalog(&profiles, &load_group_defaults(st).await?)
+        .map_err(invalid_params)
+}
+
+async fn materialize_ssh_profile(
+    st: &AppState,
+    mut ssh: SshProfile,
+) -> Result<SshProfile, RpcError> {
+    let profiles = load_effective_catalog(st).await?;
+    crate::profile_inheritance::validate_ssh_graph(&ssh, &profiles, &load_proxies(st).await?, None)
+        .map_err(invalid_params)?;
     let network = st.network_resources.lock().await.clone();
     let vault = st.vault.lock().await.clone();
     fn attach(
@@ -2711,10 +2860,8 @@ async fn materialize_ssh_profile(
                     let ProfileKind::Ssh { ssh: hop } = &p.spec else {
                         return Err(invalid_params("proxy target is not SSH"));
                     };
-                    let mut hop =
-                        crate::profile::resolve_jump_references(hop, profiles, &mut vec![])
-                            .map_err(|e| invalid_params(e.to_string()))?;
-                    attach(&mut hop, profiles, network, vault, path)?;
+                    let hop = crate::profile::resolve_jump_references(hop, profiles, &mut vec![])
+                        .map_err(|e| invalid_params(e.to_string()))?;
                     if !ssh.jump_profile_ids.is_empty() || !ssh.jump_via.is_empty() {
                         return Err(invalid_params(
                             "SSH proxy and jump chain cannot be combined",
@@ -2732,9 +2879,13 @@ async fn materialize_ssh_profile(
             path.pop();
             ssh.proxy_id = None;
         }
-        for hop in &mut ssh.jump_via {
-            attach(hop, profiles, network, vault, path)?;
+        let mut flat = Vec::new();
+        for mut hop in std::mem::take(&mut ssh.jump_via) {
+            attach(&mut hop, profiles, network, vault, path)?;
+            flat.append(&mut hop.jump_via);
+            flat.push(hop);
         }
+        ssh.jump_via = flat;
         Ok(())
     }
     ssh = crate::profile::resolve_jump_references(&ssh, &profiles, &mut vec![])
@@ -2747,11 +2898,10 @@ async fn materialize_ssh_profile(
 }
 
 async fn resolve_ssh_profile(st: &AppState, profile_id: Uuid) -> Result<SshProfile, RpcError> {
-    let store = require_profiles(st).await?;
-    let profile = store
-        .get(profile_id)
-        .await
-        .map_err(|e| internal(e.to_string()))?
+    let profile = load_effective_catalog(st)
+        .await?
+        .into_iter()
+        .find(|p| p.id == profile_id)
         .ok_or_else(|| invalid_params(format!("profile not found: {profile_id}")))?;
     match profile.spec {
         ProfileKind::Ssh { ssh } => materialize_ssh_profile(st, ssh).await,
@@ -2811,7 +2961,10 @@ async fn open_remote_desktop(
 
 #[derive(Debug, Deserialize)]
 struct TunnelOpenParams {
-    profile: SshProfile,
+    #[serde(default)]
+    profile_id: Option<Uuid>,
+    #[serde(default)]
+    profile: Option<SshProfile>,
     kind: TunnelKind,
     bind_host: String,
     bind_port: u16,
@@ -2833,7 +2986,11 @@ fn register_tunnel(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: TunnelOpenParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let kh = st.known_hosts.lock().await.clone();
-                let profile = materialize_ssh_profile(&st, p.profile).await?;
+                let profile = match (p.profile_id, p.profile) {
+                    (Some(id), _) => resolve_ssh_profile(&st, id).await?,
+                    (None, Some(profile)) => materialize_ssh_profile(&st, profile).await?,
+                    _ => return Err(invalid_params("profile_id or profile required")),
+                };
                 let req = TunnelOpenRequest {
                     profile,
                     kind: p.kind,
@@ -2996,11 +3153,10 @@ fn register_remote(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: RemoteOpenProfileParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
-                let store = require_profiles(&st).await?;
-                let profile = store
-                    .get(p.profile_id)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?
+                let profile = load_effective_catalog(&st)
+                    .await?
+                    .into_iter()
+                    .find(|profile| profile.id == p.profile_id)
                     .ok_or_else(|| {
                         invalid_params(format!("profile not found: {}", p.profile_id))
                     })?;
@@ -3084,6 +3240,48 @@ fn register_settings(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     ));
                 }
                 let store = require_settings(&st).await?;
+                if p.key == crate::profile_inheritance::SETTINGS_KEY {
+                    let defaults = crate::profile_inheritance::parse_defaults(&p.value)
+                        .map_err(invalid_params)?;
+                    let profiles = match st.profiles.lock().await.clone() {
+                        Some(store) => store.list().await.map_err(|e| internal(e.to_string()))?,
+                        None => vec![],
+                    };
+                    let previous = load_group_defaults(&st).await?;
+                    let changed = defaults
+                        .iter()
+                        .map(|(path, fields)| {
+                            let changed_fields = fields
+                                .iter()
+                                .filter(|(field, value)| {
+                                    previous.get(path).and_then(|old| old.get(*field))
+                                        != Some(*value)
+                                })
+                                .map(|(field, value)| (field.clone(), value.clone()))
+                                .collect();
+                            (path.clone(), changed_fields)
+                        })
+                        .collect();
+                    let effective = crate::profile_inheritance::merge_catalog(&profiles, &defaults)
+                        .map_err(invalid_params)?;
+                    crate::profile_inheritance::validate_default_references(
+                        &changed,
+                        &effective,
+                        &load_proxies(&st).await?,
+                    )
+                    .map_err(invalid_params)?;
+                    let old = crate::profile_inheritance::merge_catalog(&profiles, &previous)
+                        .map_err(invalid_params)?;
+                    let affected = effective
+                        .iter()
+                        .zip(&old)
+                        .filter(|(new, old)| {
+                            serde_json::to_value(new).ok() != serde_json::to_value(old).ok()
+                        })
+                        .map(|(p, _)| p.id)
+                        .collect();
+                    validate_affected_profiles(&st, &effective, affected).await?;
+                }
                 store
                     .set(&p.key, &p.value)
                     .map_err(|e| internal(e.to_string()))?;
@@ -4562,9 +4760,16 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: P =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_vault(&st).await?;
-                if let Some(profiles) = st.profiles.lock().await.clone() {
-                    let list = profiles.list().await.map_err(|e| internal(e.to_string()))?;
+                let profile_store = st.profiles.lock().await.clone();
+                if let Some(profiles) = profile_store {
+                    let mut list = profiles.list().await.map_err(|e| internal(e.to_string()))?;
+                    list.extend(load_effective_catalog(&st).await?);
                     let mut dependencies = crate::profile::vault_dependents(&list, &p.id);
+                    dependencies.extend(crate::profile_inheritance::group_dependents(
+                        &load_group_defaults(&st).await?,
+                        "auth",
+                        &p.id,
+                    ));
                     if let Some(network) = st.network_resources.lock().await.clone() {
                         dependencies.extend(
                             network
@@ -6958,6 +7163,410 @@ mod tests {
         // Second stop is a no-op.
         let r = d.dispatch(req("sync.stopAutoSync", json!(null))).await;
         assert_eq!(r.result.unwrap(), json!({"stopped": false}));
+    }
+
+    #[tokio::test]
+    async fn group_defaults_effective_rpc_and_secret_rejection() {
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        let dir = std::env::temp_dir().join(format!("group-defaults-{}", Uuid::new_v4()));
+        for (method, path) in [
+            ("profile.configure", dir.join("profiles.sled")),
+            ("settings.configure", dir.clone()),
+        ] {
+            assert!(d
+                .dispatch(req(method, json!({"path":path})))
+                .await
+                .error
+                .is_none());
+        }
+        let id = Uuid::new_v4();
+        let raw = json!({"id":id,"name":"host","group":"team/prod","kind":"ssh","ssh":{"host":"localhost","port":22,"user":"local","auth":"Agent","inherit":["user","port","proxy_id","jump"]}});
+        assert!(d.dispatch(req("profile.upsert", raw)).await.error.is_none());
+        let defaults = json!({"team":{"user":"parent","port":2222},"team/prod":{"user":"child","proxy_id":null,"jump_profile_ids":[]}});
+        assert!(d
+            .dispatch(req(
+                "settings.set",
+                json!({"key":"profile.groupDefaults","value":defaults})
+            ))
+            .await
+            .error
+            .is_none());
+        let result = d.dispatch(req("profile.effective", json!({"id":id}))).await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let value = result.result.unwrap();
+        assert_eq!(value["profile"]["ssh"]["user"], "child");
+        assert_eq!(value["profile"]["ssh"]["port"], 2222);
+        assert_eq!(value["sources"]["user"], "team/prod");
+        assert_eq!(value["sources"]["port"], "team");
+        assert_eq!(
+            d.dispatch(req("profile.get", json!({"id":id})))
+                .await
+                .result
+                .unwrap()["ssh"]["user"],
+            "local"
+        );
+        for auth in [
+            json!({"Password":{"secret":"do-not-store"}}),
+            json!({"PublicKey":{"key_path":"key","passphrase":"do-not-store"}}),
+        ] {
+            assert!(d
+                .dispatch(req(
+                    "settings.set",
+                    json!({"key":"profile.groupDefaults","value":{"team":{"auth":auth}}})
+                ))
+                .await
+                .error
+                .is_some());
+        }
+    }
+
+    async fn inheritance_review_state() -> (
+        Arc<AppState>,
+        Dispatcher,
+        ProfileStore,
+        SettingsStore,
+        crate::network_resources::NetworkResourceStore,
+    ) {
+        let state = AppState::new();
+        let dir = std::env::temp_dir().join(format!("inherit-review-{}", Uuid::new_v4()));
+        let profiles = ProfileStore::open(dir.join("profiles")).unwrap();
+        let settings = SettingsStore::open(&dir).unwrap();
+        let network = crate::network_resources::NetworkResourceStore::open(&dir).unwrap();
+        *state.profiles.lock().await = Some(profiles.clone());
+        *state.settings.lock().await = Some(settings.clone());
+        *state.network_resources.lock().await = Some(network.clone());
+        let dispatcher = Dispatcher::new();
+        register_all(&dispatcher, state.clone());
+        (state, dispatcher, profiles, settings, network)
+    }
+
+    fn review_profile(id: Uuid, ssh: Value) -> Profile {
+        serde_json::from_value(json!({"id":id,"name":"host","group":"team","kind":"ssh","ssh":ssh}))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn inheritance_review_unrelated_broken_nodes_do_not_block_connections_or_deletion() {
+        let (state, d, profiles, settings, _) = inheritance_review_state().await;
+        let good = Uuid::new_v4();
+        let broken = Uuid::new_v4();
+        let base = json!({"host":"host","port":22,"user":"local","auth":"Agent"});
+        profiles
+            .upsert(review_profile(good, base.clone()))
+            .await
+            .unwrap();
+        for extra in [
+            json!({"jump_profile_ids":[Uuid::new_v4()]}),
+            json!({"proxy_id":Uuid::new_v4()}),
+            json!({"inherit":["unknown"]}),
+        ] {
+            let mut raw = base.clone();
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            profiles
+                .upsert_synced(review_profile(broken, raw))
+                .await
+                .unwrap();
+            assert!(resolve_ssh_profile(&state, good).await.is_ok());
+            assert!(
+                materialize_ssh_profile(&state, serde_json::from_value(base.clone()).unwrap())
+                    .await
+                    .is_ok()
+            );
+            assert!(d
+                .dispatch(req(
+                    "profile.upsert",
+                    serde_json::to_value(review_profile(good, base.clone())).unwrap()
+                ))
+                .await
+                .error
+                .is_none());
+            assert!(d
+                .dispatch(req(
+                    "settings.set",
+                    json!({"key":"profile.groupDefaults","value":{"other":{"user":"new"}}})
+                ))
+                .await
+                .error
+                .is_none());
+            let health = d
+                .dispatch(req("profile.healthCheck", json!({"ids":[good, broken]})))
+                .await;
+            assert!(health.error.is_none(), "{:?}", health.error);
+            let health = health.result.unwrap();
+            assert_eq!(health.as_array().unwrap().len(), 2);
+            assert_eq!(
+                health
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["id"] == json!(broken))
+                    .unwrap()["status"],
+                "error"
+            );
+            assert!(d
+                .dispatch(req("profile.delete", json!({"id":broken})))
+                .await
+                .error
+                .is_none());
+        }
+        settings
+            .set(
+                "profile.groupDefaults",
+                &json!({"unused":{"jump_profile_ids":[Uuid::new_v4()]}}),
+            )
+            .unwrap();
+        assert!(resolve_ssh_profile(&state, good).await.is_ok());
+        assert!(d.dispatch(req("settings.set", json!({"key":"profile.groupDefaults","value":{"unused":settings.get("profile.groupDefaults").unwrap().unwrap()["unused"],"other":{"user":"changed"}}}))).await.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn inheritance_review_mutations_validate_reverse_dependencies_and_changed_defaults_only()
+    {
+        let (_, d, profiles, settings, _) = inheritance_review_state().await;
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let base = json!({"host":"host","port":22,"user":"u","auth":"Agent"});
+        profiles
+            .upsert(review_profile(a, base.clone()))
+            .await
+            .unwrap();
+        let mut dependent = base.clone();
+        dependent["jump_profile_ids"] = json!([a]);
+        profiles.upsert(review_profile(b, dependent)).await.unwrap();
+        let mut cyclic = base.clone();
+        cyclic["jump_profile_ids"] = json!([b]);
+        assert!(d
+            .dispatch(req(
+                "profile.upsert",
+                serde_json::to_value(review_profile(a, cyclic)).unwrap()
+            ))
+            .await
+            .error
+            .is_some());
+        settings
+            .set(
+                "profile.groupDefaults",
+                &json!({"unused":{"jump_profile_ids":[Uuid::new_v4()]}}),
+            )
+            .unwrap();
+        let mut defaults = settings.get("profile.groupDefaults").unwrap().unwrap();
+        defaults["unused"]["user"] = json!("updated");
+        assert!(d
+            .dispatch(req(
+                "settings.set",
+                json!({"key":"profile.groupDefaults","value":defaults})
+            ))
+            .await
+            .error
+            .is_none());
+        let mut inherited = base;
+        inherited["inherit"] = json!(["jump"]);
+        profiles.upsert(review_profile(a, inherited)).await.unwrap();
+        assert!(d
+            .dispatch(req(
+                "settings.set",
+                json!({"key":"profile.groupDefaults","value":{"team":{"jump_profile_ids":[b]}}})
+            ))
+            .await
+            .error
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn inheritance_review_proxy_delete_protects_hidden_raw_and_inline_fallbacks() {
+        let (_, d, profiles, settings, network) = inheritance_review_state().await;
+        let proxy_id = Uuid::new_v4();
+        network
+            .save_proxy(crate::network_resources::ProxyResource {
+                id: proxy_id,
+                name: "proxy".into(),
+                config: crate::network_resources::ProxyConfig::Socks5 {
+                    host: "localhost".into(),
+                    port: 1080,
+                    vault_entry_id: None,
+                },
+            })
+            .unwrap();
+        let mut ssh = json!({"host":"host","port":22,"user":"local","auth":"Agent","proxy_id":proxy_id,"inherit":["proxy_id"]});
+        let id = Uuid::new_v4();
+        settings
+            .set("profile.groupDefaults", &json!({"team":{"proxy_id":null}}))
+            .unwrap();
+        profiles
+            .upsert(review_profile(id, ssh.clone()))
+            .await
+            .unwrap();
+        assert!(d
+            .dispatch(req("proxy.delete", json!({"id":proxy_id})))
+            .await
+            .error
+            .is_some());
+        ssh.as_object_mut().unwrap().remove("proxy_id");
+        ssh["jump_via"] =
+            json!([{ "host":"inline","port":22,"user":"u","auth":"Agent","proxy_id":proxy_id }]);
+        profiles.upsert(review_profile(id, ssh)).await.unwrap();
+        assert!(d
+            .dispatch(req("proxy.delete", json!({"id":proxy_id})))
+            .await
+            .error
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn inheritance_review_proxy_ssh_hop_flattens_inherited_jump_chain() {
+        let (state, _, profiles, settings, network) = inheritance_review_state().await;
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let t = Uuid::new_v4();
+        let proxy = Uuid::new_v4();
+        for (id, host, inherit) in [(a, "a", vec![]), (b, "b", vec!["jump"])] {
+            profiles
+                .upsert(review_profile(
+                    id,
+                    json!({"host":host,"port":22,"user":"u","auth":"Agent","inherit":inherit}),
+                ))
+                .await
+                .unwrap();
+        }
+        settings
+            .set(
+                "profile.groupDefaults",
+                &json!({"team":{"jump_profile_ids":[a]}}),
+            )
+            .unwrap();
+        network
+            .save_proxy(crate::network_resources::ProxyResource {
+                id: proxy,
+                name: "hop".into(),
+                config: crate::network_resources::ProxyConfig::SshJump { profile_id: b },
+            })
+            .unwrap();
+        profiles
+            .upsert(review_profile(
+                t,
+                json!({"host":"t","port":22,"user":"u","auth":"Agent","proxy_id":proxy}),
+            ))
+            .await
+            .unwrap();
+        let resolved = resolve_ssh_profile(&state, t).await.unwrap();
+        assert_eq!(
+            resolved
+                .jump_via
+                .iter()
+                .map(|s| s.host.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(resolved
+            .jump_via
+            .iter()
+            .all(|s| s.jump_via.is_empty() && s.proxy_id.is_none()));
+    }
+
+    #[tokio::test]
+    async fn inherited_catalog_reaches_jumps_and_inline_profiles_remain_independent() {
+        let state = AppState::new();
+        let dir = std::env::temp_dir().join(format!("inherit-catalog-{}", Uuid::new_v4()));
+        let profiles = ProfileStore::open(dir.join("profiles")).unwrap();
+        let settings = SettingsStore::open(&dir).unwrap();
+        *state.profiles.lock().await = Some(profiles.clone());
+        *state.settings.lock().await = Some(settings.clone());
+        let jump_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        for (id, group, inherit, jumps) in [
+            (jump_id, "bastions", vec!["user", "port"], vec![]),
+            (target_id, "targets", vec!["auth"], vec![jump_id]),
+        ] {
+            profiles.upsert(serde_json::from_value(json!({"id":id,"name":"host","group":group,"kind":"ssh","ssh":{"host":"host","port":22,"user":"local","auth":"Agent","inherit":inherit,"jump_profile_ids":jumps}})).unwrap()).await.unwrap();
+        }
+        settings
+            .set(
+                "profile.groupDefaults",
+                &json!({"bastions":{"user":"effective-user","port":2200}}),
+            )
+            .unwrap();
+        let resolved = resolve_ssh_profile(&state, target_id).await.unwrap();
+        assert_eq!(resolved.jump_via[0].user, "effective-user");
+        assert_eq!(resolved.jump_via[0].port, 2200);
+        settings
+            .set(
+                "profile.groupDefaults",
+                &json!({"bastions":{"user":"latest","port":2300}}),
+            )
+            .unwrap();
+        assert_eq!(
+            resolve_ssh_profile(&state, target_id)
+                .await
+                .unwrap()
+                .jump_via[0]
+                .user,
+            "latest"
+        );
+        let inline: SshProfile = serde_json::from_value(json!({"host":"host","port":22,"user":"local","auth":"Agent","inherit":["user","port"]})).unwrap();
+        let inline = materialize_ssh_profile(&state, inline).await.unwrap();
+        assert_eq!(inline.user, "local");
+        assert_eq!(inline.port, 22);
+    }
+
+    #[tokio::test]
+    async fn group_reference_validation_and_deletion_protection() {
+        let d = Dispatcher::new();
+        let state = AppState::new();
+        register_all(&d, state.clone());
+        let dir = std::env::temp_dir().join(format!("inherit-refs-{}", Uuid::new_v4()));
+        let profiles = ProfileStore::open(dir.join("profiles")).unwrap();
+        let settings = SettingsStore::open(&dir).unwrap();
+        let network = crate::network_resources::NetworkResourceStore::open(&dir).unwrap();
+        *state.profiles.lock().await = Some(profiles);
+        *state.settings.lock().await = Some(settings);
+        *state.network_resources.lock().await = Some(network.clone());
+        let id = Uuid::new_v4();
+        let raw = json!({"id":id,"name":"host","group":"team","kind":"ssh","ssh":{"host":"host","port":22,"user":"local","auth":"Agent","inherit":["jump","proxy_id"]}});
+        assert!(d.dispatch(req("profile.upsert", raw)).await.error.is_none());
+        for value in [
+            json!({"team":{"jump_profile_ids":[id]}}),
+            json!({"unused":{"jump_profile_ids":[Uuid::new_v4()]}}),
+            json!({"unused":{"proxy_id":Uuid::new_v4()}}),
+        ] {
+            assert!(d
+                .dispatch(req(
+                    "settings.set",
+                    json!({"key":"profile.groupDefaults","value":value})
+                ))
+                .await
+                .error
+                .is_some());
+        }
+        let proxy_id = Uuid::new_v4();
+        network
+            .save_proxy(crate::network_resources::ProxyResource {
+                id: proxy_id,
+                name: "proxy".into(),
+                config: crate::network_resources::ProxyConfig::SshJump { profile_id: id },
+            })
+            .unwrap();
+        assert!(d
+            .dispatch(req(
+                "settings.set",
+                json!({"key":"profile.groupDefaults","value":{"team":{"proxy_id":proxy_id}}})
+            ))
+            .await
+            .error
+            .is_some());
+        assert!(d.dispatch(req("settings.set", json!({"key":"profile.groupDefaults","value":{"unused":{"jump_profile_ids":[id],"proxy_id":proxy_id}}}))).await.error.is_none());
+        assert!(d
+            .dispatch(req("profile.delete", json!({"id":id})))
+            .await
+            .error
+            .is_some());
+        assert!(d
+            .dispatch(req("proxy.delete", json!({"id":proxy_id})))
+            .await
+            .error
+            .is_some());
     }
 
     #[tokio::test]

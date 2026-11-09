@@ -44,7 +44,7 @@
   import { withRpcTimeout } from '../lib/rpcTimeout';
   import { portal } from '../lib/portal';
   import { appConfirm, appPrompt, dialogAnchorFromEvent } from '../lib/confirm.svelte';
-  import { jumpHostCandidates, profileSpecViaJump } from '../lib/jumpProfiles';
+  import { jumpHostCandidates } from '../lib/jumpProfiles';
   import {
     defaultGroupForMove,
     normalizeProfileGroupInput,
@@ -68,6 +68,66 @@
   import { getProfileCatalog, normalizeCatalogGroups } from '../lib/profileCatalog.svelte';
   import { profileInScope, reconcileCatalogSelection, catalogDirectory, catalogGroupPaths, buildCatalogTree } from '../lib/profileCatalogHelpers';
   import ResourceViews from './hosts/ResourceViews.svelte';
+  import GroupDefaultsModal from './hosts/GroupDefaultsModal.svelte';
+  let groupDefaultsModal: GroupDefaultsModal;
+
+  async function readGroupDefaults(): Promise<Record<string, unknown>> {
+    const { value } = await rpc.call<{ value: unknown }>('settings.get', { key: 'profile.groupDefaults' });
+    if (value == null) return {};
+    if (typeof value !== 'object' || Array.isArray(value)
+      || Object.entries(value).some(([key, entry]) => normalizeGroupPath(key) !== key || !entry || typeof entry !== 'object' || Array.isArray(entry))) {
+      throw Error(i18n.t('groupDefaults.invalidMap'));
+    }
+    return value as Record<string, unknown>;
+  }
+
+  function underGroup(path: string, group: string) { return path === group || path.startsWith(`${group}/`); }
+
+  async function stageGroupDefaultsMove(source: string, target: string) {
+    const latest = await readGroupDefaults();
+    // Never merge two configuration subtrees implicitly, including hidden/empty groups.
+    if (Object.keys(latest).some(key => underGroup(key, target) && !underGroup(key, source))
+      || allGroupPaths.some(key => underGroup(key, target) && !underGroup(key, source))) {
+      throw Error(i18n.t('groupDefaults.moveConflict'));
+    }
+    const sourceEntries = Object.entries(latest).filter(([key]) => underGroup(key, source));
+    const next = { ...latest };
+    for (const [key, value] of sourceEntries) Object.defineProperty(next, replaceGroupPathPrefix(key, source, target), { value, enumerable: true, configurable: true, writable: true });
+    // Keep originals until every host and folder has moved. Partial failures preserve both sides.
+    if (sourceEntries.length) await rpc.call('settings.set', { key: 'profile.groupDefaults', value: next });
+    return async () => {
+      if (!sourceEntries.length) return;
+      const current = await readGroupDefaults();
+      for (const [key, value] of sourceEntries) {
+        const destination = replaceGroupPathPrefix(key, source, target);
+        if (JSON.stringify(current[key]) !== JSON.stringify(value) || JSON.stringify(current[destination]) !== JSON.stringify(value)) {
+          throw Error(i18n.t('groupDefaults.concurrentChange'));
+        }
+      }
+      for (const [key] of sourceEntries) delete current[key];
+      await rpc.call('settings.set', { key: 'profile.groupDefaults', value: current });
+    };
+  }
+
+  async function removeGroupDefaults(group: string, expected?: Record<string, unknown>) {
+    const latest = await readGroupDefaults();
+    if (expected) {
+      // Compare the complete subtree, including newly added or removed descendants.
+      // Unrelated groups may change without blocking this deletion.
+      const subtree = (map: Record<string, unknown>) => Object.entries(map)
+        .filter(([key]) => underGroup(key, group)).sort(([a], [b]) => a.localeCompare(b));
+      if (JSON.stringify(subtree(latest)) !== JSON.stringify(subtree(expected))) {
+        throw Error(i18n.t('groupDefaults.concurrentChange'));
+      }
+    }
+    for (const key of Object.keys(latest)) if (underGroup(key, group)) delete latest[key];
+    await rpc.call('settings.set', { key: 'profile.groupDefaults', value: latest });
+  }
+
+  function menuGroupDefaults(path: string) {
+    closeMenu();
+    void groupDefaultsModal.open(path);
+  }
   import ResourceViewSwitcher from './hosts/ResourceViewSwitcher.svelte';
   import ResourceBreadcrumbs from './hosts/ResourceBreadcrumbs.svelte';
   import { sortProfiles } from '../lib/profileMeta';
@@ -216,8 +276,10 @@
   }
 
   async function applyGroupPathPrefixChange(source: string, target: string) {
+    if (bulkBusy) return;
     bulkBusy = true;
     try {
+      const finishDefaultsMove = await stageGroupDefaultsMove(source, target);
       for (const profile of profilesUnderGroupPath(profiles, source)) {
         const group = normalizeGroupPath(profile.group);
         if (!group) continue;
@@ -232,6 +294,7 @@
       if (!nextGroups.includes(target)) nextGroups.push(target);
       await saveExplicitGroups(nextGroups);
       await profileVisualsStore.renameGroupPaths(rpc, source, target);
+      await finishDefaultsMove();
       migrateCollapsedGroupPaths(source, target);
       if (catalog.group === source || catalog.group?.startsWith(`${source}/`)) catalog.group = replaceGroupPathPrefix(catalog.group, source, target);
       expandFoldersForGroup(target);
@@ -247,15 +310,19 @@
   }
 
   async function deleteGroup(groupPath: string) {
+    if (bulkBusy) return;
     closeMenu();
     if (!(await appConfirm(i18n.t('hosts.deleteGroupConfirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
     bulkBusy = true;
     try {
+      // Fail closed on unreadable defaults, but retain them until migration succeeds.
+      const defaultsSnapshot = await readGroupDefaults();
       const parent = groupPath.split('/').slice(0, -1).join('/');
       for (const profile of profilesUnderGroupPath(profiles, groupPath)) {
         await rpc.call('profile.upsert', { ...profile, group: parent || null });
       }
       await saveExplicitGroups(explicitGroupPaths.filter(path => path !== groupPath && !path.startsWith(`${groupPath}/`)));
+      await removeGroupDefaults(groupPath, defaultsSnapshot);
       if (catalog.group === groupPath || catalog.group?.startsWith(`${groupPath}/`)) enterDirectory(parent);
       notifyProfilesChanged();
       await refresh();
@@ -414,11 +481,12 @@
     jump: StoredProfile,
     mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab',
   ) {
-    const freshTarget = await latestProfile(target);
-    const freshJump = profiles.find((p) => p.id === jump.id) ?? jump;
-    if (freshTarget.kind !== 'ssh' || freshJump.kind !== 'ssh') return;
+    if (target.kind !== 'ssh' || jump.kind !== 'ssh') return;
     try {
-      const profile = profileSpecViaJump(freshTarget, freshJump, profiles);
+      const { profile: freshTarget } = await rpc.call<{ profile: StoredProfile }>('profile.effective', { id: target.id });
+      const { profile: freshJump } = await rpc.call<{ profile: StoredProfile }>('profile.effective', { id: jump.id });
+      if (freshTarget.kind !== 'ssh' || freshJump.kind !== 'ssh') return;
+      const profile = { ...freshTarget.ssh, proxy_id: null, jump_via: [], jump_profile_ids: [freshJump.id], inherit: [] };
       const meta = await rpc.call<SessionMeta>('session.openSsh', {
         title: freshTarget.name,
         rows: 24,
@@ -426,14 +494,15 @@
         profile,
       });
       const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
-      const paneMeta = { ...meta, profileId: freshTarget.id, sshProfile: profile };
+      // A one-time jump override is an intentional snapshot, not a saved-profile connection.
+      const paneMeta = { ...meta, sshProfile: profile };
       if (mode !== 'new-tab' && activeTab) {
         tabs.addPane(activeTab.id, paneMeta, mode === 'split-down' ? 'col' : 'row');
       } else {
         tabs.add(paneMeta);
       }
     } catch (e) {
-      onError(`ssh ${freshTarget.name} via ${freshJump.name}: ${(e as Error).message}`);
+      onError(`ssh ${target.name} via ${jump.name}: ${(e as Error).message}`);
     }
   }
 
@@ -510,11 +579,10 @@
       return;
     }
     try {
-      const meta = await rpc.call<SessionMeta>('session.openSsh', {
-        title: p.name,
+      const meta = await rpc.call<SessionMeta>('session.openSshProfile', {
+        profile_id: p.id,
         rows: 24,
         cols: 80,
-        profile: p.ssh,
       });
       const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
       if (mode !== 'new-tab' && activeTab) {
@@ -1561,6 +1629,8 @@
   </div>
 </aside>
 
+<GroupDefaultsModal {rpc} bind:this={groupDefaultsModal} onSaved={(group) => notifyProfilesChanged({ group })} />
+
 {#if tagEditSession}
   <ProfileTagPickerPopover
     x={tagEditSession.x}
@@ -1629,6 +1699,7 @@
           }}
         />
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
+        {#if groupPath}<button type="button" class="menu-item" disabled={bulkBusy} onclick={() => menuGroupDefaults(groupPath)}>{i18n.t('groupDefaults.title')}</button>{/if}
         <button type="button" class="menu-item" onclick={() => menuCreateGroup(groupPath)}>{i18n.t('sidebar.createSubgroup')}</button>
         <button type="button" class="menu-item" onclick={() => menuRenameGroup(groupPath)}>{i18n.t('sidebar.renameGroup')}</button>
         <button type="button" class="menu-item text-[var(--color-danger)]" disabled={bulkBusy} onclick={() => { void deleteGroup(groupPath); }}>{i18n.t('common.delete')}</button>

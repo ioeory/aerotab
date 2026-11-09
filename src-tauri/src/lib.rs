@@ -26,6 +26,7 @@ pub mod notes;
 pub mod plugins;
 pub mod profile;
 pub mod profile_health;
+pub mod profile_inheritance;
 pub mod proxy_transport;
 pub mod remote;
 pub mod remote_transfer;

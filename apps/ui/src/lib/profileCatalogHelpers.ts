@@ -1,4 +1,28 @@
-import type { SshAuth, SshProfileSpec, StoredProfile, ProfileIcon } from './types';
+import type { SshAuth, SshProfileSpec, StoredProfile, ProfileIcon, SshInheritField, ProfileGroupDefaults } from './types';
+
+/** UI preview only; backend independently resolves saved profiles at connection time. */
+export function previewProfileInheritance(profile: StoredProfile, groups: ProfileGroupDefaults): { profile: StoredProfile; sources: Partial<Record<SshInheritField, string>> } {
+  const copy = JSON.parse(JSON.stringify(profile)) as StoredProfile;
+  const sources: Partial<Record<SshInheritField, string>> = {};
+  if (copy.kind !== 'ssh') return { profile: copy, sources };
+  for (const { path } of profileGroupBreadcrumbs(copy.group ?? null)) {
+    const defaults = groups[path];
+    if (!defaults) continue;
+    for (const field of copy.ssh.inherit ?? []) {
+      if (field === 'jump') {
+        if (defaults.jump_profile_ids !== undefined) {
+          copy.ssh.jump_via = [];
+          copy.ssh.jump_profile_ids = [...defaults.jump_profile_ids];
+          sources.jump = path;
+        }
+      } else if (field === 'user' && defaults.user !== undefined) { copy.ssh.user = defaults.user; sources.user = path; }
+      else if (field === 'port' && defaults.port !== undefined) { copy.ssh.port = defaults.port; sources.port = path; }
+      else if (field === 'auth' && defaults.auth !== undefined) { copy.ssh.auth = JSON.parse(JSON.stringify(defaults.auth)); sources.auth = path; }
+      else if (field === 'proxy_id' && defaults.proxy_id !== undefined) { copy.ssh.proxy_id = defaults.proxy_id; sources.proxy_id = path; }
+    }
+  }
+  return { profile: copy, sources };
+}
 
 export function profileGroupBreadcrumbs(group: string | null): Array<{ name: string; path: string }> {
   const parts = (group ?? '').split(/[/\\>]+/).map(part => part.trim()).filter(Boolean);
@@ -28,6 +52,7 @@ export interface ProfileEditorDraft {
   jumps: SshProfileSpec[];
   jumpProfileIds: string[];
   proxyId: string;
+  inherit: SshInheritField[];
   remoteSshProfileId: string;
   localBindPort: number | '';
 }
@@ -44,6 +69,7 @@ export function profileToEditorDraft(profile?: StoredProfile, group = ''): Profi
     jumps: profile?.kind === 'ssh' ? JSON.parse(JSON.stringify(profile.ssh.jump_via ?? [])) : [],
     jumpProfileIds: profile?.kind === 'ssh' ? [...(profile.ssh.jump_profile_ids ?? [])] : [],
     proxyId: profile?.kind === 'ssh' ? profile.ssh.proxy_id ?? '' : '',
+    inherit: profile?.kind === 'ssh' ? [...(profile.ssh.inherit ?? [])] : !profile && group.trim() ? ['user', 'port', 'auth', 'proxy_id', 'jump'] : [],
     remoteSshProfileId: remote?.ssh_profile_id ?? '', localBindPort: remote?.local_bind_port ?? '',
   };
 }
@@ -54,7 +80,7 @@ export function profileFromEditorDraft(draft: ProfileEditorDraft, id: string): S
     tags: [...draft.tags], note: draft.note.trim() || null, favorite: draft.favorite,
     icon: draft.icon ? { ...draft.icon } : null,
   };
-  if (draft.kind === 'ssh') return { ...base, kind: 'ssh', ssh: { host: draft.host, port: Number(draft.port) || 22, user: draft.user, auth: authFromDraft(draft.auth), jump_via: JSON.parse(JSON.stringify(draft.jumps)), ...(draft.jumpProfileIds.length ? { jump_profile_ids: [...draft.jumpProfileIds] } : {}), ...(draft.proxyId ? { proxy_id: draft.proxyId } : {}) } };
+  if (draft.kind === 'ssh') return { ...base, kind: 'ssh', ssh: { ...(draft.inherit.length ? { inherit: [...draft.inherit] } : {}), host: draft.host, port: Number(draft.port) || 22, user: draft.user, auth: authFromDraft(draft.auth), jump_via: JSON.parse(JSON.stringify(draft.jumps)), ...(draft.jumpProfileIds.length ? { jump_profile_ids: [...draft.jumpProfileIds] } : {}), ...(draft.proxyId ? { proxy_id: draft.proxyId } : {}) } };
   const remote = { host: draft.host, port: Number(draft.port) || (draft.kind === 'rdp' ? 3389 : 5900), ssh_profile_id: draft.remoteSshProfileId.trim() || null, local_bind_port: draft.localBindPort === '' ? undefined : Number(draft.localBindPort) || undefined };
   return draft.kind === 'rdp' ? { ...base, kind: 'rdp', rdp: remote } : { ...base, kind: 'vnc', vnc: remote };
 }

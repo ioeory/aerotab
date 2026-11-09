@@ -962,15 +962,16 @@
     const seq = ++hostStatsSeq;
     if (!hostStatsEnabled) return;
     try {
-      const profile = await resolveHostStatsTarget();
+      const profileId = currentActivePane()?.profileId;
+      const profile = profileId ? null : await resolveHostStatsTarget();
       if (seq !== hostStatsSeq) return;
-      if (!profile) {
+      if (!profileId && !profile) {
         hostStats = null;
         hostStatsStatus = 'idle';
         return;
       }
       if (!hostStats) hostStatsStatus = 'loading';
-      const stats = await rpc.call<HostStats>('ssh.hostStats', { profile });
+      const stats = await rpc.call<HostStats>('ssh.hostStats', profileId ? { profile_id: profileId } : { profile });
       if (seq !== hostStatsSeq) return;
       hostStats = stats;
       hostStatsStatus = 'ok';
@@ -1398,7 +1399,7 @@
       return null;
     }
     if (pane.sshProfile) {
-      return { target: { name: pane.title || 'SSH session', ssh: pane.sshProfile }, tabId: tab.id };
+      return { target: { ...(pane.profileId ? { profileId: pane.profileId } : {}), name: pane.title || 'SSH session', ssh: pane.sshProfile }, tabId: tab.id };
     }
     if (pane.profileId) {
       try {
@@ -1407,7 +1408,7 @@
           onError('sftp: profile is not SSH');
           return null;
         }
-        return { target: { name: profile.name, ssh: profile.ssh }, tabId: tab.id };
+        return { target: { profileId: profile.id, name: profile.name, ssh: profile.ssh }, tabId: tab.id };
       } catch (e) {
         onError(`sftp profile: ${(e as Error).message}`);
       }
@@ -1630,14 +1631,14 @@
           title: i18n.t('action.sftpBrowserProfile', { name: p.name }),
           subtitle: profileCommandSubtitle(p),
           keywords: ['sftp', 'transfer', ...profileCommandKeywords(p)],
-          run: () => openSftpDock({ name: p.name, ssh: p.ssh }),
+          run: () => openSftpDock({ profileId: p.id, name: p.name, ssh: p.ssh }),
         });
         acts.push({
           id: `file-transfer-${p.id}`,
           title: i18n.t('action.fileTransferProfile', { name: p.name }),
           subtitle: profileCommandSubtitle(p),
           keywords: ['file', 'transfer', 'sftp', ...profileCommandKeywords(p)],
-          run: () => { void openFileTransferWindow({ name: p.name, ssh: p.ssh }, p.id); },
+          run: () => { void openFileTransferWindow({ profileId: p.id, name: p.name, ssh: p.ssh }, p.id); },
         });
       }
     }
@@ -2056,7 +2057,7 @@
         bind:this={sidebar}
         openProfileModal={(p, opts) => profileModal?.open(p, opts)}
         openSerialModal={() => serialModal?.open()}
-        openSftp={(p) => { if (p.kind === 'ssh') { workspacePage = 'sessions'; openSftpDock({ name: p.name, ssh: p.ssh }); } }}
+        openSftp={(p) => { if (p.kind === 'ssh') { workspacePage = 'sessions'; openSftpDock({ profileId: p.id, name: p.name, ssh: p.ssh }); } }}
         openSettings={() => openSettings()}
         onShowTransfer={() => openFileTransferWindow()}
         {onError}

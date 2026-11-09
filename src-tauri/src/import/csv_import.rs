@@ -158,6 +158,7 @@ fn map_row(line_no: usize, cells: &[String], field_map: &HashMap<&str, usize>) -
                 jump_profile_ids: vec![],
                 proxy_id: None,
                 resolved_proxy: None,
+                inherit: vec![],
             };
             (
                 "ssh".to_string(),
