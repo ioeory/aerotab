@@ -63,8 +63,10 @@
   import type { RpcClient } from '../lib/rpc';
   import { b64decode, b64encode } from '../lib/rpc';
   import type { SessionMeta } from '../lib/types';
-  import { BUILTIN_THEMES, TOKYO_NIGHT, xtermPalette } from '../lib/theme';
+  import { TOKYO_NIGHT, xtermPalette } from '../lib/theme';
+  import { resolveTerminalPaletteName } from '../lib/terminalPalettePreview';
   import { colorSchemeByName, toXtermTheme } from '../lib/colorSchemes';
+  import { normalizeAppearancePreferences, resolveAppearanceTheme } from '../lib/appearancePreferences';
   import { applyLigatures } from '../lib/customCss';
   import { tabs } from '../lib/tabs.svelte';
   import { terminalPollIntervalMs } from '../lib/terminalPoll';
@@ -523,7 +525,7 @@
   }
 
   function paletteFromCfg(cfg: { theme: typeof TOKYO_NIGHT; colorSchemeName: string }) {
-    const cs = colorSchemeByName(cfg.colorSchemeName);
+    const cs = colorSchemeByName(resolveTerminalPaletteName(cfg.colorSchemeName));
     const theme = cs ? toXtermTheme(cs) : xtermPalette(cfg.theme);
     if (isTranslucent()) {
       return { ...theme, background: 'transparent' };
@@ -586,10 +588,8 @@
         }
       }
       const th = await rpc.call<{ value: unknown }>('settings.get', { key: 'theme' });
-      if (typeof th.value === 'string') {
-        const found = BUILTIN_THEMES.find((x) => x.name === th.value);
-        if (found) out.theme = found;
-      }
+      const ui = await rpc.call<{ value: unknown }>('settings.get', { key: 'uiAppearance' });
+      out.theme = resolveAppearanceTheme(normalizeAppearancePreferences(ui.value, th.value), window.matchMedia('(prefers-color-scheme: dark)').matches);
       const cs = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminalColorScheme' });
       if (typeof cs.value === 'string') out.colorSchemeName = cs.value;
       const beh = await rpc.call<{ value: unknown }>('settings.get', { key: 'behavior' });
@@ -1018,6 +1018,9 @@
       if (action === 'close') onClosePane?.();
       else if (action === 'reconnect' && canReconnect) void reconnectSession();
     };
+    const appearanceMedia = window.matchMedia('(prefers-color-scheme: dark)');
+    appearanceMedia.addEventListener('change', settingsListener);
+    document.addEventListener('aerotab:terminal-palette-preview', settingsListener);
     document.addEventListener('aerotab:settings-changed', settingsListener);
     document.addEventListener('aerotab:search', searchListener);
     document.addEventListener('aerotab:terminal-copy', copyListener);
@@ -1026,6 +1029,8 @@
     document.addEventListener('aerotab:focus-pane', focusListener);
     document.addEventListener('aerotab:fit-pane', fitListener);
     return () => {
+      appearanceMedia.removeEventListener('change', settingsListener);
+      document.removeEventListener('aerotab:terminal-palette-preview', settingsListener);
       document.removeEventListener('aerotab:settings-changed', settingsListener);
       document.removeEventListener('aerotab:search', searchListener);
       document.removeEventListener('aerotab:terminal-copy', copyListener);

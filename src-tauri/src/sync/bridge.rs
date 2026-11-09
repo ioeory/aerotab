@@ -54,10 +54,14 @@ pub const LOCAL_ONLY_SETTINGS_KEYS: &[&str] = &[
     // MCP listening address, TLS paths, roots, and grants are device-local security policy.
     "mcp",
     "mcp.",
+    "ai",
+    "ai.",
     // Legacy location of the run log (now in the `local` tree).
     "syncHistory",
     // Per-device session state.
     "openTabs",
+    "notes",
+    "notes.",
     "recentProfiles",
     // Local consent / diagnostics.
     "sftp.directAgentConsent",
@@ -105,6 +109,7 @@ struct SettingsKeyRecord {
 pub struct BridgeNotes {
     pub credentials_skipped_locked: bool,
     pub credentials_skipped_uninitialized: bool,
+    pub notes_paused_dirty: bool,
 }
 
 const DEFAULT_VAULT_KEYRING_ACCOUNT: &str = "sync.vault";
@@ -177,6 +182,7 @@ pub async fn export_locals(
     let mut notes = BridgeNotes::default();
     for &group in groups {
         match group {
+            Group::Notes => {} // NotesStore is coordinated separately with a revision guard.
             Group::Connections => export_connections(profiles, engine).await?,
             Group::Appearance => export_appearance(settings, engine).await?,
             Group::Shortcuts => export_shortcuts(settings, engine).await?,
@@ -199,12 +205,192 @@ pub async fn import_locals(
 ) -> Result<(), SyncError> {
     for &group in groups {
         match group {
+            Group::Notes => {}
             Group::Connections => import_connections(profiles, engine).await?,
             Group::Appearance => import_appearance(settings, engine).await?,
             Group::Shortcuts => import_shortcuts(settings, engine).await?,
             Group::PluginCfg => import_plugin_cfg(settings, engine).await?,
             Group::Credentials => import_credentials(vault, engine).await?,
         }
+    }
+    Ok(())
+}
+
+pub async fn export_notes(
+    store: &crate::notes::NotesStore,
+    engine: &SyncEngine,
+) -> Result<u64, SyncError> {
+    export_notes_inner(store, engine, true).await
+}
+pub async fn preview_notes(
+    store: &crate::notes::NotesStore,
+    engine: &SyncEngine,
+) -> Result<u64, SyncError> {
+    export_notes_inner(store, engine, false).await
+}
+async fn export_notes_inner(
+    store: &crate::notes::NotesStore,
+    engine: &SyncEngine,
+    persist: bool,
+) -> Result<u64, SyncError> {
+    let (entities, deleted, revision) = store.sync_snapshot().map_err(store_err)?;
+    let mut baseline = store.export_baseline().map_err(store_err)?;
+    for id in deleted {
+        if baseline.get(&id).is_some_and(|bytes| bytes.is_empty())
+            && engine
+                .snapshot_group(Group::Notes)
+                .await
+                .iter()
+                .any(|(rid, _)| *rid == crate::notes::entity_record_id(&id))
+        {
+            continue;
+        }
+        let rid = crate::notes::entity_record_id(&id);
+        if let (Some(previous), Some(remote)) =
+            (baseline.get(&id), engine.get_local(Group::Notes, rid).await)
+        {
+            if previous != &remote {
+                let mut copy: crate::notes::SyncEntity =
+                    serde_json::from_slice(&remote).map_err(json_err)?;
+                let copy_id = Uuid::new_v5(&rid.0, &remote).to_string();
+                match &mut copy {
+                    crate::notes::SyncEntity::Note(n) => {
+                        n.id = copy_id;
+                        n.title.push_str(" (conflict)");
+                    }
+                    crate::notes::SyncEntity::Folder(f) => {
+                        f.id = copy_id;
+                        f.name.push_str(" (conflict)");
+                    }
+                }
+                engine
+                    .put_local_if_changed(
+                        Group::Notes,
+                        copy.record_id(),
+                        serde_json::to_vec(&copy).map_err(json_err)?,
+                    )
+                    .await?;
+            }
+        }
+        baseline.insert(id.clone(), Vec::new());
+        if !engine
+            .snapshot_group(Group::Notes)
+            .await
+            .iter()
+            .any(|(id, r)| *id == rid && r.tombstone)
+        {
+            engine.delete_local(Group::Notes, rid).await?;
+        }
+    }
+    for mut entity in entities {
+        // Local optimistic versions are not part of synced content.
+        match &mut entity {
+            crate::notes::SyncEntity::Note(n) => {
+                n.version = 0;
+                n.updated_at = 0;
+            }
+            crate::notes::SyncEntity::Folder(f) => {
+                f.version = 0;
+                f.updated_at = 0;
+            }
+        }
+        let bytes = serde_json::to_vec(&entity).map_err(json_err)?;
+        if baseline.get(entity.id()) == Some(&bytes)
+            && engine
+                .snapshot_group(Group::Notes)
+                .await
+                .iter()
+                .any(|(id, _)| *id == entity.record_id())
+        {
+            continue;
+        }
+        // If reconciliation succeeded but local apply failed, a subsequent local
+        // edit is based on the old snapshot, not on the pulled engine payload.
+        // Preserve that unseen remote variant before advancing its VV locally.
+        if let (Some(previous), Some(remote)) = (
+            baseline.get(entity.id()),
+            engine.get_local(Group::Notes, entity.record_id()).await,
+        ) {
+            if previous != &remote && bytes != remote {
+                let mut copy: crate::notes::SyncEntity =
+                    serde_json::from_slice(&remote).map_err(json_err)?;
+                let copy_id = Uuid::new_v5(&entity.record_id().0, &remote).to_string();
+                match &mut copy {
+                    crate::notes::SyncEntity::Note(n) => {
+                        n.id = copy_id;
+                        n.title.push_str(" (conflict)");
+                    }
+                    crate::notes::SyncEntity::Folder(f) => {
+                        f.id = copy_id;
+                        f.name.push_str(" (conflict)");
+                    }
+                }
+                engine
+                    .put_local_if_changed(
+                        Group::Notes,
+                        copy.record_id(),
+                        serde_json::to_vec(&copy).map_err(json_err)?,
+                    )
+                    .await?;
+            }
+        }
+        engine
+            .put_local_if_changed(Group::Notes, entity.record_id(), bytes.clone())
+            .await?;
+        baseline.insert(entity.id().to_string(), bytes);
+    }
+    if persist {
+        store.set_export_baseline(&baseline).map_err(store_err)?;
+    }
+    Ok(revision)
+}
+pub async fn import_notes(
+    store: &crate::notes::NotesStore,
+    engine: &SyncEngine,
+    revision: u64,
+) -> Result<(), SyncError> {
+    let (local, _, _) = store.sync_snapshot().map_err(store_err)?;
+    let mut entities = Vec::new();
+    let mut deleted = Vec::new();
+    for (id, record) in engine.snapshot_group(Group::Notes).await {
+        if record.tombstone {
+            for entity in &local {
+                if entity.record_id() == id {
+                    deleted.push(entity.id().to_string());
+                }
+            }
+        } else {
+            let entity: crate::notes::SyncEntity =
+                serde_json::from_slice(&record.payload).map_err(json_err)?;
+            if entity.record_id() != id {
+                return Err(store_err("notes record id mismatch"));
+            }
+            entities.push(entity);
+        }
+    }
+    store
+        .apply_sync(entities, deleted, revision)
+        .map_err(store_err)?;
+    // Publish deterministic graph repair back into the engine, not merely the
+    // local projection; subsequent cycles must converge instead of re-failing.
+    for mut entity in store.sync_snapshot().map_err(store_err)?.0 {
+        match &mut entity {
+            crate::notes::SyncEntity::Note(n) => {
+                n.version = 0;
+                n.updated_at = 0;
+            }
+            crate::notes::SyncEntity::Folder(f) => {
+                f.version = 0;
+                f.updated_at = 0;
+            }
+        }
+        engine
+            .put_local_if_changed(
+                Group::Notes,
+                entity.record_id(),
+                serde_json::to_vec(&entity).map_err(json_err)?,
+            )
+            .await?;
     }
     Ok(())
 }
@@ -590,6 +776,334 @@ mod tests {
 
     fn profile(id: Uuid) -> Profile {
         serde_json::from_value(json!({"id":id,"name":"test","kind":"ssh","ssh":{"host":"host","port":22,"user":"user","auth":"Agent"}})).unwrap()
+    }
+
+    #[derive(Default)]
+    struct NotesMemoryBackend(
+        std::sync::Mutex<std::collections::HashMap<(Group, RecordId), Vec<u8>>>,
+    );
+    #[async_trait]
+    impl SyncBackend for NotesMemoryBackend {
+        async fn list(&self, g: Group) -> Result<Vec<RecordId>, SyncError> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(group, _)| *group == g)
+                .map(|(_, id)| *id)
+                .collect())
+        }
+        async fn get(&self, g: Group, id: RecordId) -> Result<Vec<u8>, SyncError> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&(g, id))
+                .cloned()
+                .ok_or_else(|| store_err("missing"))
+        }
+        async fn put(&self, g: Group, id: RecordId, b: &[u8]) -> Result<(), SyncError> {
+            self.0.lock().unwrap().insert((g, id), b.to_vec());
+            Ok(())
+        }
+        async fn delete(&self, g: Group, id: RecordId) -> Result<(), SyncError> {
+            self.0.lock().unwrap().remove(&(g, id));
+            Ok(())
+        }
+    }
+    async fn notes_cycle(
+        store: &crate::notes::NotesStore,
+        e: &SyncEngine,
+    ) -> Result<(), SyncError> {
+        let rev = export_notes(store, e).await?;
+        e.sync_group(Group::Notes).await?;
+        import_notes(store, e, rev).await
+    }
+    fn put_note(store: &crate::notes::NotesStore, body: &str) {
+        let current = crate::notes::dispatch(store, "notes.list", json!({}), &[]).unwrap();
+        let version = current["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "n")
+            .map_or(0, |n| n["version"].as_u64().unwrap());
+        crate::notes::dispatch(store,"notes.put",json!({"note":{"id":"n","parent_id":null,"title":"N","markdown":body,"tags":["tag"],"profile_ids":["missing"]},"expectedVersion":version}),&["missing".into()]).unwrap();
+    }
+    #[tokio::test]
+    async fn two_notes_stores_converge_edit_delete_and_stable_conflict_ids() {
+        let backend = Arc::new(NotesMemoryBackend::default());
+        let a = SyncEngine::new(
+            Uuid::new_v4(),
+            b"pw".to_vec(),
+            KdfParams::test_cheap(),
+            backend.clone(),
+        );
+        let b = SyncEngine::new(
+            Uuid::new_v4(),
+            b"pw".to_vec(),
+            KdfParams::test_cheap(),
+            backend,
+        );
+        let sa =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        let sb =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        put_note(&sa, "base");
+        notes_cycle(&sa, &a).await.unwrap();
+        notes_cycle(&sb, &b).await.unwrap();
+        put_note(&sa, "left");
+        put_note(&sb, "right");
+        for _ in 0..3 {
+            notes_cycle(&sa, &a).await.unwrap();
+            notes_cycle(&sb, &b).await.unwrap();
+        }
+        let content = |s: &crate::notes::NotesStore| {
+            s.sync_snapshot()
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|entity| {
+                    let crate::notes::SyncEntity::Note(n) = entity else {
+                        panic!()
+                    };
+                    (n.id, n.markdown, n.profile_ids)
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(content(&sa), content(&sb));
+        let stable = content(&sa);
+        assert!(stable.iter().any(|(_, body, _)| body == "left"));
+        assert!(stable.iter().any(|(_, body, _)| body == "right"));
+        for _ in 0..3 {
+            notes_cycle(&sa, &a).await.unwrap();
+            notes_cycle(&sb, &b).await.unwrap();
+        }
+        assert_eq!(stable, content(&sa));
+        let current = crate::notes::dispatch(&sa, "notes.list", json!({}), &[]).unwrap();
+        let version = current["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "n")
+            .unwrap()["version"]
+            .clone();
+        crate::notes::dispatch(
+            &sa,
+            "notes.delete",
+            json!({"id":"n","expectedVersion":version}),
+            &[],
+        )
+        .unwrap();
+        put_note(&sb, "edit against delete");
+        for _ in 0..4 {
+            notes_cycle(&sa, &a).await.unwrap();
+            notes_cycle(&sb, &b).await.unwrap();
+        }
+        assert_eq!(content(&sa), content(&sb));
+        assert!(!content(&sa).iter().any(|(id, _, _)| id == "n"));
+        assert!(content(&sa)
+            .iter()
+            .any(|(_, body, _)| body == "edit against delete"));
+    }
+    #[tokio::test]
+    async fn two_notes_stores_repair_concurrent_folder_ring_and_converge() {
+        let backend = Arc::new(NotesMemoryBackend::default());
+        let a = SyncEngine::new(
+            Uuid::new_v4(),
+            b"pw".to_vec(),
+            KdfParams::test_cheap(),
+            backend.clone(),
+        );
+        let b = SyncEngine::new(
+            Uuid::new_v4(),
+            b"pw".to_vec(),
+            KdfParams::test_cheap(),
+            backend,
+        );
+        let sa =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        let sb =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        for id in ["a", "b"] {
+            crate::notes::dispatch(
+                &sa,
+                "notes.putFolder",
+                json!({"folder":{"id":id,"parent_id":null,"name":id},"expectedVersion":0}),
+                &[],
+            )
+            .unwrap();
+        }
+        notes_cycle(&sa, &a).await.unwrap();
+        notes_cycle(&sb, &b).await.unwrap();
+        for (store, id, parent) in [(&sa, "a", "b"), (&sb, "b", "a")] {
+            let snapshot = crate::notes::dispatch(store, "notes.list", json!({}), &[]).unwrap();
+            let f = snapshot["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == id)
+                .unwrap();
+            let mut changed = f.clone();
+            changed["parent_id"] = json!(parent);
+            crate::notes::dispatch(
+                store,
+                "notes.putFolder",
+                json!({"folder":changed,"expectedVersion":f["version"]}),
+                &[],
+            )
+            .unwrap();
+        }
+        for _ in 0..5 {
+            notes_cycle(&sa, &a).await.unwrap();
+            notes_cycle(&sb, &b).await.unwrap();
+        }
+        let graph = |s: &crate::notes::NotesStore| {
+            s.sync_snapshot()
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|e| {
+                    let crate::notes::SyncEntity::Folder(f) = e else {
+                        panic!()
+                    };
+                    (f.id, f.parent_id, f.recovered_parent_id)
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(graph(&sa), graph(&sb));
+        assert!(graph(&sa).contains(&("a".into(), None, Some("b".into()))));
+        let before = a
+            .snapshot_group(Group::Notes)
+            .await
+            .into_iter()
+            .map(|(id, r)| (id.0, r.vv))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        notes_cycle(&sa, &a).await.unwrap();
+        let after = a
+            .snapshot_group(Group::Notes)
+            .await
+            .into_iter()
+            .map(|(id, r)| (id.0, r.vv))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(before, after);
+        for s in [&sa, &sb] {
+            let (entities, _, _) = s.sync_snapshot().unwrap();
+            let roots = entities
+                .iter()
+                .filter(
+                    |e| matches!(e,crate::notes::SyncEntity::Folder(f) if f.parent_id.is_none()),
+                )
+                .count();
+            assert_eq!(roots, 1, "invalid ring must never enter local store");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_notes_import_must_not_reexport_old_snapshot() {
+        let store =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        crate::notes::dispatch(&store,"notes.put",json!({"note":{"id":"n","parent_id":null,"title":"N","markdown":"old"},"expectedVersion":0}),&[]).unwrap();
+        let e = engine();
+        let revision = export_notes(&store, &e).await.unwrap();
+        let baseline = store.export_baseline().unwrap();
+        assert!(!baseline.is_empty());
+        let id = crate::notes::entity_record_id("n");
+        let mut remote: Value =
+            serde_json::from_slice(&e.get_local(Group::Notes, id).await.unwrap()).unwrap();
+        remote["value"]["markdown"] = json!("remote");
+        e.put_local(Group::Notes, id, serde_json::to_vec(&remote).unwrap())
+            .await
+            .unwrap();
+        // A failed revision guard must not turn old local content into a new write.
+        assert!(import_notes(&store, &e, revision + 1).await.is_err());
+        let before = e.snapshot_group(Group::Notes).await;
+        export_notes(&store, &e).await.unwrap();
+        assert_eq!(
+            e.get_local(Group::Notes, id).await.unwrap(),
+            serde_json::to_vec(&remote).unwrap()
+        );
+        assert_eq!(e.snapshot_group(Group::Notes).await[0].1.vv, before[0].1.vv);
+        let snapshot = crate::notes::dispatch(&store, "notes.list", json!({}), &[]).unwrap();
+        let mut local = snapshot["notes"][0].clone();
+        local["markdown"] = json!("new draft after failure");
+        crate::notes::dispatch(
+            &store,
+            "notes.put",
+            json!({"note":local,"expectedVersion":snapshot["notes"][0]["version"]}),
+            &[],
+        )
+        .unwrap();
+        export_notes(&store, &e).await.unwrap();
+        let bodies: Vec<_> = e
+            .snapshot_group(Group::Notes)
+            .await
+            .into_iter()
+            .filter(|(_, r)| !r.tombstone)
+            .map(|(_, r)| {
+                serde_json::from_slice::<Value>(&r.payload).unwrap()["value"]["markdown"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            bodies.contains(&"remote".into()) && bodies.contains(&"new draft after failure".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn notes_bridge_roundtrip_tombstones_and_no_appearance_leak() {
+        let src =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        let dst =
+            crate::notes::NotesStore::open(std::env::temp_dir().join(Uuid::new_v4().to_string()))
+                .unwrap();
+        let note = serde_json::json!({"id":"n","parent_id":"f","title":"N","markdown":"# body","tags":["tag"],"profile_ids":["missing"]});
+        crate::notes::dispatch(
+            &src,
+            "notes.putFolder",
+            json!({"folder":{"id":"f","parent_id":null,"name":"F"},"expectedVersion":0}),
+            &[],
+        )
+        .unwrap();
+        let saved = crate::notes::dispatch(
+            &src,
+            "notes.put",
+            json!({"note":note,"expectedVersion":0}),
+            &["missing".into()],
+        )
+        .unwrap();
+        let e = engine();
+        export_notes(&src, &e).await.unwrap();
+        export_notes(&dst, &e).await.unwrap(); // first sync empty device cannot erase peers
+        import_notes(&dst, &e, 0).await.unwrap();
+        let pulled = crate::notes::dispatch(&dst, "notes.list", json!({}), &[]).unwrap();
+        assert_eq!(pulled["notes"][0]["markdown"], "# body");
+        assert_eq!(pulled["notes"][0]["tags"], json!(["tag"]));
+        assert_eq!(pulled["notes"][0]["profile_ids"], json!(["missing"]));
+        crate::notes::dispatch(
+            &src,
+            "notes.delete",
+            json!({"id":"n","expectedVersion":saved["version"]}),
+            &[],
+        )
+        .unwrap();
+        export_notes(&src, &e).await.unwrap();
+        let revision = dst.sync_snapshot().unwrap().2;
+        import_notes(&dst, &e, revision).await.unwrap();
+        assert_eq!(
+            crate::notes::dispatch(&dst, "notes.list", json!({}), &[]).unwrap()["notes"],
+            json!([])
+        );
+        assert_eq!(settings_group_for_key("notes"), None);
+        assert_eq!(settings_group_for_key("notes.drafts"), None);
+        assert_eq!(Group::from_slug("notes"), Some(Group::Notes));
     }
 
     #[tokio::test]

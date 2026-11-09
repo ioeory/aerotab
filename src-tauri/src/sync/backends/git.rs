@@ -29,6 +29,36 @@ use uuid::Uuid;
 use crate::sync::blob::{normalize_blob_path, BlobMeta, BlobStore};
 use crate::sync::{Group, RecordId, SyncBackend, SyncError};
 
+// Held by actual blocking workers, not their cancellable async waiters.
+// Conservative process-wide serialization also protects reopened backend handles.
+static REPOSITORY_WORKER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn validate_push_status(status: Option<&str>) -> Result<(), git2::Error> {
+    status.map_or(Ok(()), |reason| Err(git2::Error::from_str(reason)))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FetchOutcome {
+    pub commits_applied: usize,
+    pub discarded_local_batches: bool,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapacityStats {
+    pub worktree_bytes: u64,
+    pub git_bytes: u64,
+    pub total_bytes: u64,
+    pub op_bytes: u64,
+    pub op_files: usize,
+    pub snapshot_bytes: u64,
+    pub snapshot_files: usize,
+    pub commits: usize,
+    pub branch: Option<String>,
+    pub head_oid: Option<String>,
+    pub history_rewrite_allowed: bool,
+}
+
 #[derive(Clone)]
 pub struct GitBackend {
     inner: Arc<GitInner>,
@@ -68,6 +98,9 @@ struct RemoteAuth {
 impl GitBackend {
     /// Opens an existing repo, or initialises one if `repo_path` is empty.
     pub fn open_or_init(repo_path: impl Into<PathBuf>) -> Result<Self, SyncError> {
+        let _worker = REPOSITORY_WORKER
+            .lock()
+            .map_err(|e| SyncError::Transport(e.to_string()))?;
         let repo_path = repo_path.into();
         std::fs::create_dir_all(&repo_path).map_err(io_err)?;
         match Repository::open(&repo_path) {
@@ -87,6 +120,59 @@ impl GitBackend {
         })
     }
 
+    /// Fetch into a disposable repository and copy only sync blobs into memory.
+    /// The live repository's refs, index, worktree and pending flag are untouched.
+    pub async fn preview_blobs(&self) -> Result<Arc<crate::sync::MemBlobStore>, SyncError> {
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(std::env::temp_dir().join(format!("aerotab-preview-{}", Uuid::new_v4())));
+        let mut isolated = Self::open_or_init(&temp.0)?;
+        if let Some(remote) = &self.inner.remote {
+            isolated = isolated.with_remote(&remote.name, &remote.url, &remote.branch)?;
+            Arc::get_mut(&mut isolated.inner)
+                .expect("new isolated backend")
+                .remote = Some(remote.clone());
+            isolated.fetch_outcome().await?;
+        } else {
+            let memory = Arc::new(crate::sync::MemBlobStore::new());
+            for meta in self.list_blobs("").await? {
+                memory
+                    .put_blob(&meta.path, &self.get_blob(&meta.path).await?)
+                    .await?;
+            }
+            return Ok(memory);
+        }
+        let memory = Arc::new(crate::sync::MemBlobStore::new());
+        for meta in isolated.list_blobs("").await? {
+            memory
+                .put_blob(&meta.path, &isolated.get_blob(&meta.path).await?)
+                .await?;
+        }
+        Ok(memory)
+    }
+
+    pub fn target_identity(&self) -> String {
+        format!(
+            "git:{:?}:{:?}",
+            std::fs::canonicalize(&self.inner.repo_path)
+                .unwrap_or_else(|_| self.inner.repo_path.clone()),
+            self.inner.remote.as_ref().map(|r| (
+                &r.url,
+                &r.branch,
+                &r.auth.username,
+                &r.auth.ssh_key_path,
+                r.auth
+                    .password
+                    .as_ref()
+                    .map(|p| Uuid::new_v5(&Uuid::NAMESPACE_OID, p.as_bytes()))
+            ))
+        )
+    }
+
     /// True when the working tree has writes that have not been committed yet.
     pub fn has_pending(&self) -> bool {
         self.inner.pending.load(Ordering::SeqCst)
@@ -100,9 +186,72 @@ impl GitBackend {
         }
         let me = self.clone();
         let message = message.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
+            if let Some(cfg) = &me.inner.remote {
+                me.recover_pending_rewrite(cfg)?;
+            }
+            me.commit_all(&message)
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))
+        .and_then(|r| r);
+        if let Err(error) = result {
+            self.inner.pending.store(true, Ordering::SeqCst);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    pub async fn capacity(&self) -> Result<CapacityStats, SyncError> {
+        let me = self.clone();
         tokio::task::spawn_blocking(move || {
-            me.commit_all(&message)?;
-            Ok(true)
+            let repo = Repository::open(&me.inner.repo_path).map_err(git_err)?;
+            let files = list_blobs_under(&me.inner.repo_path, "")?;
+            let mut stats = CapacityStats::default();
+            for file in files {
+                stats.worktree_bytes += file.size;
+                if (file.path.starts_with("v2/devices/") || file.path.starts_with("v3/devices/"))
+                    && file.path.contains("/ops/")
+                {
+                    stats.op_bytes += file.size;
+                    stats.op_files += 1;
+                }
+                if file.path.starts_with("v2/snapshots/") || file.path.starts_with("v3/snapshots/")
+                {
+                    stats.snapshot_bytes += file.size;
+                    stats.snapshot_files += 1;
+                }
+            }
+            fn size(dir: &Path) -> Result<u64, SyncError> {
+                let mut bytes = 0;
+                for entry in std::fs::read_dir(dir).map_err(io_err)? {
+                    let entry = entry.map_err(io_err)?;
+                    let kind = entry.file_type().map_err(io_err)?;
+                    if kind.is_dir() {
+                        bytes += size(&entry.path())?;
+                    } else if kind.is_file() {
+                        bytes += entry.metadata().map_err(io_err)?.len();
+                    }
+                }
+                Ok(bytes)
+            }
+            stats.git_bytes = size(repo.path())?;
+            stats.total_bytes = stats.worktree_bytes + stats.git_bytes;
+            stats.commits = me.commit_count()?;
+            stats.head_oid = repo
+                .head()
+                .ok()
+                .and_then(|r| r.target())
+                .map(|oid| oid.to_string());
+            stats.branch = me.inner.remote.as_ref().map(|r| r.branch.clone());
+            stats.history_rewrite_allowed = stats
+                .branch
+                .as_deref()
+                .is_some_and(|b| b == "aerotab-sync" || b.starts_with("aerotab-sync/"));
+            Ok(stats)
         })
         .await
         .map_err(|e| SyncError::Transport(format!("join: {e}")))?
@@ -130,13 +279,71 @@ impl GitBackend {
     pub async fn squash_orphan(&self, message: &str) -> Result<(), SyncError> {
         let me = self.clone();
         let message = message.to_string();
-        tokio::task::spawn_blocking(move || me.squash_orphan_blocking(&message))
-            .await
-            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
+            me.squash_orphan_blocking(&message)
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))?
     }
 
     fn squash_orphan_blocking(&self, message: &str) -> Result<(), SyncError> {
+        let remote_cfg = self.inner.remote.as_ref().ok_or_else(|| {
+            SyncError::Transport("history rewrite requires a dedicated remote branch".into())
+        })?;
+        if remote_cfg.branch != "aerotab-sync" && !remote_cfg.branch.starts_with("aerotab-sync/") {
+            return Err(SyncError::Transport(
+                "history rewrite is restricted to aerotab-sync branches".into(),
+            ));
+        }
+        if self.has_pending() {
+            return Err(SyncError::Transport(
+                "commit pending writes before history rewrite".into(),
+            ));
+        }
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        if repo.path().join("aerotab-rewrite-pending.json").exists() {
+            return Err(SyncError::Transport(
+                "unresolved history rewrite pending; refusing another rewrite".into(),
+            ));
+        }
+        let mut status_options = git2::StatusOptions::new();
+        status_options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true);
+        if !repo
+            .statuses(Some(&mut status_options))
+            .map_err(git_err)?
+            .is_empty()
+        {
+            return Err(SyncError::Transport(
+                "history rewrite requires a clean working tree and index".into(),
+            ));
+        }
+        let local_ref = format!("refs/heads/{}", remote_cfg.branch);
+        if repo.head().map_err(git_err)?.name() != Some(local_ref.as_str()) {
+            return Err(SyncError::Transport(
+                "HEAD must be on the configured dedicated sync branch".into(),
+            ));
+        }
+        let tracking = format!("refs/remotes/{}/{}", remote_cfg.name, remote_cfg.branch);
+        let expected = repo
+            .find_reference(&tracking)
+            .and_then(|r| r.peel_to_commit())
+            .map_err(git_err)?
+            .id();
+        let old = repo
+            .head()
+            .and_then(|r| r.peel_to_commit())
+            .map_err(git_err)?
+            .id();
+        if old != expected {
+            return Err(SyncError::Transport(
+                "fetch and reconcile remote before history rewrite".into(),
+            ));
+        }
         let mut index = repo.index().map_err(git_err)?;
         index
             .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
@@ -156,22 +363,149 @@ impl GitBackend {
             .map(|r| r.branch.clone())
             .unwrap_or_else(|| "master".into());
         let local_ref = format!("refs/heads/{branch}");
+        let pending_path = repo.path().join("aerotab-rewrite-pending.json");
+        let pending = serde_json::json!({"old": old.to_string(), "new": oid.to_string(), "branch": remote_cfg.branch});
+        std::fs::write(
+            &pending_path,
+            serde_json::to_vec(&pending).map_err(|e| SyncError::Transport(e.to_string()))?,
+        )
+        .map_err(io_err)?;
         repo.reference(&local_ref, oid, true, "squash orphan")
             .map_err(git_err)?;
         repo.set_head(&local_ref).map_err(git_err)?;
-        self.inner.pending.store(false, Ordering::SeqCst);
+        if let Err(error) = self.push_history_with_lease(remote_cfg, expected) {
+            match self.remote_tip(remote_cfg) {
+                Ok(Some(tip)) if tip == oid => { /* lost acknowledgement: push succeeded */ }
+                Ok(Some(tip)) if tip == old => {
+                    repo.reference(&local_ref, old, true, "restore rejected history rewrite").map_err(git_err)?;
+                    std::fs::remove_file(&pending_path).map_err(io_err)?;
+                    return Err(error);
+                }
+                _ => return Err(SyncError::Transport(format!("history rewrite outcome uncertain; durable pending old/new retained, no rollback or GC: {error}"))),
+            }
+        }
+        std::fs::remove_file(&pending_path).map_err(io_err)?;
+        repo.reference(&tracking, oid, true, "history rewrite acknowledged")
+            .map_err(git_err)?;
+        // Local history storage is reclaimed explicitly, only after push
+        // acknowledgement. Never run GC against the remote server.
+        run_git(
+            &self.inner.repo_path,
+            &RemoteAuth::default(),
+            None,
+            &["reflog", "expire", "--expire=now", "--all"],
+        )?;
+        run_git(
+            &self.inner.repo_path,
+            &RemoteAuth::default(),
+            None,
+            &["gc", "--prune=now"],
+        )
+    }
 
-        // Force-push when a remote is present. Callers should `fetch_remote`
-        // first so the tip we overwrite is the one we just observed (lease).
-        let Some(remote_cfg) = self.inner.remote.clone() else {
-            return Ok(());
+    fn remote_tip(&self, cfg: &RemoteConfig) -> Result<Option<git2::Oid>, SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        let mut remote = repo.remote_anonymous(&cfg.url).map_err(git_err)?;
+        let mut callbacks = RemoteCallbacks::new();
+        let auth = cfg.auth.clone();
+        callbacks.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
+        let connection = remote
+            .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+            .map_err(git_err)?;
+        let name = format!("refs/heads/{}", cfg.branch);
+        Ok(connection
+            .list()
+            .map_err(git_err)?
+            .iter()
+            .find(|head| head.name() == name)
+            .map(|head| head.oid()))
+    }
+
+    fn recover_pending_rewrite(&self, cfg: &RemoteConfig) -> Result<(), SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        let path = repo.path().join("aerotab-rewrite-pending.json");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_err(e)),
         };
-        let force_refspec = format!(
-            "+refs/heads/{branch}:refs/heads/{branch}",
-            branch = remote_cfg.branch
-        );
-        self.push_remote_refs(&remote_cfg, &force_refspec)?;
-        Ok(())
+        let state: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| SyncError::Transport(e.to_string()))?;
+        if state["branch"].as_str() != Some(&cfg.branch) {
+            return Err(SyncError::Transport(
+                "pending history branch differs; manual recovery required".into(),
+            ));
+        }
+        let old = state["old"]
+            .as_str()
+            .and_then(|s| git2::Oid::from_str(s).ok())
+            .ok_or_else(|| SyncError::Transport("invalid pending old OID".into()))?;
+        let new = state["new"]
+            .as_str()
+            .and_then(|s| git2::Oid::from_str(s).ok())
+            .ok_or_else(|| SyncError::Transport("invalid pending new OID".into()))?;
+        let tip = self.remote_tip(cfg)?;
+        let resolved = match tip {
+            Some(tip) if tip == new => new,
+            Some(tip) if tip == old => old,
+            _ => {
+                return Err(SyncError::Transport(
+                    "pending history outcome remains uncertain; refusing repository mutation"
+                        .into(),
+                ))
+            }
+        };
+        repo.reference(
+            &format!("refs/heads/{}", cfg.branch),
+            resolved,
+            true,
+            "recover confirmed history outcome",
+        )
+        .map_err(git_err)?;
+        repo.reference(
+            &format!("refs/remotes/{}/{}", cfg.name, cfg.branch),
+            resolved,
+            true,
+            "recover history tracking",
+        )
+        .map_err(git_err)?;
+        std::fs::remove_file(path).map_err(io_err)
+    }
+
+    fn push_history_with_lease(
+        &self,
+        cfg: &RemoteConfig,
+        expected: git2::Oid,
+    ) -> Result<(), SyncError> {
+        let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
+        let mut remote = repo.remote_anonymous(&cfg.url).map_err(git_err)?;
+        let mut callbacks = RemoteCallbacks::new();
+        let auth = cfg.auth.clone();
+        callbacks.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
+        let target = format!("refs/heads/{}", cfg.branch);
+        callbacks.push_negotiation(move |updates| {
+            if updates.len() != 1
+                || updates[0].dst_refname() != Some(target.as_str())
+                || updates[0].src() != expected
+            {
+                return Err(git2::Error::from_str(
+                    "history rewrite lease rejected: remote OID changed",
+                ));
+            }
+            Ok(())
+        });
+        callbacks.push_update_reference(|_, status| {
+            if let Some(reason) = status {
+                return Err(git2::Error::from_str(reason));
+            }
+            Ok(())
+        });
+        let mut options = PushOptions::new();
+        options.remote_callbacks(callbacks);
+        let refspec = format!("+refs/heads/{0}:refs/heads/{0}", cfg.branch);
+        remote
+            .push(&[&refspec], Some(&mut options))
+            .map_err(git_err)
     }
 
     fn mark_pending(&self) {
@@ -201,18 +535,13 @@ impl GitBackend {
         let name = name.into();
         let url = normalize_git_remote_url(&url.into());
         let branch = branch.into();
-        // Register the remote with git itself so cli tools see it too.
+        // Reconfiguration must also wait for abandoned blocking workers.
+        let _worker = REPOSITORY_WORKER
+            .lock()
+            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        // Configuration is immutable and does not mutate shared .git/config.
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
-        match repo.find_remote(&name) {
-            Ok(existing) => {
-                if existing.url() != Some(url.as_str()) {
-                    repo.remote_set_url(&name, &url).map_err(git_err)?;
-                }
-            }
-            Err(_) => {
-                repo.remote(&name, &url).map_err(git_err)?;
-            }
-        }
+        repo.remote_anonymous(&url).map_err(git_err)?;
         let inner = Arc::make_mut_or_clone(&mut self.inner);
         inner.remote = Some(RemoteConfig {
             name,
@@ -296,11 +625,20 @@ impl GitBackend {
     /// commits applied. Returns `Ok(0)` and a no-op result when no remote
     /// is configured (so engine code can call this unconditionally).
     pub async fn fetch_remote(&self) -> Result<usize, SyncError> {
+        Ok(self.fetch_outcome().await?.commits_applied)
+    }
+
+    pub async fn fetch_outcome(&self) -> Result<FetchOutcome, SyncError> {
         let me = self.clone();
         tokio::time::timeout(std::time::Duration::from_secs(120), async move {
-            tokio::task::spawn_blocking(move || me.fetch_blocking())
-                .await
-                .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+            tokio::task::spawn_blocking(move || {
+                let _worker = REPOSITORY_WORKER
+                    .lock()
+                    .map_err(|e| SyncError::Transport(e.to_string()))?;
+                me.fetch_blocking()
+            })
+            .await
+            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
         })
         .await
         .map_err(|_| SyncError::Transport("git fetch timed out after 120s".into()))?
@@ -311,18 +649,24 @@ impl GitBackend {
     pub async fn push_remote(&self) -> Result<(), SyncError> {
         let me = self.clone();
         tokio::time::timeout(std::time::Duration::from_secs(120), async move {
-            tokio::task::spawn_blocking(move || me.push_blocking())
-                .await
-                .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+            tokio::task::spawn_blocking(move || {
+                let _worker = REPOSITORY_WORKER
+                    .lock()
+                    .map_err(|e| SyncError::Transport(e.to_string()))?;
+                me.push_blocking()
+            })
+            .await
+            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
         })
         .await
         .map_err(|_| SyncError::Transport("git push timed out after 120s".into()))?
     }
 
-    fn fetch_blocking(&self) -> Result<usize, SyncError> {
+    fn fetch_blocking(&self) -> Result<FetchOutcome, SyncError> {
         let Some(remote_cfg) = self.inner.remote.clone() else {
-            return Ok(0);
+            return Ok(FetchOutcome::default());
         };
+        self.recover_pending_rewrite(&remote_cfg)?;
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
         let refspec = format!(
             "+refs/heads/{branch}:refs/remotes/{name}/{branch}",
@@ -335,7 +679,7 @@ impl GitBackend {
         let remote_ref = format!("refs/remotes/{}/{}", remote_cfg.name, remote_cfg.branch);
         let fetch_head = match repo.find_reference(&remote_ref) {
             Ok(r) => r,
-            Err(_) => return Ok(0),
+            Err(_) => return Ok(FetchOutcome::default()),
         };
         let fetch_commit = fetch_head.peel_to_commit().map_err(git_err)?;
         let analysis = {
@@ -345,7 +689,7 @@ impl GitBackend {
             repo.merge_analysis(&[&annotated]).map_err(git_err)?
         };
         if analysis.0.is_up_to_date() {
-            return Ok(0);
+            return Ok(FetchOutcome::default());
         }
         let head_target = repo.head().ok().and_then(|h| h.target());
         if analysis.0.is_fast_forward() {
@@ -353,9 +697,15 @@ impl GitBackend {
                 checkout_branch_to_commit(&repo, &remote_cfg, fetch_commit.id(), "fast-forward")?;
             if let Some(old) = head_target {
                 let count = count_commits_between(&repo, old, fetch_commit.id()).unwrap_or(0);
-                return Ok(count.max(n));
+                return Ok(FetchOutcome {
+                    commits_applied: count.max(n),
+                    discarded_local_batches: false,
+                });
             }
-            return Ok(n.max(1));
+            return Ok(FetchOutcome {
+                commits_applied: n.max(1),
+                discarded_local_batches: false,
+            });
         }
         // Both sides have unique commits. Git is only the transport layer — reset the
         // working tree to the remote tip and let SyncEngine merge records (VV) from
@@ -372,15 +722,22 @@ impl GitBackend {
         )?;
         if let Some(old) = head_target {
             let count = count_commits_between(&repo, old, fetch_commit.id()).unwrap_or(0);
-            return Ok(count.max(n));
+            return Ok(FetchOutcome {
+                commits_applied: count.max(n),
+                discarded_local_batches: true,
+            });
         }
-        Ok(n.max(1))
+        Ok(FetchOutcome {
+            commits_applied: n.max(1),
+            discarded_local_batches: true,
+        })
     }
 
     fn push_blocking(&self) -> Result<(), SyncError> {
         let Some(remote_cfg) = self.inner.remote.clone() else {
             return Ok(());
         };
+        self.recover_pending_rewrite(&remote_cfg)?;
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
         // Ensure local branch points to HEAD (we always commit on HEAD).
         let head = repo.head().map_err(git_err)?;
@@ -406,7 +763,7 @@ impl GitBackend {
                 &self.inner.repo_path,
                 &remote_cfg.auth,
                 ssh_port,
-                &["fetch", &remote_cfg.name, refspec],
+                &["fetch", &remote_cfg.url, refspec],
             );
         }
         match self.fetch_remote_refs_libgit2(remote_cfg, refspec) {
@@ -416,7 +773,7 @@ impl GitBackend {
                     &self.inner.repo_path,
                     &remote_cfg.auth,
                     ssh_port,
-                    &["fetch", &remote_cfg.name, refspec],
+                    &["fetch", &remote_cfg.url, refspec],
                 )
             }
             Err(e) => Err(e),
@@ -429,7 +786,7 @@ impl GitBackend {
         refspec: &str,
     ) -> Result<(), SyncError> {
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
-        let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
+        let mut remote = repo.remote_anonymous(&remote_cfg.url).map_err(git_err)?;
         let mut cb = RemoteCallbacks::new();
         let auth = remote_cfg.auth.clone();
         cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
@@ -447,7 +804,7 @@ impl GitBackend {
                 &self.inner.repo_path,
                 &remote_cfg.auth,
                 ssh_port,
-                &["push", &remote_cfg.name, refspec],
+                &["push", &remote_cfg.url, refspec],
             );
         }
         match self.push_remote_refs_libgit2(remote_cfg, refspec) {
@@ -457,7 +814,7 @@ impl GitBackend {
                     &self.inner.repo_path,
                     &remote_cfg.auth,
                     ssh_port,
-                    &["push", &remote_cfg.name, refspec],
+                    &["push", &remote_cfg.url, refspec],
                 )
             }
             Err(e) => Err(e),
@@ -470,10 +827,11 @@ impl GitBackend {
         refspec: &str,
     ) -> Result<(), SyncError> {
         let repo = Repository::open(&self.inner.repo_path).map_err(git_err)?;
-        let mut remote = repo.find_remote(&remote_cfg.name).map_err(git_err)?;
+        let mut remote = repo.remote_anonymous(&remote_cfg.url).map_err(git_err)?;
         let mut cb = RemoteCallbacks::new();
         let auth = remote_cfg.auth.clone();
         cb.credentials(move |url, user, allowed| build_creds(&auth, url, user, allowed));
+        cb.push_update_reference(|_, status| validate_push_status(status));
         let mut opts = PushOptions::new();
         opts.remote_callbacks(cb);
         remote.push(&[refspec], Some(&mut opts)).map_err(git_err)
@@ -972,6 +1330,7 @@ fn group_segment(group: Group) -> &'static str {
         Group::Shortcuts => "shortcuts",
         Group::PluginCfg => "plugincfg",
         Group::Credentials => "credentials",
+        Group::Notes => "notes",
     }
 }
 
@@ -1022,6 +1381,9 @@ impl SyncBackend for GitBackend {
         let blob = blob.to_vec();
         let me = self.clone();
         tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
             std::fs::create_dir_all(&dir).map_err(io_err)?;
             // Atomic write via tmp + rename.
             let tmp = path.with_extension("bin.tmp");
@@ -1038,6 +1400,9 @@ impl SyncBackend for GitBackend {
         let path = self.record_path(group, id);
         let me = self.clone();
         tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
             match std::fs::remove_file(&path) {
                 Ok(()) => me.mark_pending(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1055,16 +1420,26 @@ impl BlobStore for GitBackend {
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<BlobMeta>, SyncError> {
         let root = self.inner.repo_path.clone();
         let prefix = prefix.trim_start_matches('/').to_string();
-        tokio::task::spawn_blocking(move || list_blobs_under(&root, &prefix))
-            .await
-            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
+            list_blobs_under(&root, &prefix)
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))?
     }
 
     async fn get_blob(&self, path: &str) -> Result<Vec<u8>, SyncError> {
         let abs = self.abs_blob_path(path)?;
-        tokio::task::spawn_blocking(move || std::fs::read(abs).map_err(io_err))
-            .await
-            .map_err(|e| SyncError::Transport(format!("join: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
+            std::fs::read(abs).map_err(io_err)
+        })
+        .await
+        .map_err(|e| SyncError::Transport(format!("join: {e}")))?
     }
 
     async fn put_blob(&self, path: &str, bytes: &[u8]) -> Result<(), SyncError> {
@@ -1072,6 +1447,9 @@ impl BlobStore for GitBackend {
         let bytes = bytes.to_vec();
         let me = self.clone();
         tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).map_err(io_err)?;
             }
@@ -1089,6 +1467,9 @@ impl BlobStore for GitBackend {
         let abs = self.abs_blob_path(path)?;
         let me = self.clone();
         tokio::task::spawn_blocking(move || -> Result<(), SyncError> {
+            let _worker = REPOSITORY_WORKER
+                .lock()
+                .map_err(|e| SyncError::Transport(e.to_string()))?;
             match std::fs::remove_file(&abs) {
                 Ok(()) => me.mark_pending(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1178,6 +1559,24 @@ fn list_records(dir: &Path) -> Result<Vec<RecordId>, SyncError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn configuring_remote_preserves_shared_repository_configuration() {
+        let dir = tmpdir();
+        let backend = GitBackend::open_or_init(&dir).unwrap();
+        let repo = Repository::open(&dir).unwrap();
+        repo.remote("origin", "https://old.invalid/sync.git")
+            .unwrap();
+        let _configured = backend
+            .with_remote("origin", "https://new.invalid/sync.git", "main")
+            .unwrap();
+        assert_eq!(
+            repo.find_remote("origin").unwrap().url(),
+            Some("https://old.invalid/sync.git")
+        );
+        drop(repo);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn tmpdir() -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!("tabby-git-test-{}", Uuid::new_v4()));
@@ -1198,6 +1597,206 @@ mod tests {
         } else {
             format!("file:///{s}")
         }
+    }
+
+    #[tokio::test]
+    async fn isolated_preview_preserves_live_head_and_dirty_files() {
+        let remote_dir = tmpdir();
+        let local_dir = tmpdir();
+        let remote = GitBackend::open_or_init(&remote_dir).unwrap();
+        remote
+            .put_blob("v2/devices/a/ops/1.bin", b"remote-only")
+            .await
+            .unwrap();
+        remote.commit_cycle("mock sync").await.unwrap();
+        let branch = Repository::open(&remote_dir)
+            .unwrap()
+            .head()
+            .unwrap()
+            .shorthand()
+            .unwrap()
+            .to_owned();
+        let local = GitBackend::open_or_init(&local_dir)
+            .unwrap()
+            .with_remote("origin", path_to_file_url(&remote_dir), &branch)
+            .unwrap();
+        local.put_blob("v2/local-dirty", b"keep").await.unwrap();
+        let before = local.capacity().await.unwrap();
+        let memory = local.preview_blobs().await.unwrap();
+        assert_eq!(
+            memory.get_blob("v2/devices/a/ops/1.bin").await.unwrap(),
+            b"remote-only"
+        );
+        assert_eq!(local.get_blob("v2/local-dirty").await.unwrap(), b"keep");
+        assert_eq!(before.head_oid, local.capacity().await.unwrap().head_oid);
+        assert!(local.has_pending());
+        let _ = std::fs::remove_dir_all(remote_dir);
+        let _ = std::fs::remove_dir_all(local_dir);
+    }
+
+    #[tokio::test]
+    async fn history_rewrite_refuses_untracked_changes_without_modifying_head() {
+        let dir = tmpdir();
+        let bare = bare_remote();
+        let g = GitBackend::open_or_init(&dir)
+            .unwrap()
+            .with_remote("origin", path_to_file_url(&bare), "aerotab-sync")
+            .unwrap();
+        g.put_blob("v2/test.bin", b"seed").await.unwrap();
+        g.commit_cycle("seed").await.unwrap();
+        g.push_remote().await.unwrap();
+        Repository::open(&dir)
+            .unwrap()
+            .set_head("refs/heads/aerotab-sync")
+            .unwrap();
+        g.fetch_remote().await.unwrap();
+        let repo = Repository::open(&dir).unwrap();
+        let old = repo.head().unwrap().target();
+        std::fs::write(dir.join("unexpected.txt"), b"do not commit").unwrap();
+        assert!(g.squash_orphan("rewrite").await.is_err());
+        assert_eq!(repo.head().unwrap().target(), old);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(bare);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_release_running_worker_lock() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _worker = REPOSITORY_WORKER.lock().unwrap();
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        entered_rx.await.unwrap();
+        waiter.abort();
+        assert!(REPOSITORY_WORKER.try_lock().is_err());
+        release_tx.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_hook_rejection_is_not_successful_push() {
+        let bare = bare_remote();
+        let dir = tmpdir();
+        let g = GitBackend::open_or_init(&dir)
+            .unwrap()
+            .with_remote("origin", path_to_file_url(&bare), "aerotab-sync")
+            .unwrap();
+        g.put_blob("seed.bin", b"seed").await.unwrap();
+        g.commit_cycle("seed").await.unwrap();
+        g.push_remote().await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = bare.join("hooks/pre-receive");
+            std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            g.put_blob("second.bin", b"second").await.unwrap();
+            g.commit_cycle("second").await.unwrap();
+            assert!(
+                validate_push_status(Some("pre-receive hook declined")).is_err(),
+                "receive-pack rejection must reach caller (local libgit2 transport does not execute hooks)"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(bare);
+    }
+
+    #[tokio::test]
+    async fn capacity_measures_worktree_git_ops_and_snapshots_separately() {
+        let dir = tmpdir();
+        let g = GitBackend::open_or_init(&dir).unwrap();
+        g.put_blob("v2/devices/a/ops/1.bin", b"123").await.unwrap();
+        g.put_blob("v2/snapshots/one.bin", b"12345").await.unwrap();
+        g.put_blob("other.bin", b"12").await.unwrap();
+        let stats = g.capacity().await.unwrap();
+        assert_eq!(stats.worktree_bytes, 10);
+        assert_eq!(stats.op_bytes, 3);
+        assert_eq!(stats.snapshot_bytes, 5);
+        assert!(stats.git_bytes > 0);
+        assert_eq!(stats.total_bytes, stats.git_bytes + 10);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn stale_history_lease_rejects_and_restores_local_head() {
+        let bare = bare_remote();
+        let dir = tmpdir();
+        let g = GitBackend::open_or_init(&dir)
+            .unwrap()
+            .with_remote("origin", path_to_file_url(&bare), "aerotab-sync")
+            .unwrap();
+        g.put_blob("v2/test.bin", b"seed").await.unwrap();
+        g.commit_cycle("seed").await.unwrap();
+        g.push_remote().await.unwrap();
+        Repository::open(&dir)
+            .unwrap()
+            .set_head("refs/heads/aerotab-sync")
+            .unwrap();
+        g.fetch_remote().await.unwrap();
+        let old = Repository::open(&dir)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        let peer_dir = tmpdir();
+        let peer = GitBackend::open_or_init(&peer_dir)
+            .unwrap()
+            .with_remote("origin", path_to_file_url(&bare), "aerotab-sync")
+            .unwrap();
+        peer.fetch_remote().await.unwrap();
+        peer.put_blob("v2/peer.bin", b"new").await.unwrap();
+        peer.commit_cycle("peer").await.unwrap();
+        peer.push_remote().await.unwrap();
+        assert!(g.squash_orphan("rewrite").await.is_err());
+        // Concurrent third-party tip is neither old nor our new commit:
+        // retain durable pending state, never blindly roll back.
+        assert!(Repository::open(&dir)
+            .unwrap()
+            .path()
+            .join("aerotab-rewrite-pending.json")
+            .exists());
+        let _ = old;
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(peer_dir);
+        let _ = std::fs::remove_dir_all(bare);
+    }
+
+    #[tokio::test]
+    async fn history_rewrite_refuses_general_purpose_branch() {
+        let dir = tmpdir();
+        let bare = bare_remote();
+        let g = GitBackend::open_or_init(&dir)
+            .unwrap()
+            .with_remote("origin", path_to_file_url(&bare), "main")
+            .unwrap();
+        g.put_blob("v2/test.bin", b"data").await.unwrap();
+        g.commit_cycle("seed").await.unwrap();
+        g.push_remote().await.unwrap();
+        assert!(
+            g.squash_orphan("unsafe").await.is_err(),
+            "must refuse history rewrite outside dedicated sync branch"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(bare);
+    }
+
+    #[tokio::test]
+    async fn failed_commit_keeps_pending_for_retry() {
+        let dir = tmpdir();
+        let g = GitBackend::open_or_init(&dir).unwrap();
+        g.put_blob("v2/test.bin", b"pending").await.unwrap();
+        std::fs::write(dir.join(".git/index.lock"), b"locked").unwrap();
+        assert!(g.commit_cycle("sync: fail").await.is_err());
+        assert!(g.has_pending(), "failed commit must retain pending state");
+        std::fs::remove_file(dir.join(".git/index.lock")).unwrap();
+        assert!(g.commit_cycle("sync: retry").await.unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -1291,8 +1890,15 @@ mod tests {
         let b_dir = tmpdir();
         let b = GitBackend::open_or_init(&b_dir).unwrap();
         let b = b.with_remote("origin", &url, "master").unwrap();
-        let n = b.fetch_remote().await.unwrap();
-        assert!(n >= 1, "expected at least one fast-forwarded commit");
+        let outcome = b.fetch_outcome().await.unwrap();
+        assert!(
+            !outcome.discarded_local_batches,
+            "ordinary fast-forward must preserve oplog progress"
+        );
+        assert!(
+            outcome.commits_applied >= 1,
+            "expected at least one fast-forwarded commit"
+        );
         // The file pushed by A is now visible to B.
         let listed = b.list(Group::Appearance).await.unwrap();
         assert!(!listed.is_empty(), "B should see A's record after fetch");
@@ -1374,14 +1980,21 @@ mod tests {
             a.commit_cycle(&format!("sync: {i}")).await.unwrap();
         }
         assert!(a.commit_count().unwrap() >= 3);
-        let a = a.with_remote("origin", &url, "master").unwrap();
+        let a = a.with_remote("origin", &url, "aerotab-sync").unwrap();
+        {
+            let repo = Repository::open(&a_dir).unwrap();
+            let tip = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.branch("aerotab-sync", &tip, false).unwrap();
+            repo.set_head("refs/heads/aerotab-sync").unwrap();
+        }
         a.push_remote().await.unwrap();
+        a.fetch_remote().await.unwrap();
 
         // Peer B clones the pre-squash history.
         let b_dir = tmpdir();
         let b = GitBackend::open_or_init(&b_dir)
             .unwrap()
-            .with_remote("origin", &url, "master")
+            .with_remote("origin", &url, "aerotab-sync")
             .unwrap();
         assert!(b.fetch_remote().await.unwrap() >= 1);
         assert_eq!(b.list_blobs("v2/devices/a/ops/").await.unwrap().len(), 3);

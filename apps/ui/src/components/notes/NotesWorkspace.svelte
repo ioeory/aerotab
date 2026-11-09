@@ -5,6 +5,8 @@
   import { getNotesStore } from '../../lib/notes.svelte';
   import { nm } from '../../lib/notesMessages';
   import { exportFolder, importNotes } from '../../lib/notesFiles';
+  import Splitter from '../Splitter.svelte';
+  let treeSize = $state(230);
   import NotesTree from './NotesTree.svelte';
   import NoteEditor from './NoteEditor.svelte';
   let { rpc, profiles = [], onError, profileId = null, compact = false }: { rpc: RpcClient; profiles?: StoredProfile[]; onError: (message: string) => void; profileId?: string | null; compact?: boolean } = $props();
@@ -54,10 +56,10 @@
     <button onclick={() => store.flush().then(() => exportFolder(store.snapshot, folder)).catch(report)}>{nm('exportFolder')}</button>
     {#if profileId}<label><input type="checkbox" bind:checked={currentOnly} />{nm('current')}</label>{/if}
   </div>
-  <div class="layout"><aside>
+  <div class="layout"><aside style={compact ? `height:${treeSize}px;max-height:65%;` : `width:${treeSize}px;max-width:65%;`}>
     <input class="search" aria-label={nm('search')} placeholder={nm('search')} bind:value={query} />
     <NotesTree snapshot={store.snapshot} {selected} {folder} {query} profileId={currentOnly ? profileId : null} onselect={id => { void select(id); }} onfolder={id => folder = id} onaction={(a, id, f) => { void action(a, id, f).catch(report); }} />
-  </aside><main>{#if selectedNote}<NoteEditor {store} note={selectedNote} {profiles} {onError} />{:else}<p class="empty">{nm('empty')}</p>{/if}</main></div>
+  </aside><Splitter axis={compact ? 'y' : 'x'} value={treeSize} min={100} max={600} label={nm('title')} onChange={v=>treeSize=v} storageKey={compact ? 'notes.compact.tree' : 'notes.tree'} /><main>{#if selectedNote}<NoteEditor {store} note={selectedNote} {profiles} {onError} />{:else}<p class="empty">{nm('empty')}</p>{/if}</main></div>
   {#if dialog}<div class="dialog" role="dialog" aria-modal="true" aria-label={dialog.action === 'remove' ? nm('impact') : nm('edit')}>
     <form onsubmit={event => { event.preventDefault(); void submit(); }}>
       {#if dialog.action === 'remove'}<h3>{nm('impact')}</h3><ul>{#each dialog.titles ?? [] as title}<li>{title}</li>{/each}</ul>
@@ -70,13 +72,13 @@
   </div>{/if}
 </section>
 <style>
-  .workspace { display:flex; flex-direction:column; height:100%; min-height:0; position:relative; color:var(--fg-primary, inherit); }
+  .workspace { display:flex; flex-direction:column; height:100%; min-height:0; position:relative; color:var(--color-fg); }
   header { padding:14px 16px 6px; } h2 { margin:0 0 5px; font-size:18px; } header p { margin:0; opacity:.65; font-size:12px; }
   .commands { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:10px 16px; }
-  button,input,select { color:inherit; background:var(--bg-secondary,#202330); border:1px solid var(--border,#414656); border-radius:5px; padding:6px 9px; }
-  button { cursor:pointer; font-size:12px; } .layout { display:flex; flex:1; min-height:0; } aside { width:230px; flex-shrink:0; overflow:auto; border-right:1px solid var(--border,#414656); } main { flex:1; min-width:0; min-height:0; }
+  button,input,select { color:inherit; background:var(--color-panel-2); border:1px solid var(--color-border); border-radius:5px; padding:6px 9px; }
+  button { cursor:pointer; font-size:12px; } .layout { display:flex; flex:1; min-height:0; } aside { width:230px; flex-shrink:0; overflow:auto; border-right:1px solid var(--color-border); } main { flex:1; min-width:0; min-height:0; }
   .search { margin:8px; width:calc(100% - 16px); box-sizing:border-box; } .empty { padding:24px; opacity:.6; }
-  .dialog { position:absolute; inset:0; z-index:10; background:#0009; display:flex; align-items:center; justify-content:center; padding:16px; }
-  form { background:var(--bg-secondary,#202330); padding:20px; border:1px solid var(--border,#414656); border-radius:9px; max-height:90%; overflow:auto; width:min(420px,100%); } form label { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; } footer { display:flex; justify-content:flex-end; gap:8px; }
-  .compact .layout { flex-direction:column; } .compact aside { width:100%; max-height:190px; border-right:0; border-bottom:1px solid var(--border,#414656); } .compact header { padding:8px; } .compact .commands { padding:8px; } .compact main { overflow:auto; }
+  .dialog { position:absolute; inset:0; z-index:10; background:var(--color-overlay); display:flex; align-items:center; justify-content:center; padding:16px; }
+  form { background:var(--color-panel-2); padding:20px; border:1px solid var(--color-border); border-radius:9px; max-height:90%; overflow:auto; width:min(420px,100%); } form label { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; } footer { display:flex; justify-content:flex-end; gap:8px; }
+  .compact .layout { flex-direction:column; } .compact aside { width:100%; border-right:0; border-bottom:1px solid var(--color-border); } .compact header { padding:8px; } .compact .commands { padding:8px; } .compact main { overflow:auto; }
 </style>

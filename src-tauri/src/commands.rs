@@ -161,6 +161,15 @@ struct OpenLocalResult {
     meta: SessionMeta,
 }
 
+#[derive(Default)]
+pub struct SyncApproval {
+    generation: Uuid,
+    target: Option<String>,
+    binding: Option<String>,
+    pending: Option<(Uuid, Vec<Group>, Value)>,
+    approved: Option<Vec<Group>>,
+}
+
 /// Process-wide session state.
 #[derive(Default)]
 pub struct AppState {
@@ -170,6 +179,11 @@ pub struct AppState {
     /// Configured sync engine, if any. Set via `sync.configureWebdav` /
     /// `sync.configureGit`.
     pub sync: Mutex<Option<Arc<SyncEngine>>>,
+    /// Serialize configuration, reconciliation and destructive maintenance.
+    pub sync_operation: Mutex<()>,
+    pub sync_migration: Mutex<Option<(Uuid, String)>>,
+    pub sync_approval: Mutex<SyncApproval>,
+    pub sync_approval_store: Mutex<Option<SettingsStore>>,
     /// Handle for the auto-sync background task, if running.
     pub sync_auto: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Auto-sync interval (ms) recorded by `sync.startAutoSync`.
@@ -186,6 +200,8 @@ pub struct AppState {
     pub profiles: Mutex<Option<ProfileStore>>,
     pub notes: Mutex<Option<crate::notes::NotesStore>>,
     pub scripts: Mutex<Option<Arc<crate::scripts::ScriptsService>>>,
+    pub mcp_batches: crate::mcp::batch::BatchRuntime,
+    pub ai: crate::ai::AiRuntime,
     pub network_resources: Mutex<Option<crate::network_resources::NetworkResourceStore>>,
     pub forwarding: crate::network_resources::ForwardingRuntime,
     /// Most recently configured Git sync backend; retained so the engine
@@ -308,6 +324,7 @@ fn coalesce_poll_output_chunks(raw_chunks: Vec<Vec<u8>>) -> Vec<String> {
 
 /// Registers every method on `dispatcher`, capturing `state` by clone.
 pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    crate::ai::register(dispatcher, state.clone());
     {
         dispatcher.register("core.version", |_p| async move {
             Ok(json!({ "version": crate::CORE_VERSION }))
@@ -767,6 +784,8 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
 
 #[derive(Debug, Deserialize)]
 struct ConfigureWebDavParams {
+    #[serde(default = "default_sync_protocol")]
+    protocol: u32,
     base_url: String,
     #[serde(default)]
     user: Option<String>,
@@ -788,6 +807,8 @@ struct ConfigureWebDavParams {
 
 #[derive(Debug, Deserialize)]
 struct ConfigureGitParams {
+    #[serde(default = "default_sync_protocol")]
+    protocol: u32,
     repo_path: String,
     master_password: String,
     #[serde(default)]
@@ -826,6 +847,10 @@ struct ConfigureGitParams {
     oauth_provider: Option<String>,
 }
 
+fn default_sync_protocol() -> u32 {
+    3
+}
+
 fn default_remote_name() -> String {
     "origin".into()
 }
@@ -844,6 +869,8 @@ struct StartAutoSyncParams {
 
 #[derive(Debug, Default, Deserialize)]
 struct SyncNowParams {
+    #[serde(default)]
+    preview_token: Option<Uuid>,
     /// Optional selected sync groups. Empty means all groups.
     #[serde(default)]
     groups: Vec<Group>,
@@ -857,7 +884,10 @@ fn selected_sync_groups(groups: Vec<Group>) -> Vec<Group> {
         }
     }
     if out.is_empty() {
-        Group::ALL.to_vec()
+        Group::ALL
+            .into_iter()
+            .filter(|g| *g != Group::Notes)
+            .collect()
     } else {
         out
     }
@@ -939,6 +969,32 @@ async fn require_profiles(state: &AppState) -> Result<ProfileStore, RpcError> {
 }
 
 fn register_resources(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    crate::mcp::batch::register_rpc(dispatcher, state.clone());
+    {
+        let st = state.clone();
+        dispatcher.register("notes.editState", move |params| {
+            let st = st.clone();
+            async move {
+                let owner = params["owner"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() < 128)
+                    .ok_or_else(|| invalid_params("editor owner required"))?;
+                let dirty = params["dirty"]
+                    .as_bool()
+                    .ok_or_else(|| invalid_params("dirty required"))?;
+                let store = st
+                    .notes
+                    .lock()
+                    .await
+                    .clone()
+                    .ok_or_else(|| internal("notes store unavailable"))?;
+                store
+                    .edit_state(owner.to_string(), dirty)
+                    .map_err(|e| internal(e.to_string()))?;
+                Ok(json!({"paused":store.sync_paused()}))
+            }
+        });
+    }
     for method in [
         "notes.list",
         "notes.put",
@@ -950,6 +1006,7 @@ fn register_resources(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register(method, move |params| {
             let st = st.clone();
             async move {
+                let _operation = st.sync_operation.lock().await;
                 let store = st
                     .notes
                     .lock()
@@ -973,6 +1030,7 @@ fn register_resources(dispatcher: &Dispatcher, state: Arc<AppState>) {
         "scripts.get",
         "scripts.put",
         "scripts.delete",
+        "scripts.preview",
         "scripts.prepare",
         "scripts.run",
         "scripts.tasks",
@@ -1100,10 +1158,13 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let dir = std::path::Path::new(&p.path)
                     .parent()
                     .ok_or_else(|| invalid_params("invalid profile path"))?;
-                *st.notes.lock().await =
-                    Some(crate::notes::NotesStore::open(dir.join("notes")).map_err(internal)?);
+                *st.notes.lock().await = Some(
+                    crate::notes::NotesStore::open(dir.join("notes"))
+                        .map_err(|e| internal(e.to_string()))?,
+                );
                 *st.scripts.lock().await = Some(Arc::new(crate::scripts::ScriptsService::new(
-                    crate::scripts::ScriptsStore::open(dir.join("scripts")).map_err(internal)?,
+                    crate::scripts::ScriptsStore::open(dir.join("scripts"))
+                        .map_err(|e| internal(e.to_string()))?,
                 )));
                 *st.network_resources.lock().await = Some(
                     crate::network_resources::NetworkResourceStore::open(dir)
@@ -1187,7 +1248,7 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     dependencies.extend(
                         notes
                             .profile_references(&p.id.to_string())
-                            .map_err(internal)?,
+                            .map_err(|e| internal(e.to_string()))?,
                     );
                 }
                 if let Some(scripts) = st.scripts.lock().await.clone() {
@@ -1195,7 +1256,7 @@ fn register_profiles(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         scripts
                             .store
                             .references(&p.id.to_string())
-                            .map_err(internal)?,
+                            .map_err(|e| internal(e.to_string()))?,
                     );
                 }
                 if let Some(network) = st.network_resources.lock().await.clone() {
@@ -3002,6 +3063,9 @@ fn register_settings(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let p: KeyParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let store = require_settings(&st).await?;
+                if p.key == "ai" {
+                    crate::ai::migrate(&store).map_err(internal)?;
+                }
                 let v = store.get(&p.key).map_err(|e| internal(e.to_string()))?;
                 Ok(json!({ "value": v }))
             }
@@ -3014,6 +3078,11 @@ fn register_settings(dispatcher: &Dispatcher, state: Arc<AppState>) {
             async move {
                 let p: SetParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                if p.key == "ai" || p.key.starts_with("ai.") {
+                    return Err(invalid_params(
+                        "AI configuration must use device-local ai.config / keyring RPCs",
+                    ));
+                }
                 let store = require_settings(&st).await?;
                 store
                     .set(&p.key, &p.value)
@@ -3028,7 +3097,14 @@ fn register_settings(dispatcher: &Dispatcher, state: Arc<AppState>) {
             let st = st.clone();
             async move {
                 let store = require_settings(&st).await?;
-                let entries = store.all().map_err(|e| internal(e.to_string()))?;
+                let mut entries = store.all().map_err(|e| internal(e.to_string()))?;
+                for entry in &mut entries {
+                    if entry.key == "ai" {
+                        if let Some(value) = entry.value.as_object_mut() {
+                            value.remove("apiKey");
+                        }
+                    }
+                }
                 serde_json::to_value(entries).map_err(|e| internal(e.to_string()))
             }
         });
@@ -3220,14 +3296,32 @@ fn register_plugins(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
 }
 
+#[path = "sync/cloud_commands.rs"]
+mod cloud_commands;
+#[path = "sync/maintenance_commands.rs"]
+mod maintenance_commands;
+#[path = "sync/projection.rs"]
+mod projection;
+
 fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    cloud_commands::register(dispatcher, state.clone());
+    maintenance_commands::register(dispatcher, state.clone());
     {
         let st = state.clone();
         dispatcher.register("sync.configureWebdav", move |params| {
             let st = st.clone();
             async move {
+                let _operation = st.sync_operation.lock().await;
                 let p: ConfigureWebDavParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let target = format!(
+                    "webdav:{:?}:{:?}:{:?}",
+                    p.base_url,
+                    p.user,
+                    p.password
+                        .as_ref()
+                        .map(|s| Uuid::new_v5(&Uuid::NAMESPACE_OID, s.as_bytes()))
+                );
                 let backend = Arc::new(WebDavBackend::with_auth(p.base_url, p.user, p.password));
                 let blobs: Arc<dyn BlobStore> = backend.clone();
                 let params_kdf = if p.test_cheap_kdf {
@@ -3235,34 +3329,77 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 } else {
                     KdfParams::DEFAULT
                 };
-                let device_id = p.device_id.unwrap_or_else(Uuid::new_v4);
+                let device_id = if let Some(dir) = p.state_dir.as_ref() {
+                    crate::sync::persistence::device_identity(
+                        std::path::Path::new(dir),
+                        p.device_id,
+                    )
+                    .map_err(|e| internal(e.to_string()))?
+                } else if let Some(settings) = st.settings.lock().await.as_ref() {
+                    let existing = settings
+                        .local_get("sync.deviceId")
+                        .map_err(|e| internal(e.to_string()))?;
+                    if let Some(value) = existing {
+                        serde_json::from_value(value)
+                            .map_err(|e| internal(format!("invalid device identity: {e}")))?
+                    } else {
+                        let id = p.device_id.unwrap_or_else(Uuid::new_v4);
+                        settings
+                            .local_set("sync.deviceId", &json!(id))
+                            .map_err(|e| internal(e.to_string()))?;
+                        id
+                    }
+                } else {
+                    p.device_id.unwrap_or_else(Uuid::new_v4)
+                };
                 let password = p.master_password.into_bytes();
                 let mut engine = SyncEngine::new(device_id, password.clone(), params_kdf, backend);
-                if let Some(dir) = p.state_dir {
+                if let Some(dir) = p.state_dir.as_ref() {
                     let store =
-                        Arc::new(SledStore::open(&dir).map_err(|e| internal(e.to_string()))?);
+                        Arc::new(SledStore::open(dir).map_err(|e| internal(e.to_string()))?);
                     engine = engine
                         .with_store(store)
                         .await
                         .map_err(|e| internal(e.to_string()))?;
                 }
-                let oplog = Arc::new(OplogDriver::new(
-                    blobs,
-                    device_id,
-                    password.clone(),
-                    params_kdf,
-                ));
-                // Local sled already holding v1 records → seed a protocol-2 snapshot.
-                if !engine.is_empty().await {
-                    let _ = oplog.compact_now(&engine, &Group::ALL).await;
+                if p.state_dir.is_none() {
+                    if let Some(settings) = st.settings.lock().await.clone() {
+                        engine = engine
+                            .with_store(Arc::new(crate::sync::persistence::SettingsSyncStore(
+                                settings,
+                            )))
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                    }
                 }
+                let mut driver = OplogDriver::new(blobs, device_id, password.clone(), params_kdf)
+                    .with_protocol(p.protocol)
+                    .map_err(|e| invalid_params(e.to_string()))?
+                    .with_target(&target);
+                if let Some(dir) = p.state_dir.as_ref() {
+                    driver = driver
+                        .with_state_file(std::path::Path::new(dir).join("oplog.json"))
+                        .await
+                        .map_err(|e| internal(e.to_string()))?;
+                }
+                if p.state_dir.is_none() {
+                    if let Some(settings) = st.settings.lock().await.clone() {
+                        driver = driver
+                            .with_settings(settings)
+                            .map_err(|e| internal(e.to_string()))?;
+                    }
+                }
+                let oplog = Arc::new(driver);
+                // Configuration is local only; never publish a snapshot before
+                // fetching and reconciling the remote.
                 stop_auto(&st).await;
+                configure_sync_approval(&st, &target, p.state_dir.as_deref(), &oplog).await?;
                 *st.sync.lock().await = Some(Arc::new(engine));
                 *st.sync_kind.lock().await = Some("webdav");
                 *st.git_backend.lock().await = None;
                 *st.oplog.lock().await = Some(oplog);
                 *st.oplog_last.lock().await = None;
-                Ok(json!({ "device_id": device_id, "protocol": 2 }))
+                Ok(json!({ "device_id": device_id, "protocol": p.protocol }))
             }
         });
     }
@@ -3271,6 +3408,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("sync.configureGit", move |params| {
             let st = st.clone();
             async move {
+                let _operation = st.sync_operation.lock().await;
                 let p: ConfigureGitParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let mut backend =
@@ -3320,7 +3458,8 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         }
                     }
                 }
-                *st.git_backend.lock().await = Some(backend.clone());
+                let configured_backend = backend.clone();
+                let target = backend.target_identity();
                 let blobs: Arc<dyn BlobStore> = Arc::new(backend.clone());
                 let backend_dyn: Arc<dyn crate::sync::SyncBackend> = Arc::new(backend);
                 let params_kdf = if p.test_cheap_kdf {
@@ -3328,33 +3467,83 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 } else {
                     KdfParams::DEFAULT
                 };
-                let device_id = p.device_id.unwrap_or_else(Uuid::new_v4);
+                let device_id = if let Some(dir) = p.state_dir.as_ref() {
+                    crate::sync::persistence::device_identity(
+                        std::path::Path::new(dir),
+                        p.device_id,
+                    )
+                    .map_err(|e| internal(e.to_string()))?
+                } else if let Some(settings) = st.settings.lock().await.as_ref() {
+                    let existing = settings
+                        .local_get("sync.deviceId")
+                        .map_err(|e| internal(e.to_string()))?;
+                    if let Some(value) = existing {
+                        serde_json::from_value(value)
+                            .map_err(|e| internal(format!("invalid device identity: {e}")))?
+                    } else {
+                        let id = p.device_id.unwrap_or_else(Uuid::new_v4);
+                        settings
+                            .local_set("sync.deviceId", &json!(id))
+                            .map_err(|e| internal(e.to_string()))?;
+                        id
+                    }
+                } else {
+                    p.device_id.unwrap_or_else(Uuid::new_v4)
+                };
                 let password = p.master_password.into_bytes();
                 let mut engine =
                     SyncEngine::new(device_id, password.clone(), params_kdf, backend_dyn);
-                if let Some(dir) = p.state_dir {
+                if let Some(dir) = p.state_dir.as_ref() {
                     let store =
-                        Arc::new(SledStore::open(&dir).map_err(|e| internal(e.to_string()))?);
+                        Arc::new(SledStore::open(dir).map_err(|e| internal(e.to_string()))?);
                     engine = engine
                         .with_store(store)
                         .await
                         .map_err(|e| internal(e.to_string()))?;
                 }
-                let oplog = Arc::new(OplogDriver::new(
-                    blobs,
-                    device_id,
-                    password.clone(),
-                    params_kdf,
-                ));
-                if !engine.is_empty().await {
-                    let _ = oplog.compact_now(&engine, &Group::ALL).await;
+                if p.state_dir.is_none() {
+                    if let Some(settings) = st.settings.lock().await.clone() {
+                        engine = engine
+                            .with_store(Arc::new(crate::sync::persistence::SettingsSyncStore(
+                                settings,
+                            )))
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                    }
                 }
+                let mut driver = OplogDriver::new(blobs, device_id, password.clone(), params_kdf)
+                    .with_protocol(p.protocol)
+                    .map_err(|e| invalid_params(e.to_string()))?
+                    .with_target(&target);
+                if let Some(dir) = p.state_dir.as_ref() {
+                    driver = driver
+                        .with_state_file(std::path::Path::new(dir).join("oplog.json"))
+                        .await
+                        .map_err(|e| internal(e.to_string()))?;
+                }
+                if p.state_dir.is_none() {
+                    if let Some(settings) = st.settings.lock().await.clone() {
+                        driver = driver
+                            .with_settings(settings)
+                            .map_err(|e| internal(e.to_string()))?;
+                    }
+                }
+                let oplog = Arc::new(driver);
+                // Git acknowledgement happens only after commit + remote push.
+                let oplog = Arc::new(
+                    Arc::try_unwrap(oplog)
+                        .map_err(|_| internal("oplog shared during configure"))?
+                        .defer_upload_confirmation(),
+                );
+                // Snapshot publication belongs to an explicit reconciled cycle.
                 stop_auto(&st).await;
+                configure_sync_approval(&st, &target, p.state_dir.as_deref(), &oplog).await?;
                 *st.sync.lock().await = Some(Arc::new(engine));
                 *st.sync_kind.lock().await = Some("git");
+                *st.git_backend.lock().await = Some(configured_backend);
                 *st.oplog.lock().await = Some(oplog);
                 *st.oplog_last.lock().await = None;
-                Ok(json!({ "device_id": device_id, "protocol": 2 }))
+                Ok(json!({ "device_id": device_id, "protocol": p.protocol }))
             }
         });
     }
@@ -3363,6 +3552,8 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("sync.put", move |params| {
             let st = st.clone();
             async move {
+                let _operation = st.sync_operation.lock().await;
+                st.sync_approval.lock().await.pending = None;
                 let p: SyncPutParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let bytes = BASE64
@@ -3381,6 +3572,8 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("sync.delete", move |params| {
             let st = st.clone();
             async move {
+                let _operation = st.sync_operation.lock().await;
+                st.sync_approval.lock().await.pending = None;
                 let p: SyncRecordParams =
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
                 let eng = require_engine(&st).await?;
@@ -3489,19 +3682,19 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?
                 };
                 let groups = selected_sync_groups(p.groups);
-                let eng = require_engine(&st).await?;
-                let (results, bridge_notes) = match run_sync_now_cycle(&st, &eng, &groups).await {
-                    Ok(v) => {
-                        let at_ms = now_ms();
-                        *st.sync_last_ms.lock().await = Some(at_ms);
-                        record_sync_history_ok(&st, "manual", &groups, &v.0, at_ms).await;
-                        v
-                    }
-                    Err(e) => {
-                        record_sync_history_err(&st, "manual", &groups, &e).await;
-                        return Err(e);
-                    }
-                };
+                let (results, bridge_notes) =
+                    match run_sync_now_cycle(&st, &groups, p.preview_token).await {
+                        Ok(v) => {
+                            let at_ms = now_ms();
+                            *st.sync_last_ms.lock().await = Some(at_ms);
+                            record_sync_history_ok(&st, "manual", &groups, &v.0, at_ms).await;
+                            v
+                        }
+                        Err(e) => {
+                            record_sync_history_err(&st, "manual", &groups, &e).await;
+                            return Err(e);
+                        }
+                    };
                 let mut obj: serde_json::Map<String, Value> = results
                     .into_iter()
                     .map(|(g, s)| {
@@ -3534,15 +3727,16 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 if p.interval_ms == 0 {
                     return Err(invalid_params("interval_ms must be > 0"));
                 }
-                let eng = require_engine(&st).await?;
+                require_engine(&st).await?;
+                require_completed_sync_setup(&st, &selected_sync_groups(p.groups.clone()), None)
+                    .await?;
                 stop_auto(&st).await;
                 let interval = std::time::Duration::from_millis(p.interval_ms);
                 let groups = selected_sync_groups(p.groups);
                 let st_immediate = st.clone();
-                let eng_immediate = eng.clone();
                 let groups_now = groups.clone();
                 // Run one cycle immediately so users see activity without waiting a full interval.
-                match run_sync_now_cycle(&st_immediate, &eng_immediate, &groups_now).await {
+                match run_sync_now_cycle(&st_immediate, &groups_now, None).await {
                     Ok((results, _)) => {
                         let at_ms = now_ms();
                         *st_immediate.sync_last_ms.lock().await = Some(at_ms);
@@ -3563,7 +3757,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     ticker.tick().await;
                     loop {
                         ticker.tick().await;
-                        match run_sync_now_cycle(&st_tick, &eng, &groups).await {
+                        match run_sync_now_cycle(&st_tick, &groups, None).await {
                             Ok((results, _)) => {
                                 let at_ms = now_ms();
                                 *st_tick.sync_last_ms.lock().await = Some(at_ms);
@@ -3609,11 +3803,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let last_sync_ms = latest_successful_sync_ms(&st).await;
                 let auto_interval_ms = *st.sync_auto_interval_ms.lock().await;
                 let auto_running = st.sync_auto.lock().await.is_some();
-                let protocol = if st.oplog.lock().await.is_some() {
-                    2
-                } else {
-                    1
-                };
+                let protocol = st.oplog.lock().await.as_ref().map(|d|d.protocol()).unwrap_or(1);
                 let cursors = if let Some(oplog) = st.oplog.lock().await.as_ref() {
                     Some(
                         oplog
@@ -3635,6 +3825,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     "lastSyncMs": last_sync_ms,
                     "autoIntervalMs": auto_interval_ms,
                     "autoRunning": auto_running,
+                    "notesPausedDirty": st.notes.lock().await.as_ref().is_some_and(|s|s.sync_paused()),
                     "protocol": protocol,
                     "cursors": cursors,
                     "ownSeq": own_seq,
@@ -3645,9 +3836,54 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
     }
     {
         let st = state.clone();
+        dispatcher.register("sync.capacity", move |_params| {
+            let st = st.clone();
+            async move {
+                let _operation = st.sync_operation.lock().await;
+                if let Some(git) = st.git_backend.lock().await.clone() {
+                    return serde_json::to_value(git.capacity().await.map_err(|e| internal(e.to_string()))?).map_err(|e| internal(e.to_string()));
+                }
+                let driver = st.oplog.lock().await.clone().ok_or_else(|| invalid_params("sync not configured"))?;
+                let files = driver.blobs().list_blobs("").await.map_err(|e| internal(e.to_string()))?;
+                let total: u64 = files.iter().map(|f| f.size).sum();
+                let ops: Vec<_> = files.iter().filter(|f| f.path.contains("/ops/")).collect();
+                let snaps: Vec<_> = files.iter().filter(|f| f.path.contains("/snapshots/")).collect();
+                Ok(json!({"worktreeBytes": total, "gitBytes": null, "totalBytes": total,
+                    "opBytes": ops.iter().map(|f| f.size).sum::<u64>(), "opFiles": ops.len(),
+                    "snapshotBytes": snaps.iter().map(|f| f.size).sum::<u64>(), "snapshotFiles": snaps.len(),
+                    "commits": null, "historyRewriteAllowed": false, "scope": "remote listed payload bytes"}))
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("sync.rewriteHistory", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P { confirmation: String, expected_oid: String }
+                let p: P = serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                if p.confirmation != "REWRITE SYNC HISTORY" { return Err(invalid_params("explicit history rewrite confirmation required")); }
+                let _operation = st.sync_operation.lock().await;
+                let git = st.git_backend.lock().await.clone().ok_or_else(|| invalid_params("Git backend required"))?;
+                let before = git.capacity().await.map_err(|e| internal(e.to_string()))?;
+                if !before.history_rewrite_allowed || before.head_oid.as_deref() != Some(p.expected_oid.as_str()) {
+                    return Err(invalid_params("branch or expected OID changed; refresh capacity and reconcile first"));
+                }
+                // No implicit fetch: the confirmed local tip must be the fetched,
+                // reconciled remote tip, and push checks its live advertised OID.
+                git.squash_orphan("sync: explicit history maintenance").await.map_err(|e| internal(e.to_string()))?;
+                Ok(json!({"rewritten": true, "capacity": git.capacity().await.map_err(|e| internal(e.to_string()))?}))
+            }
+        });
+    }
+    {
+        let st = state.clone();
         dispatcher.register("sync.compact", move |params| {
             let st = st.clone();
             async move {
+                let _operation = st.sync_operation.lock().await;
                 #[derive(Deserialize, Default)]
                 #[serde(rename_all = "camelCase")]
                 struct P {
@@ -3659,7 +3895,9 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 } else {
                     serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?
                 };
+                projection::recover_projection(&st).await?;
                 let eng = require_engine(&st).await?;
+                let staged = eng.preview_copy().await;
                 let oplog = st
                     .oplog
                     .lock()
@@ -3676,6 +3914,7 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                                 "Shortcuts" => Some(Group::Shortcuts),
                                 "PluginCfg" => Some(Group::PluginCfg),
                                 "Credentials" => Some(Group::Credentials),
+                                "Notes" => Some(Group::Notes),
                                 _ => None,
                             })
                         })
@@ -3685,18 +3924,83 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 if groups.is_empty() {
                     return Err(invalid_params("no valid groups"));
                 }
+                if oplog.protocol() != 3 {
+                    return Err(invalid_params(
+                        "explicit migration to v3 required for compaction",
+                    ));
+                }
+                require_completed_sync_setup(&st, &groups, None).await?;
+                if groups.contains(&Group::Notes)
+                    && st
+                        .notes
+                        .lock()
+                        .await
+                        .as_ref()
+                        .is_some_and(|n| n.sync_paused())
+                {
+                    return Err(invalid_params("save Notes drafts before compaction"));
+                }
+                if let Some(git) = st.git_backend.lock().await.clone() {
+                    if git
+                        .fetch_outcome()
+                        .await
+                        .map_err(|e| internal(e.to_string()))?
+                        .discarded_local_batches
+                    {
+                        oplog
+                            .reconcile_transport_change()
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                    }
+                }
+                if let (Ok(profiles), Ok(settings)) =
+                    (require_profiles(&st).await, require_settings(&st).await)
+                {
+                    crate::sync::bridge::export_locals(
+                        &profiles,
+                        &settings,
+                        st.vault.lock().await.as_ref(),
+                        &st.wasm_host.list().await,
+                        &staged,
+                        &groups,
+                    )
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+                }
+                if groups.contains(&Group::Notes) {
+                    if let Some(notes) = st.notes.lock().await.as_ref() {
+                        crate::sync::bridge::preview_notes(notes, &staged)
+                            .await
+                            .map_err(|e| internal(e.to_string()))?;
+                    }
+                }
+                let (candidate, cursors) = oplog
+                    .maintenance_candidate(&staged, &groups)
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+                projection::commit_projection(&st, &eng, &candidate, &groups, false).await?;
+                oplog
+                    .accept_maintenance_coverage(cursors)
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+                let eng = require_engine(&st).await?;
                 let ok = oplog
                     .compact_now(&eng, &groups)
                     .await
                     .map_err(|e| internal(e.to_string()))?;
-                if let Some(g) = st.git_backend.lock().await.clone() {
-                    let msg = format!("sync({}): compact", eng.device_id());
-                    g.commit_cycle(&msg)
+                if let Some(git) = st.git_backend.lock().await.clone() {
+                    git.commit_cycle("sync: v3 compaction")
                         .await
                         .map_err(|e| internal(e.to_string()))?;
-                    g.push_remote().await.map_err(|e| internal(e.to_string()))?;
+                    git.push_remote()
+                        .await
+                        .map_err(|e| internal(e.to_string()))?;
+                    oplog
+                        .confirm_uploaded()
+                        .await
+                        .map_err(|e| internal(e.to_string()))?;
                 }
-                Ok(json!({ "compacted": ok }))
+                Ok(json!({"compacted":ok}))
             }
         });
     }
@@ -3705,47 +4009,31 @@ fn register_sync(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("sync.purgeV1", move |_params| {
             let st = st.clone();
             async move {
-                // Delete legacy per-record SyncBackend blobs (`<group>/<uuid>.bin`).
-                // Protocol-2 data lives under `v2/` and is left untouched.
-                let blobs = st
-                    .oplog
-                    .lock()
-                    .await
-                    .as_ref()
-                    .map(|o| o.blobs())
-                    .ok_or_else(|| invalid_params("oplog not configured"))?;
-                let mut deleted = 0usize;
+                let _operation = st.sync_operation.lock().await;
+                let engine=require_engine(&st).await?;
+                let driver=st.oplog.lock().await.clone().ok_or_else(||invalid_params("sync not configured"))?;
+                if driver.protocol()!=3 {return Err(invalid_params("verified v3 migration required"));}
+                let blobs=driver.blobs();
+                // Compare each legacy payload/tombstone with a fresh engine
+                // reconstructed from durable v3 snapshots and operation logs.
+                let durable=driver.empty_engine();
+                let recovered=driver.readonly_v3_engine(&durable).await.map_err(|e|internal(e.to_string()))?;
+                let mut verified=Vec::new();
                 for group in Group::ALL {
-                    let prefix = format!("{}/", group.as_str());
-                    let listed = blobs
-                        .list_blobs(&prefix)
-                        .await
-                        .map_err(|e| internal(e.to_string()))?;
-                    for meta in listed {
-                        if !meta.path.ends_with(".bin") || meta.path.starts_with("v2/") {
-                            continue;
-                        }
-                        // Only delete direct children of the group dir.
-                        let rest = meta.path.strip_prefix(&prefix).unwrap_or("");
-                        if rest.contains('/') {
-                            continue;
-                        }
-                        blobs
-                            .delete_blob(&meta.path)
-                            .await
-                            .map_err(|e| internal(e.to_string()))?;
-                        deleted += 1;
+                    let records:std::collections::HashMap<_,_>=recovered.snapshot_group(group).await.into_iter().collect();
+                    for blob in blobs.list_blobs(&format!("{}/",group.as_str())).await.map_err(|e|internal(e.to_string()))? {
+                        let Some(id)=blob.path.strip_prefix(&format!("{}/",group.as_str())).and_then(|s|s.strip_suffix(".bin")).and_then(|s|Uuid::parse_str(s).ok()).map(crate::sync::RecordId) else {continue;};
+                        let bytes=blobs.get_blob(&blob.path).await.map_err(|e|internal(e.to_string()))?;
+                        let old=engine.decode_legacy(&bytes).map_err(|e|internal(e.to_string()))?;
+                        let new=records.get(&id).ok_or_else(||invalid_params("legacy record absent from durable v3 recovery"))?;
+                        if old.payload!=new.payload || old.tombstone!=new.tombstone {return Err(invalid_params("legacy payload/tombstone differs from durable v3; no files deleted"));}
+                        verified.push((blob.path,bytes));
                     }
                 }
-                if let Some(g) = st.git_backend.lock().await.clone() {
-                    if deleted > 0 {
-                        g.commit_cycle("sync: purge legacy v1 records")
-                            .await
-                            .map_err(|e| internal(e.to_string()))?;
-                        g.push_remote().await.map_err(|e| internal(e.to_string()))?;
-                    }
-                }
-                Ok(json!({ "deleted": deleted }))
+                for (path,bytes) in &verified {if blobs.get_blob(path).await.map_err(|e|internal(e.to_string()))?!=*bytes {return Err(invalid_params("legacy changed during verification; retry"));}}
+                for (path,_) in &verified {blobs.delete_blob(path).await.map_err(|e|internal(e.to_string()))?;}
+                if let Some(git)=st.git_backend.lock().await.clone() {git.commit_cycle("sync: verified legacy purge (history retained)").await.map_err(|e|internal(e.to_string()))?;git.push_remote().await.map_err(|e|internal(e.to_string()))?;}
+                Ok(json!({"deleted":verified.len(),"gitHistoryUnchanged":true}))
             }
         });
     }
@@ -3811,10 +4099,150 @@ async fn record_sync_history_err(st: &AppState, trigger: &str, groups: &[Group],
 }
 
 /// Export locals → fetch → reconcile → import → push (Git).
+async fn invalidate_sync_approval(st: &AppState) {
+    if let Some(store) = st.sync_approval_store.lock().await.as_ref() {
+        let _ = store.local_set("sync.approval", &Value::Null);
+    }
+    *st.sync_approval.lock().await = SyncApproval {
+        generation: Uuid::new_v4(),
+        ..Default::default()
+    };
+}
+async fn configure_sync_approval(
+    st: &AppState,
+    target: &str,
+    state_dir: Option<&str>,
+    driver: &OplogDriver,
+) -> Result<(), RpcError> {
+    let target = Uuid::new_v5(&Uuid::NAMESPACE_URL, target.as_bytes()).to_string();
+    let target = target.as_str();
+    let store = if let Some(settings) = st.settings.lock().await.clone() {
+        Some(settings)
+    } else if let Some(dir) = state_dir {
+        Some(
+            SettingsStore::open(std::path::Path::new(dir).join("approval-local"))
+                .map_err(|e| internal(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let saved = store
+        .as_ref()
+        .map(|s| {
+            s.local_get("sync.approval")
+                .map_err(|e| internal(e.to_string()))
+        })
+        .transpose()?
+        .flatten();
+    let binding = Some(driver.approval_binding());
+    let blocked = driver
+        .maintenance_journal()
+        .map_err(|e| internal(e.to_string()))?
+        .is_some_and(|v| !v.is_null());
+    let approved = saved
+        .as_ref()
+        .filter(|v| {
+            !blocked && v["schema"] == 2 && v["target"] == target && v["binding"] == json!(binding)
+        })
+        .and_then(|v| serde_json::from_value::<Vec<Group>>(v["groups"].clone()).ok());
+    // A successful switch destroys old consent; returning to an old target must
+    // not resurrect it. Caller cannot provide an approval in settings.sync.
+    if approved.is_none() {
+        if let Some(s) = &store {
+            s.local_set("sync.approval", &Value::Null)
+                .map_err(|e| internal(e.to_string()))?;
+        }
+    }
+    *st.sync_approval_store.lock().await = store;
+    *st.sync_approval.lock().await = SyncApproval {
+        generation: Uuid::new_v4(),
+        target: Some(target.to_string()),
+        binding,
+        approved,
+        pending: None,
+    };
+    Ok(())
+}
+async fn require_completed_sync_setup(
+    st: &AppState,
+    groups: &[Group],
+    token: Option<Uuid>,
+) -> Result<(), RpcError> {
+    let binding = st.oplog.lock().await.as_ref().map(|d| d.approval_binding());
+    let mut approval = st.sync_approval.lock().await;
+    if approval.binding != binding {
+        approval.approved = None;
+        approval.pending = None;
+        approval.binding = binding.clone();
+        approval.generation = Uuid::new_v4();
+    }
+    if let Some(token) = token {
+        if let Some((expected, selected, result)) = &approval.pending {
+            if let Some(digest) = result["engineDigest"].as_str() {
+                if require_engine(st)
+                    .await?
+                    .preview_digest()
+                    .await
+                    .map_err(|e| internal(e.to_string()))?
+                    != digest
+                {
+                    return Err(invalid_params(
+                        "engine changed since preview; preview again",
+                    ));
+                }
+            }
+            if groups.contains(&Group::Notes) {
+                let store = st
+                    .notes
+                    .lock()
+                    .await
+                    .clone()
+                    .ok_or_else(|| internal("notes store unavailable"))?;
+                if store.sync_paused()
+                    || result["notesRevision"].as_u64()
+                        != Some(
+                            store
+                                .sync_snapshot()
+                                .map_err(|e| internal(e.to_string()))?
+                                .2,
+                        )
+                {
+                    return Err(invalid_params(
+                        "Notes changed since preview; save drafts and preview again",
+                    ));
+                }
+            }
+            if *expected == token && selected == groups {
+                if let (Some(store), Some(target)) = (
+                    st.sync_approval_store.lock().await.as_ref(),
+                    approval.target.as_ref(),
+                ) {
+                    store
+                        .local_set(
+                            "sync.approval",
+                            &json!({"schema":2,"target":target,"binding":binding,"groups":groups}),
+                        )
+                        .map_err(|e| internal(e.to_string()))?;
+                }
+                approval.approved = Some(groups.to_vec());
+                approval.pending = None;
+                return Ok(());
+            }
+        }
+        return Err(invalid_params("invalid or stale merge preview token"));
+    }
+    if approval.approved.as_deref() == Some(groups) {
+        return Ok(());
+    }
+    Err(invalid_params(
+        "complete setup and confirm the merge preview for this configuration and groups",
+    ))
+}
+
 async fn run_sync_now_cycle(
     st: &AppState,
-    eng: &SyncEngine,
     groups: &[crate::sync::Group],
+    preview_token: Option<Uuid>,
 ) -> Result<
     (
         Vec<(crate::sync::Group, crate::sync::SyncStats)>,
@@ -3822,10 +4250,53 @@ async fn run_sync_now_cycle(
     ),
     RpcError,
 > {
+    let _operation = st.sync_operation.lock().await;
+    projection::recover_projection(st).await?;
+    if st
+        .oplog
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|d| d.protocol() == 2)
+    {
+        return Err(invalid_params(
+            "v2 is import-only; preview and confirm v3 migration",
+        ));
+    }
+    require_completed_sync_setup(st, groups, preview_token).await?;
+    let notes_paused = st
+        .notes
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|store| store.sync_paused());
+    // Preserve the configured/approved group set; only defer Notes this tick.
+    // Saving the draft clears ownership and Notes rejoins the next tick.
+    let effective: Vec<_> = groups
+        .iter()
+        .copied()
+        .filter(|g| *g != Group::Notes || !notes_paused)
+        .collect();
+    let groups = effective.as_slice();
+    let current_engine = require_engine(st).await?;
+    let eng = current_engine.as_ref();
     let profiles = require_profiles(st).await.ok();
     let settings = require_settings(st).await.ok();
     let vault = st.vault.lock().await.clone();
     let plugins = st.wasm_host.list().await;
+    let notes_store = st.notes.lock().await.clone();
+    let notes_revision = if groups.contains(&Group::Notes) {
+        let store = notes_store
+            .as_ref()
+            .ok_or_else(|| internal("notes store unavailable"))?;
+        Some(
+            crate::sync::bridge::export_notes(store, eng)
+                .await
+                .map_err(|e| internal(e.to_string()))?,
+        )
+    } else {
+        None
+    };
     if groups.contains(&Group::Credentials) {
         if let Some(vault) = vault.as_ref() {
             let _ = crate::sync::bridge::try_unlock_vault_for_sync(
@@ -3852,9 +4323,18 @@ async fn run_sync_now_cycle(
     }
     let git = st.git_backend.lock().await.clone();
     if let Some(g) = &git {
-        g.fetch_remote()
+        let changed = g
+            .fetch_outcome()
             .await
             .map_err(|e| internal(e.to_string()))?;
+        if changed.discarded_local_batches {
+            if let Some(oplog) = st.oplog.lock().await.clone() {
+                oplog
+                    .reconcile_transport_change()
+                    .await
+                    .map_err(|e| internal(e.to_string()))?;
+            }
+        }
     }
     let results = if let Some(oplog) = st.oplog.lock().await.clone() {
         let (results, meta) = oplog
@@ -3874,6 +4354,12 @@ async fn run_sync_now_cycle(
             .await
             .map_err(|e| internal(e.to_string()))?;
     }
+    if let (Some(store), Some(revision)) = (notes_store.as_ref(), notes_revision) {
+        crate::sync::bridge::import_notes(store, eng, revision)
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+    }
+    bridge_notes.notes_paused_dirty = notes_paused;
     if let Some(g) = &git {
         // One commit per cycle covering every record put/delete in this tick.
         let device = eng.device_id();
@@ -3882,6 +4368,12 @@ async fn run_sync_now_cycle(
             .await
             .map_err(|e| internal(e.to_string()))?;
         g.push_remote().await.map_err(|e| internal(e.to_string()))?;
+        if let Some(oplog) = st.oplog.lock().await.clone() {
+            oplog
+                .confirm_uploaded()
+                .await
+                .map_err(|e| internal(e.to_string()))?;
+        }
     }
     Ok((results, bridge_notes))
 }
@@ -4720,6 +5212,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn low_level_put_delete_invalidate_pending_but_keep_completed_approval() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let st = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, st.clone());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root,"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let groups = vec![Group::Appearance];
+        let id = Uuid::new_v4();
+        for method in ["sync.put", "sync.delete"] {
+            let preview = d
+                .dispatch(req("sync.preview", json!({"groups":groups})))
+                .await
+                .result
+                .unwrap();
+            let token = serde_json::from_value(preview["previewToken"].clone()).unwrap();
+            let r = d
+                .dispatch(req(
+                    method,
+                    json!({"group":"Appearance","id":id,"data":BASE64.encode(b"changed")}),
+                ))
+                .await;
+            assert!(r.error.is_none());
+            assert!(require_completed_sync_setup(&st, &groups, Some(token))
+                .await
+                .is_err());
+        }
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        let token = serde_json::from_value(preview["previewToken"].clone()).unwrap();
+        require_completed_sync_setup(&st, &groups, Some(token))
+            .await
+            .unwrap();
+        d.dispatch(req(
+            "sync.put",
+            json!({"group":"Appearance","id":id,"data":BASE64.encode(b"new")}),
+        ))
+        .await;
+        assert!(require_completed_sync_setup(&st, &groups, None)
+            .await
+            .is_ok());
+    }
+    #[tokio::test]
+    async fn approved_target_survives_reconfigure_restart_but_not_new_target() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let settings = SettingsStore::open(root.join("settings")).unwrap();
+        let groups = vec![Group::Appearance];
+        let state = AppState::new();
+        *state.settings.lock().await = Some(settings.clone());
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let args =
+            json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true});
+        assert!(d
+            .dispatch(req("sync.configureGit", args.clone()))
+            .await
+            .error
+            .is_none());
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        let token = serde_json::from_value(preview["previewToken"].clone()).unwrap();
+        require_completed_sync_setup(&state, &groups, Some(token))
+            .await
+            .unwrap();
+        let restarted = AppState::new();
+        *restarted.settings.lock().await = Some(settings);
+        let d = Dispatcher::new();
+        register_all(&d, restarted.clone());
+        assert!(d
+            .dispatch(req("sync.configureGit", args))
+            .await
+            .error
+            .is_none());
+        assert!(
+            require_completed_sync_setup(&restarted, &groups, None)
+                .await
+                .is_ok(),
+            "same target approval must survive restart"
+        );
+        assert!(
+            require_completed_sync_setup(&restarted, &[Group::Notes], None)
+                .await
+                .is_err()
+        );
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("other"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        assert!(require_completed_sync_setup(&restarted, &groups, None)
+            .await
+            .is_err());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        assert!(
+            require_completed_sync_setup(&restarted, &groups, None)
+                .await
+                .is_err(),
+            "switching back cannot resurrect old consent"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_approval_is_server_owned_group_bound_and_invalidated() {
+        let st = AppState::new();
+        let groups = vec![Group::Connections];
+        assert!(require_completed_sync_setup(&st, &groups, None)
+            .await
+            .is_err());
+        let token = Uuid::new_v4();
+        st.sync_approval.lock().await.pending =
+            Some((token, groups.clone(), json!({"publish":100})));
+        assert!(
+            require_completed_sync_setup(&st, &groups, Some(Uuid::new_v4()))
+                .await
+                .is_err()
+        );
+        assert!(
+            require_completed_sync_setup(&st, &[Group::Appearance], Some(token))
+                .await
+                .is_err()
+        );
+        require_completed_sync_setup(&st, &groups, Some(token))
+            .await
+            .unwrap();
+        require_completed_sync_setup(&st, &groups, None)
+            .await
+            .unwrap();
+        invalidate_sync_approval(&st).await;
+        assert!(require_completed_sync_setup(&st, &groups, None)
+            .await
+            .is_err());
+        assert!(require_completed_sync_setup(&st, &groups, Some(token))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn core_version_works() {
         let d = Dispatcher::new();
         register_all(&d, AppState::new());
@@ -4820,6 +5471,1267 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_reconfigure_preserves_device_identity() {
+        let dir = std::env::temp_dir().join(format!("aerotab-identity-{}", Uuid::new_v4()));
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        let args = json!({"repo_path": dir.join("repo"), "state_dir": dir.join("state"), "master_password": "pw", "test_cheap_kdf": true});
+        let response = d.dispatch(req("sync.configureGit", args.clone())).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let first = response.result.unwrap();
+        drop(d);
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        let second = d
+            .dispatch(req("sync.configureGit", args))
+            .await
+            .result
+            .unwrap();
+        assert_eq!(first["device_id"], second["device_id"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn compact_refuses_unproven_full_group_coverage() {
+        let root = std::env::temp_dir().join(format!("aerotab-coverage-{}", Uuid::new_v4()));
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path": root, "master_password": "pw", "test_cheap_kdf": true})
+            ))
+            .await
+            .error
+            .is_none());
+        let response = d.dispatch(req("sync.compact", json!({"groups": ["Connections", "Appearance", "Shortcuts", "PluginCfg", "Credentials"]}))).await;
+        assert!(
+            response.error.is_some(),
+            "Group::ALL is not proof of reconciled coverage"
+        );
+        assert!(!root.join("v2/snapshots/latest").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn notes_preview_revision_and_dirty_auto_group_gate() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let store = crate::notes::NotesStore::open(root.join("notes")).unwrap();
+        *state.notes.lock().await = Some(store.clone());
+        let r = d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let groups = vec![Group::Appearance, Group::Notes];
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await;
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        let token: Uuid =
+            serde_json::from_value(preview.result.unwrap()["previewToken"].clone()).unwrap();
+        crate::notes::dispatch(&store,"notes.put",json!({"note":{"id":"n","parent_id":null,"title":"N","markdown":"local"},"expectedVersion":0}),&[]).unwrap();
+        assert!(require_completed_sync_setup(&state, &groups, Some(token))
+            .await
+            .is_err());
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await;
+        let token: Uuid =
+            serde_json::from_value(preview.result.unwrap()["previewToken"].clone()).unwrap();
+        require_completed_sync_setup(&state, &groups, Some(token))
+            .await
+            .unwrap();
+        let r = d
+            .dispatch(req(
+                "notes.editState",
+                json!({"owner":"editor","dirty":true}),
+            ))
+            .await;
+        assert!(r.error.is_none());
+        let (results, bridge) = run_sync_now_cycle(&state, &groups, None).await.unwrap();
+        assert!(bridge.notes_paused_dirty);
+        assert!(results.iter().any(|(g, _)| *g == Group::Appearance));
+        assert!(results.iter().all(|(g, _)| *g != Group::Notes));
+        assert!(
+            require_engine(&state)
+                .await
+                .unwrap()
+                .list_local(Group::Notes)
+                .await
+                .is_empty(),
+            "preview must not consume persisted export baseline"
+        );
+        d.dispatch(req(
+            "notes.editState",
+            json!({"owner":"editor","dirty":false}),
+        ))
+        .await;
+        let (results, bridge) = run_sync_now_cycle(&state, &groups, None).await.unwrap();
+        assert!(!bridge.notes_paused_dirty);
+        assert!(results.iter().any(|(g, _)| *g == Group::Notes));
+        assert_eq!(store.sync_snapshot().unwrap().0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_reconfigure_preserves_backend_generation() {
+        let root = std::env::temp_dir().join(format!("aerotab-generation-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let args =
+            json!({"repo_path": root.join("a"), "master_password": "pw", "test_cheap_kdf": true});
+        assert!(d
+            .dispatch(req("sync.configureGit", args))
+            .await
+            .error
+            .is_none());
+        let bad = root.join("bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("device-id"), "invalid UUID").unwrap();
+        let args = json!({"repo_path": root.join("b"), "state_dir": bad, "master_password": "pw", "test_cheap_kdf": true});
+        assert!(d
+            .dispatch(req("sync.configureGit", args))
+            .await
+            .error
+            .is_some());
+        let git = state.git_backend.lock().await.clone().unwrap();
+        git.put_blob("generation.bin", b"A").await.unwrap();
+        assert!(root.join("a/generation.bin").exists());
+        assert!(!root.join("b/generation.bin").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rejoin_committed_identity_rejects_old_approval_before_rpc_cleanup() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let st = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, st.clone());
+        let s = SettingsStore::open(root.join("s")).unwrap();
+        *st.settings.lock().await = Some(s.clone());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let groups = vec![Group::Appearance];
+        let p = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":groups,"preview_token":p["previewToken"]})
+            ))
+            .await
+            .error
+            .is_none());
+        let old = st.oplog.lock().await.clone().unwrap();
+        let next = old.rejoin_successor(Uuid::new_v4()).await.unwrap();
+        *st.oplog.lock().await = Some(Arc::new(next));
+        assert!(
+            require_completed_sync_setup(&st, &groups, None)
+                .await
+                .is_err(),
+            "in-memory approval must be identity bound before RPC invalidate"
+        );
+        let restarted = AppState::new();
+        *restarted.settings.lock().await = Some(s);
+        let rd = Dispatcher::new();
+        register_all(&rd, restarted.clone());
+        assert!(rd
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        assert!(
+            require_completed_sync_setup(&restarted, &groups, None)
+                .await
+                .is_err(),
+            "persisted approval must not survive rejoin"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn pending_migration_restart_requires_preview_even_after_recovery() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let st = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, st.clone());
+        let s = SettingsStore::open(root.join("s")).unwrap();
+        *st.settings.lock().await = Some(s.clone());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let groups = vec![Group::Appearance];
+        let p = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":groups,"preview_token":p["previewToken"]})
+            ))
+            .await
+            .error
+            .is_none());
+        let live = require_engine(&st).await.unwrap();
+        s.local_set("sync.testProjectionFault", &json!("journal"))
+            .unwrap();
+        assert!(projection::commit_projection(
+            &st,
+            &live,
+            &live.preview_copy().await,
+            &groups,
+            true
+        )
+        .await
+        .is_err());
+        let restarted = AppState::new();
+        *restarted.settings.lock().await = Some(s);
+        let rd = Dispatcher::new();
+        register_all(&rd, restarted.clone());
+        assert!(rd
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        projection::recover_projection(&restarted).await.unwrap();
+        assert!(require_completed_sync_setup(&restarted, &groups, None)
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancel_current_c_dominates_known_profile_tombstone_and_appearance_b() {
+        for group in [Group::Connections, Group::Appearance] {
+            let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+            let st = AppState::new();
+            let d = Dispatcher::new();
+            register_all(&d, st.clone());
+            let s = SettingsStore::open(root.join("s")).unwrap();
+            *st.settings.lock().await = Some(s.clone());
+            let profiles = ProfileStore::open(root.join("p")).unwrap();
+            *st.profiles.lock().await = Some(profiles.clone());
+            let id = Uuid::new_v4();
+            let profile=serde_json::from_value(json!({"id":id,"name":"A","kind":"ssh","ssh":{"host":"host","port":22,"user":"u","auth":"Agent"}})).unwrap();
+            profiles.upsert(profile).await.unwrap();
+            s.set("terminal", &json!({"fontSize":12})).unwrap();
+            assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}))).await.error.is_none());
+            let groups = vec![group];
+            let p = d
+                .dispatch(req("sync.preview", json!({"groups":groups})))
+                .await
+                .result
+                .unwrap();
+            assert!(d
+                .dispatch(req(
+                    "sync.now",
+                    json!({"groups":groups,"preview_token":p["previewToken"]})
+                ))
+                .await
+                .error
+                .is_none());
+            let live = require_engine(&st).await.unwrap();
+            let remote = live.preview_copy().await;
+            if group == Group::Connections {
+                remote
+                    .delete_local(group, crate::sync::RecordId(id))
+                    .await
+                    .unwrap();
+            } else {
+                s.set("terminal", &json!({"fontSize":29})).unwrap();
+                projection::export_candidate(&st, &remote, &groups)
+                    .await
+                    .unwrap();
+                s.set("terminal", &json!({"fontSize":12})).unwrap();
+            }
+            let writer = OplogDriver::new(
+                st.oplog.lock().await.as_ref().unwrap().blobs(),
+                Uuid::new_v4(),
+                b"pw",
+                KdfParams::test_cheap(),
+            )
+            .with_protocol(3)
+            .unwrap();
+            writer.cycle(&remote, &groups).await.unwrap();
+            let (candidate, _) = st
+                .oplog
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .maintenance_candidate(&live, &groups)
+                .await
+                .unwrap();
+            s.local_set("sync.testProjectionFault", &json!("journal"))
+                .unwrap();
+            assert!(
+                projection::commit_projection(&st, &live, &candidate, &groups, false)
+                    .await
+                    .is_err()
+            );
+            if group == Group::Connections {
+                let mut p = profiles.list().await.unwrap().remove(0);
+                p.name = "C".into();
+                profiles.upsert(p).await.unwrap();
+            } else {
+                s.set("terminal", &json!({"fontSize":40})).unwrap();
+            }
+            assert!(d
+                .dispatch(req(
+                    "sync.maintenanceCancel",
+                    json!({"confirm":"CANCEL MAINTENANCE KEEP LOCAL"})
+                ))
+                .await
+                .error
+                .is_none());
+            let p = d
+                .dispatch(req("sync.preview", json!({"groups":groups})))
+                .await
+                .result
+                .unwrap();
+            let r = d
+                .dispatch(req(
+                    "sync.now",
+                    json!({"groups":groups,"preview_token":p["previewToken"]}),
+                ))
+                .await;
+            assert!(r.error.is_none(), "{:?}", r.error);
+            if group == Group::Connections {
+                assert_eq!(profiles.list().await.unwrap()[0].name, "C");
+            } else {
+                assert_eq!(s.get("terminal").unwrap().unwrap()["fontSize"], 40);
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_migration_keeps_protocol_and_current_store_and_allows_retry() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let st = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, st.clone());
+        let s = SettingsStore::open(root.join("s")).unwrap();
+        *st.settings.lock().await = Some(s.clone());
+        *st.profiles.lock().await = Some(ProfileStore::open(root.join("p")).unwrap());
+        s.set("terminal", &json!({"fontSize":12})).unwrap();
+        assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","protocol":2,"test_cheap_kdf":true}))).await.error.is_none());
+        let live = require_engine(&st).await.unwrap();
+        let candidate = live.preview_copy().await;
+        projection::export_candidate(&st, &candidate, &[Group::Appearance])
+            .await
+            .unwrap();
+        s.local_set("sync.testProjectionFault", &json!("journal"))
+            .unwrap();
+        assert!(
+            projection::commit_projection(&st, &live, &candidate, &[Group::Appearance], true)
+                .await
+                .is_err()
+        );
+        s.set("terminal", &json!({"fontSize":40})).unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.maintenanceCancel",
+                json!({"confirm":"CANCEL MAINTENANCE KEEP LOCAL"})
+            ))
+            .await
+            .error
+            .is_none());
+        assert_eq!(st.oplog.lock().await.as_ref().unwrap().protocol(), 2);
+        assert_eq!(s.get("terminal").unwrap().unwrap()["fontSize"], 40);
+        assert!(d
+            .dispatch(req("sync.migrationPreview", json!({})))
+            .await
+            .error
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failed_notes_maintenance_cancel_then_sync_preserves_c_and_remote_b() {
+        let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let st = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, st.clone());
+        let s = SettingsStore::open(root.join("s")).unwrap();
+        *st.settings.lock().await = Some(s.clone());
+        *st.profiles.lock().await = Some(ProfileStore::open(root.join("p")).unwrap());
+        let notes = crate::notes::NotesStore::open(root.join("notes")).unwrap();
+        *st.notes.lock().await = Some(notes.clone());
+        crate::notes::dispatch(&notes,"notes.put",json!({"note":{"id":"n","parent_id":null,"title":"A","markdown":"A","tags":[],"profile_ids":[]},"expectedVersion":0}),&[]).unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let groups = vec![Group::Notes];
+        let p = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":groups,"preview_token":p["previewToken"]})
+            ))
+            .await
+            .error
+            .is_none());
+        let live = require_engine(&st).await.unwrap();
+        let remote = live.preview_copy().await;
+        let (mut entities, _, _) = notes.sync_snapshot().unwrap();
+        if let crate::notes::SyncEntity::Note(n) = &mut entities[0] {
+            n.markdown = "B".into();
+            n.version = 0;
+            n.updated_at = 0;
+        }
+        let entity = entities.remove(0);
+        remote
+            .put_local(
+                Group::Notes,
+                entity.record_id(),
+                serde_json::to_vec(&entity).unwrap(),
+            )
+            .await
+            .unwrap();
+        let writer = OplogDriver::new(
+            st.oplog.lock().await.as_ref().unwrap().blobs(),
+            Uuid::new_v4(),
+            b"pw",
+            KdfParams::test_cheap(),
+        )
+        .with_protocol(3)
+        .unwrap();
+        writer.cycle(&remote, &groups).await.unwrap();
+        let (candidate, _) = st
+            .oplog
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .maintenance_candidate(&live, &groups)
+            .await
+            .unwrap();
+        s.local_set("sync.testProjectionFault", &json!("journal"))
+            .unwrap();
+        assert!(
+            projection::commit_projection(&st, &live, &candidate, &groups, false)
+                .await
+                .is_err()
+        );
+        let (mut entities, _, rev) = notes.sync_snapshot().unwrap();
+        if let crate::notes::SyncEntity::Note(n) = &mut entities[0] {
+            n.markdown = "C".into();
+        }
+        notes.apply_sync(entities, vec![], rev).unwrap();
+        assert!(projection::recover_projection(&st).await.is_err());
+        let digest = live.preview_digest().await.unwrap();
+        assert!(d
+            .dispatch(req("sync.maintenanceCancel", json!({"confirm":"wrong"})))
+            .await
+            .error
+            .is_some());
+        assert_eq!(
+            require_engine(&st)
+                .await
+                .unwrap()
+                .preview_digest()
+                .await
+                .unwrap(),
+            digest
+        );
+        assert!(d
+            .dispatch(req(
+                "sync.maintenanceCancel",
+                json!({"confirm":"CANCEL MAINTENANCE KEEP LOCAL"})
+            ))
+            .await
+            .error
+            .is_none());
+        assert!(require_completed_sync_setup(&st, &groups, None)
+            .await
+            .is_err());
+        let p = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        let r = d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":groups,"preview_token":p["previewToken"]}),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let text = serde_json::to_string(&notes.sync_snapshot().unwrap().0).unwrap();
+        assert!(text.contains("C"), "local C lost: {text}");
+        assert!(text.contains("B"), "remote B lost: {text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn maintenance_credentials_hash_guards_edits_deletes_and_locked_resolution() {
+        for delete in [false, true] {
+            let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+            let st = AppState::new();
+            let d = Dispatcher::new();
+            register_all(&d, st.clone());
+            let s = SettingsStore::open(root.join("s")).unwrap();
+            *st.settings.lock().await = Some(s.clone());
+            *st.profiles.lock().await = Some(ProfileStore::open(root.join("p")).unwrap());
+            let vault = crate::vault::VaultStore::open_with_params(
+                root.join("vault"),
+                KdfParams::test_cheap(),
+            )
+            .unwrap();
+            vault.initialize(b"vpw").await.unwrap();
+            let entry: crate::vault::VaultEntry = serde_json::from_value(
+                json!({"id":"e","label":"E","kind":"password","secret":"A"}),
+            )
+            .unwrap();
+            vault.put(entry.clone()).await.unwrap();
+            *st.vault.lock().await = Some(vault.clone());
+            assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}))).await.error.is_none());
+            let live = require_engine(&st).await.unwrap();
+            let candidate = live.preview_copy().await;
+            projection::export_candidate(&st, &candidate, &[Group::Credentials])
+                .await
+                .unwrap();
+            let mut b = entry.clone();
+            b.secret = "B".into();
+            vault.put(b).await.unwrap();
+            projection::export_candidate(&st, &candidate, &[Group::Credentials])
+                .await
+                .unwrap();
+            let writer = OplogDriver::new(
+                st.oplog.lock().await.as_ref().unwrap().blobs(),
+                Uuid::new_v4(),
+                b"pw",
+                KdfParams::test_cheap(),
+            )
+            .with_protocol(3)
+            .unwrap();
+            writer
+                .cycle(&candidate, &[Group::Credentials])
+                .await
+                .unwrap();
+            vault.put(entry.clone()).await.unwrap();
+            s.local_set("sync.testProjectionFault", &json!("journal"))
+                .unwrap();
+            assert!(projection::commit_projection(
+                &st,
+                &live,
+                &candidate,
+                &[Group::Credentials],
+                false
+            )
+            .await
+            .is_err());
+            let j = st
+                .oplog
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .maintenance_journal()
+                .unwrap()
+                .unwrap();
+            assert!(j["baseline"]["credentialsHash"].is_string());
+            assert!(j["baseline"].get("secret").is_none());
+            if delete {
+                vault.remove("e").await.unwrap();
+            } else {
+                let mut e = entry;
+                e.secret = "C".into();
+                vault.put(e).await.unwrap();
+            }
+            assert!(projection::recover_projection(&st).await.is_err());
+            let status = d
+                .dispatch(req("sync.maintenanceStatus", json!({})))
+                .await
+                .result
+                .unwrap();
+            assert_eq!(status["checkpointChanged"], true);
+            assert!(!status.to_string().contains("secret"));
+            vault.lock().await;
+            let before = require_engine(&st)
+                .await
+                .unwrap()
+                .preview_digest()
+                .await
+                .unwrap();
+            assert!(d
+                .dispatch(req(
+                    "sync.maintenanceCancel",
+                    json!({"confirm":"CANCEL MAINTENANCE KEEP LOCAL"})
+                ))
+                .await
+                .error
+                .is_some());
+            assert_eq!(
+                require_engine(&st)
+                    .await
+                    .unwrap()
+                    .preview_digest()
+                    .await
+                    .unwrap(),
+                before
+            );
+            vault.unlock(b"vpw").await.unwrap();
+            assert!(d
+                .dispatch(req(
+                    "sync.maintenanceCancel",
+                    json!({"confirm":"CANCEL MAINTENANCE KEEP LOCAL"})
+                ))
+                .await
+                .error
+                .is_none());
+            let groups = vec![Group::Credentials];
+            let p = d
+                .dispatch(req("sync.preview", json!({"groups":groups})))
+                .await
+                .result
+                .unwrap();
+            let r = d
+                .dispatch(req(
+                    "sync.now",
+                    json!({"groups":groups,"preview_token":p["previewToken"]}),
+                ))
+                .await;
+            assert!(r.error.is_none(), "{:?}", r.error);
+            if delete {
+                assert!(vault.list().await.unwrap().is_empty());
+            } else {
+                assert_eq!(vault.get("e").await.unwrap().secret, "C");
+            }
+            let inspected = d
+                .dispatch(req("sync.recoveryInspect", json!({})))
+                .await
+                .result
+                .unwrap();
+            assert_eq!(inspected["available"], true);
+            assert!(!inspected.to_string().contains("secret"));
+            let exported = d
+                .dispatch(req("sync.recoveryExport", json!({})))
+                .await
+                .result
+                .unwrap();
+            assert_eq!(exported["encrypted"], true);
+            let r = d
+                .dispatch(req(
+                    "sync.recoveryRestore",
+                    json!({"confirm":"RESTORE LOCAL RECOVERY"}),
+                ))
+                .await;
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert!(require_completed_sync_setup(&st, &groups, None)
+                .await
+                .is_err());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_stops_for_post_crash_profile_and_notes_tombstones() {
+        for group in [Group::Connections, Group::Notes] {
+            let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+            let st = AppState::new();
+            let d = Dispatcher::new();
+            register_all(&d, st.clone());
+            let s = SettingsStore::open(root.join("s")).unwrap();
+            *st.settings.lock().await = Some(s.clone());
+            let profiles = ProfileStore::open(root.join("p")).unwrap();
+            *st.profiles.lock().await = Some(profiles.clone());
+            let notes = crate::notes::NotesStore::open(root.join("notes")).unwrap();
+            *st.notes.lock().await = Some(notes.clone());
+            let id = Uuid::new_v4();
+            if group == Group::Connections {
+                let p=serde_json::from_value(json!({"id":id,"name":"A","kind":"ssh","ssh":{"host":"host","port":22,"user":"u","auth":"Agent"}})).unwrap();
+                profiles.upsert(p).await.unwrap();
+            } else {
+                crate::notes::dispatch(&notes,"notes.put",json!({"note":{"id":"n","parent_id":null,"title":"A","markdown":"A","tags":[],"profile_ids":[]},"expectedVersion":0}),&[]).unwrap();
+            }
+            assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}))).await.error.is_none());
+            let live = require_engine(&st).await.unwrap();
+            let candidate = live.preview_copy().await;
+            projection::export_candidate(&st, &candidate, &[group])
+                .await
+                .unwrap();
+            s.local_set("sync.testProjectionFault", &json!("journal"))
+                .unwrap();
+            assert!(
+                projection::commit_projection(&st, &live, &candidate, &[group], false)
+                    .await
+                    .is_err()
+            );
+            if group == Group::Connections {
+                let mut edited = profiles.list().await.unwrap().remove(0);
+                edited.name = "C".into();
+                profiles.upsert(edited).await.unwrap();
+                assert!(projection::recover_projection(&st).await.is_err());
+                assert_eq!(profiles.list().await.unwrap()[0].name, "C");
+                profiles.delete(id).await.unwrap();
+            } else {
+                let (mut entities, _, rev) = notes.sync_snapshot().unwrap();
+                if let crate::notes::SyncEntity::Note(note) = &mut entities[0] {
+                    note.markdown = "C".into();
+                }
+                notes.apply_sync(entities, vec![], rev).unwrap();
+                assert!(projection::recover_projection(&st).await.is_err());
+                let rev = notes.sync_snapshot().unwrap().2;
+                notes.apply_sync(vec![], vec!["n".into()], rev).unwrap();
+            }
+            assert!(
+                projection::recover_projection(&st).await.is_err(),
+                "post-crash deletion must not resurrect"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_post_crash_settings_edit_and_delete() {
+        for delete in [false, true] {
+            let root = std::env::temp_dir().join(Uuid::new_v4().to_string());
+            let st = AppState::new();
+            let d = Dispatcher::new();
+            register_all(&d, st.clone());
+            let s = SettingsStore::open(root.join("s")).unwrap();
+            s.set("terminal", &json!({"fontSize":12})).unwrap();
+            *st.settings.lock().await = Some(s.clone());
+            *st.profiles.lock().await = Some(ProfileStore::open(root.join("p")).unwrap());
+            assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}))).await.error.is_none());
+            let live = require_engine(&st).await.unwrap();
+            let c = live.preview_copy().await;
+            projection::export_candidate(&st, &c, &[Group::Appearance])
+                .await
+                .unwrap();
+            s.local_set("sync.testProjectionFault", &json!("journal"))
+                .unwrap();
+            assert!(
+                projection::commit_projection(&st, &live, &c, &[Group::Appearance], false)
+                    .await
+                    .is_err()
+            );
+            if delete {
+                s.remove("terminal").unwrap();
+            } else {
+                s.set("terminal", &json!({"fontSize":40})).unwrap();
+            }
+            let before = s.get("terminal").unwrap();
+            assert!(
+                projection::recover_projection(&st).await.is_err(),
+                "must stop rather than overwrite post-crash C"
+            );
+            assert_eq!(s.get("terminal").unwrap(), before);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_rejects_invalid_record_without_polluting_live_or_stores() {
+        let root = std::env::temp_dir().join(format!("aerotab-project-reject-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let settings = SettingsStore::open(root.join("settings")).unwrap();
+        settings.set("terminal", &json!({"fontSize":12})).unwrap();
+        *state.settings.lock().await = Some(settings.clone());
+        *state.profiles.lock().await = Some(ProfileStore::open(root.join("profiles")).unwrap());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let live = require_engine(&state).await.unwrap();
+        let before = live.preview_digest().await.unwrap();
+        let candidate = live.preview_copy().await;
+        candidate
+            .put_local(
+                Group::Connections,
+                crate::sync::RecordId(Uuid::new_v4()),
+                b"invalid".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            projection::commit_projection(&state, &live, &candidate, &Group::ALL, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            require_engine(&state)
+                .await
+                .unwrap()
+                .preview_digest()
+                .await
+                .unwrap(),
+            before
+        );
+        assert_eq!(settings.get("terminal").unwrap().unwrap()["fontSize"], 12);
+        assert!(state
+            .oplog
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .maintenance_journal()
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn projection_journal_recovers_every_commit_boundary_before_export() {
+        for step in ["journal", "projection", "persistence", "install"] {
+            let root =
+                std::env::temp_dir().join(format!("aerotab-project-fault-{}", Uuid::new_v4()));
+            let state = AppState::new();
+            let d = Dispatcher::new();
+            register_all(&d, state.clone());
+            let settings = SettingsStore::open(root.join("settings")).unwrap();
+            settings.set("terminal", &json!({"fontSize":12})).unwrap();
+            *state.settings.lock().await = Some(settings.clone());
+            let profiles = ProfileStore::open(root.join("profiles")).unwrap();
+            *state.profiles.lock().await = Some(profiles.clone());
+            assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}))).await.error.is_none());
+            let live = require_engine(&state).await.unwrap();
+            let candidate = live.preview_copy().await;
+            let remote = SettingsStore::open(root.join("remote")).unwrap();
+            remote.set("terminal", &json!({"fontSize":29})).unwrap();
+            crate::sync::bridge::export_locals(
+                &profiles,
+                &remote,
+                None,
+                &[],
+                &candidate,
+                &[Group::Appearance],
+            )
+            .await
+            .unwrap();
+            settings
+                .local_set("sync.testProjectionFault", &json!(step))
+                .unwrap();
+            assert!(projection::commit_projection(
+                &state,
+                &live,
+                &candidate,
+                &[Group::Appearance],
+                false
+            )
+            .await
+            .is_err());
+            settings
+                .local_set("sync.testProjectionFault", &Value::Null)
+                .unwrap();
+            // Recreate AppState and driver: exercise durable restart recovery,
+            // not merely a retry against the already-installed candidate.
+            let restarted = AppState::new();
+            *restarted.settings.lock().await = Some(settings.clone());
+            *restarted.profiles.lock().await = Some(profiles.clone());
+            let rd = Dispatcher::new();
+            register_all(&rd, restarted.clone());
+            assert!(rd.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true}))).await.error.is_none());
+            projection::recover_projection(&restarted).await.unwrap();
+            assert_eq!(settings.get("terminal").unwrap().unwrap()["fontSize"], 29);
+            let recovered = require_engine(&restarted).await.unwrap();
+            let digest = recovered.preview_digest().await.unwrap();
+            crate::sync::bridge::export_locals(
+                &profiles,
+                &settings,
+                None,
+                &[],
+                &recovered,
+                &[Group::Appearance],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                recovered.preview_digest().await.unwrap(),
+                digest,
+                "boundary {step} must not export stale A"
+            );
+            let p = rd
+                .dispatch(req("sync.preview", json!({"groups":["Appearance"]})))
+                .await
+                .result
+                .unwrap();
+            let r = rd
+                .dispatch(req(
+                    "sync.now",
+                    json!({"groups":["Appearance"],"preview_token":p["previewToken"]}),
+                ))
+                .await;
+            assert!(r.error.is_none(), "{step}: {:?}", r.error);
+            assert_eq!(settings.get("terminal").unwrap().unwrap()["fontSize"], 29);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_projects_pulled_setting_before_following_export() {
+        let root =
+            std::env::temp_dir().join(format!("aerotab-compact-projection-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let settings = SettingsStore::open(root.join("settings")).unwrap();
+        settings.set("terminal", &json!({"fontSize":12})).unwrap();
+        *state.settings.lock().await = Some(settings.clone());
+        let profiles = ProfileStore::open(root.join("profiles")).unwrap();
+        *state.profiles.lock().await = Some(profiles.clone());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let groups = vec![Group::Appearance];
+        let p = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await
+            .result
+            .unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":groups,"preview_token":p["previewToken"]})
+            ))
+            .await
+            .error
+            .is_none());
+        let remote = require_engine(&state).await.unwrap().preview_copy().await;
+        let rs = SettingsStore::open(root.join("remote")).unwrap();
+        rs.set("terminal", &json!({"fontSize":29})).unwrap();
+        crate::sync::bridge::export_locals(&profiles, &rs, None, &[], &remote, &groups)
+            .await
+            .unwrap();
+        let driver = OplogDriver::new(
+            state.oplog.lock().await.as_ref().unwrap().blobs(),
+            Uuid::new_v4(),
+            b"pw",
+            KdfParams::test_cheap(),
+        )
+        .with_protocol(3)
+        .unwrap();
+        driver.cycle(&remote, &groups).await.unwrap();
+        let r = d
+            .dispatch(req("sync.compact", json!({"groups":groups})))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            settings.get("terminal").unwrap().unwrap()["fontSize"],
+            29,
+            "compact must import B into app store"
+        );
+        let r = d.dispatch(req("sync.now", json!({"groups":groups}))).await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(settings.get("terminal").unwrap().unwrap()["fontSize"], 29);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn migration_projects_legacy_remote_setting_before_next_export() {
+        let root = std::env::temp_dir().join(format!("aerotab-projection-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let settings = SettingsStore::open(root.join("settings")).unwrap();
+        settings.set("terminal", &json!({"fontSize":12})).unwrap();
+        *state.settings.lock().await = Some(settings.clone());
+        *state.profiles.lock().await = Some(ProfileStore::open(root.join("profiles")).unwrap());
+        assert!(d.dispatch(req("sync.configureGit",json!({"repo_path":root.join("git"),"master_password":"pw","test_cheap_kdf":true,"protocol":2}))).await.error.is_none());
+        let current = require_engine(&state).await.unwrap();
+        let profiles = state.profiles.lock().await.clone().unwrap();
+        crate::sync::bridge::export_locals(
+            &profiles,
+            &settings,
+            None,
+            &[],
+            &current,
+            &[Group::Appearance],
+        )
+        .await
+        .unwrap();
+        let remote = current.preview_copy().await;
+        let remote_settings = SettingsStore::open(root.join("remote-settings")).unwrap();
+        remote_settings
+            .set("terminal", &json!({"fontSize":29}))
+            .unwrap();
+        let profiles = state.profiles.lock().await.clone().unwrap();
+        crate::sync::bridge::export_locals(
+            &profiles,
+            &remote_settings,
+            None,
+            &[],
+            &remote,
+            &[Group::Appearance],
+        )
+        .await
+        .unwrap();
+        let writer = OplogDriver::new(
+            state.oplog.lock().await.as_ref().unwrap().blobs(),
+            Uuid::new_v4(),
+            b"pw",
+            KdfParams::test_cheap(),
+        );
+        writer.cycle(&remote, &[Group::Appearance]).await.unwrap();
+        let p = d
+            .dispatch(req("sync.migrationPreview", json!({})))
+            .await
+            .result
+            .unwrap();
+        let r = d
+            .dispatch(req(
+                "sync.migrateV3",
+                json!({"previewToken":p["previewToken"],"confirm":"MIGRATE TO V3"}),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            settings.get("terminal").unwrap().unwrap()["fontSize"],
+            29,
+            "migration must project B, not leave A for next export"
+        );
+        let before = require_engine(&state)
+            .await
+            .unwrap()
+            .preview_digest()
+            .await
+            .unwrap();
+        crate::sync::bridge::export_locals(
+            &profiles,
+            &settings,
+            None,
+            &[],
+            &require_engine(&state).await.unwrap(),
+            &[Group::Appearance],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            require_engine(&state)
+                .await
+                .unwrap()
+                .preview_digest()
+                .await
+                .unwrap(),
+            before,
+            "next export must not bump old A over B"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_v3_migration_preserves_legacy_and_enables_approved_compact() {
+        let dir = std::env::temp_dir().join(format!("aerotab-migrate-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":dir,"master_password":"pw","test_cheap_kdf":true,"protocol":2})
+            ))
+            .await
+            .error
+            .is_none());
+        state
+            .git_backend
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .put_blob("v2/retained", b"keep")
+            .await
+            .unwrap();
+        let preview = d.dispatch(req("sync.migrationPreview", json!({}))).await;
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        let token = preview.result.unwrap()["previewToken"].clone();
+        assert!(d
+            .dispatch(req(
+                "sync.migrateV3",
+                json!({"previewToken":token,"confirm":"MIGRATE TO V3"})
+            ))
+            .await
+            .error
+            .is_none());
+        assert_eq!(state.oplog.lock().await.as_ref().unwrap().protocol(), 3);
+        assert_eq!(std::fs::read(dir.join("v2/retained")).unwrap(), b"keep");
+        let groups = vec![Group::Connections];
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await;
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        let r = d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":groups,"preview_token":preview.result.unwrap()["previewToken"]}),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let r = d
+            .dispatch(req("sync.compact", json!({"groups":groups})))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["compacted"], true);
+        assert!(dir.join("v3/snapshots").is_dir());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn v1_purge_compares_payload_and_tombstone_against_durable_v3() {
+        let dir = std::env::temp_dir().join(format!("aerotab-v1-proof-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        assert!(d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path":dir,"master_password":"pw","test_cheap_kdf":true})
+            ))
+            .await
+            .error
+            .is_none());
+        let id = crate::sync::RecordId(Uuid::new_v4());
+        let engine = require_engine(&state).await.unwrap();
+        engine
+            .put_local(Group::Connections, id, b"verified".to_vec())
+            .await
+            .unwrap();
+        let record = engine
+            .snapshot_group(Group::Connections)
+            .await
+            .pop()
+            .unwrap()
+            .1;
+        let wire = serde_json::to_vec(&record).unwrap();
+        let encrypted =
+            crate::sync::crypto::encrypt(b"pw", &wire, KdfParams::test_cheap()).unwrap();
+        let git = state.git_backend.lock().await.clone().unwrap();
+        let path = format!("connections/{}.bin", id.0);
+        git.put_blob(&path, &encrypted).await.unwrap();
+        let fail = d.dispatch(req("sync.purgeV1", json!({}))).await;
+        assert!(fail.error.is_some());
+        assert!(dir.join(&path).exists());
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":["Connections"]})))
+            .await
+            .result
+            .unwrap();
+        assert!(d
+            .dispatch(req(
+                "sync.now",
+                json!({"groups":["Connections"],"preview_token":preview["previewToken"]})
+            ))
+            .await
+            .error
+            .is_none());
+        let success = d.dispatch(req("sync.purgeV1", json!({}))).await;
+        assert!(success.error.is_none(), "{:?}", success.error);
+        assert_eq!(success.result.unwrap()["deleted"], 1);
+        assert!(!dir.join(&path).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn capacity_rpc_and_history_confirmation_are_enforced() {
+        let dir = std::env::temp_dir().join(format!("aerotab-maintenance-{}", Uuid::new_v4()));
+        let d = Dispatcher::new();
+        register_all(&d, AppState::new());
+        let response = d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path": dir, "master_password": "pw", "test_cheap_kdf": true}),
+            ))
+            .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let response = d.dispatch(req("sync.capacity", json!({}))).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let capacity = response.result.unwrap();
+        assert!(capacity["gitBytes"].as_u64().unwrap() > 0);
+        assert_eq!(capacity["worktreeBytes"], 0);
+        let response = d
+            .dispatch(req(
+                "sync.rewriteHistory",
+                json!({"confirmation": "yes", "expectedOid": "invalid"}),
+            ))
+            .await;
+        assert!(response.error.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn purge_v1_refuses_without_verified_migration() {
+        let dir = std::env::temp_dir().join(format!("aerotab-purge-{}", Uuid::new_v4()));
+        let d = Dispatcher::new();
+        let state = AppState::new();
+        register_all(&d, state.clone());
+        let r = d
+            .dispatch(req(
+                "sync.configureGit",
+                json!({"repo_path": dir, "master_password": "pw", "test_cheap_kdf": true}),
+            ))
+            .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        state
+            .git_backend
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .put_blob(
+                &format!("connections/{}.bin", Uuid::new_v4()),
+                b"unverifiable legacy envelope",
+            )
+            .await
+            .unwrap();
+        let r = d.dispatch(req("sync.purgeV1", Value::Null)).await;
+        assert!(
+            r.error.is_some(),
+            "must verify migration before legacy deletion"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn sync_configure_git_creates_repo() {
         let mut dir = std::env::temp_dir();
         dir.push(format!("aerotab-cmd-git-{}", Uuid::new_v4()));
@@ -4848,14 +6760,24 @@ mod tests {
             ))
             .await;
         assert!(r.error.is_none(), "{:?}", r.error);
-        let r = d.dispatch(req("sync.now", json!(null))).await;
+        let preview = d
+            .dispatch(req("sync.preview", json!(null)))
+            .await
+            .result
+            .unwrap();
+        let r = d
+            .dispatch(req(
+                "sync.now",
+                json!({"preview_token":preview["previewToken"]}),
+            ))
+            .await;
         assert!(r.error.is_none(), "{:?}", r.error);
-        // Protocol 2 writes encrypted ops under v2/devices/<id>/ops/, not
+        // Protocol 3 writes encrypted ops under v3/devices/<id>/ops/, not
         // legacy <group>/<uuid>.bin blobs.
-        let v2 = dir.join("v2").join("devices");
+        let v2 = dir.join("v3").join("devices");
         assert!(
             v2.is_dir(),
-            "expected protocol-2 oplog layout under {}",
+            "expected protocol-3 oplog layout under {}",
             v2.display()
         );
         let mut ops = 0usize;
@@ -5000,11 +6922,12 @@ mod tests {
         assert!(r.error.is_some());
 
         // Configure something local-only.
+        let sync_dir = std::env::temp_dir().join(format!("aerotab-auto-{}", Uuid::new_v4()));
         let r = d
             .dispatch(req(
-                "sync.configureWebdav",
+                "sync.configureGit",
                 json!({
-                    "base_url": "http://127.0.0.1:1/dav",
+                    "repo_path": sync_dir.to_str().unwrap(),
                     "master_password": "pw",
                     "test_cheap_kdf": true,
                 }),
@@ -5012,6 +6935,18 @@ mod tests {
             .await;
         assert!(r.error.is_none());
 
+        let preview = d
+            .dispatch(req("sync.preview", json!(null)))
+            .await
+            .result
+            .unwrap();
+        let approved = d
+            .dispatch(req(
+                "sync.now",
+                json!({"preview_token":preview["previewToken"]}),
+            ))
+            .await;
+        assert!(approved.error.is_none());
         let r = d
             .dispatch(req("sync.startAutoSync", json!({"interval_ms": 60000})))
             .await;

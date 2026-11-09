@@ -1,5 +1,6 @@
 //! OAuth device-flow helpers for Git hosting providers (Git sync backend).
 
+pub mod drive;
 use serde::{Deserialize, Serialize};
 
 use crate::secret;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runNativeViewTransaction } from './nativeViewTransaction.ts';
+import { nativeViewGeometryEquals } from './nativeViewHost.ts';
 test('deferred rollback retains target until ACK drain recovers, and stops on close',async()=>{
  const {recoverNativeInputRollback}=await import('./nativeViewTransaction.ts');
  for(const close of [false,true]){
@@ -26,7 +27,7 @@ for(const failure of ['lost','close','supersede'])test(`actual forward rollback 
  const source={quiesceWebviewInput:async()=>{},resumeWebviewInput:()=>calls.push('resume'),focus:()=>{},commitNativeSurface:()=>assert.fail('no commit')};
  const host={generation:()=> 'g',waitForDraw:async()=>true,acknowledgeInput:async()=>{q.accept({sessionId:'s',generation:'g',seq:1,data:'YQ=='});if(failure==='close'){scope.disposed=true;q.dispose();}if(failure==='supersede')rect.width++;throw Error('ACK zero response lost');},quiesceInput:async()=>{calls.push('freeze');return 1;},dispose:async()=>calls.push('detach')};
  const rect={x:0,y:0,width:100,height:10};
- const scope={onRecovered:(ctl,backend,request)=>{assert.equal(ctl,source);assert.equal(backend,'webview');assert.equal(request,17);calls.push('recovered');},backend:'webview',committedWebview:false,committedNative:false,stagingNative:false,controller:source,surface:{getBoundingClientRect:()=>rect},settlePaneLayout:async()=>{},disposed:false,transitionClosing:false,viewConfig:()=>({}),traceLayout:()=>{},traceView:()=>{},stagingError:null,visible:true,occluded:false,globalOccluded:false,document:{hidden:false},runNativeViewTransaction,recoverNativeInputRollback,quiesceAndDrainNativeInput,mountSurface:async()=>{},hostAdapter:host,inputQueue:q,surfaceReady:false,cleanupSurface:null,syncSurface:null,unlistenInput:null,unlistenPaste:null,unlistenFontDelta:null,rollbackPending:false,nativeSurfaceError:e=>e,onError:()=>{},canFocusSurface:()=>true};
+ const scope={onRecovered:(ctl,backend,request)=>{assert.equal(ctl,source);assert.equal(backend,'webview');assert.equal(request,17);calls.push('recovered');},backend:'webview',committedWebview:false,committedNative:false,stagingNative:false,controller:source,surface:{getBoundingClientRect:()=>rect},settlePaneLayout:async()=>{},disposed:false,transitionClosing:false,viewConfig:()=>({}),traceLayout:()=>{},traceView:()=>{},stagingError:null,visible:true,occluded:false,globalOccluded:false,document:{hidden:false},runNativeViewTransaction,recoverNativeInputRollback,quiesceAndDrainNativeInput,mountSurface:async()=>{},hostAdapter:host,inputQueue:q,surfaceReady:false,cleanupSurface:null,syncSurface:null,unlistenInput:null,unlistenPaste:null,unlistenFontDelta:null,rollbackPending:false,nativeSurfaceError:e=>e,onError:()=>{},canFocusSurface:()=>true,nativeViewGeometryEquals};
  const bindings=Object.keys(scope).map(k=>`let ${k}=scope.${k};`).join('\n');const code=js.replace(/\bdisposed\b/g,'scope.disposed');const run=new Function('scope',bindings.replace('let disposed=scope.disposed;','')+code)(scope);
  await assert.rejects(run(17),/ACK zero response lost/);
  assert.ok(calls.filter(c=>c==='write').length<=1);

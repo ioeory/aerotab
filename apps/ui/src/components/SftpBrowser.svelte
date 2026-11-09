@@ -17,7 +17,8 @@
   import SftpLocalPane from './SftpLocalPane.svelte';
   import SftpTransferQueue from './SftpTransferQueue.svelte';
   import { profileEndpointLabel } from '../lib/profileMeta';
-  import { startVerticalPanelResize } from '../lib/panelResize';
+  import Splitter from './Splitter.svelte';
+  let localWidth = $state(240);
   import { sftpSessionRegistry, type RegisteredSftpSession } from '../lib/sftpSessionRegistry.svelte';
   import { portal } from '../lib/portal';
   import type { LocalUploadTransferRequest, RemoteCrossTransferRequest } from '../lib/sftpTransferTypes';
@@ -1824,7 +1825,7 @@
     <div class="flex-1 min-h-0 flex flex-col">
     <div class="flex-1 min-h-0 flex">
       {#if showLocalPaneEffective}
-        <div class="w-[42%] min-w-[200px] max-w-[50%] flex flex-col min-h-0">
+        <div style={`width:${localWidth}px;max-width:70%;`} class="shrink-0 min-w-0 flex flex-col min-h-0">
           <SftpLocalPane
             cwd={localCwd}
             entries={localEntries}
@@ -1840,6 +1841,7 @@
             {onError}
           />
         </div>
+        <Splitter value={localWidth} min={100} max={900} label={i18n.t('sftp.resizeDock')} onChange={v=>localWidth=v} storageKey="sftp.local" />
       {/if}
       <div
         bind:this={remotePaneEl}
@@ -2019,19 +2021,7 @@
     </div>
 
     {#if showLocalPane && sharedTasks.length > 0}
-      <button
-        type="button"
-        aria-label={i18n.t('sftp.resizeTransferPanel')}
-        class="h-[3px] shrink-0 cursor-row-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0 w-full"
-        onpointerdown={(ev) => {
-          startVerticalPanelResize(ev, {
-            startHeightPx: transferPanelHeightPx,
-            minPx: 120,
-            maxPx: 360,
-            onHeight: (h) => onTransferPanelHeightChange?.(h),
-          });
-        }}
-      ></button>
+      <Splitter axis="y" value={transferPanelHeightPx} min={120} max={500} sign={-1} label={i18n.t('sftp.resizeTransferPanel')} onChange={h=>{transferPanelHeightPx=h;}} onEnd={()=>onTransferPanelHeightChange?.(transferPanelHeightPx)} />
       <SftpTransferQueue
         variant="compact"
         queueView="active"

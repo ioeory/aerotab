@@ -18,7 +18,8 @@ export interface McpConfig {
 }
 
 export type McpPermission = 'listProfiles' | 'readTerminal' | 'readFiles' | 'writeFiles'
-  | 'runCommand' | 'openSession' | 'manageProfiles' | 'tunnels' | 'remoteDesktop' | 'callRpc';
+  | 'runCommand' | 'openSession' | 'manageProfiles' | 'tunnels' | 'remoteDesktop' | 'callRpc'
+  | 'readNotes' | 'writeNotes' | 'readWorkspaces' | 'batchOperations';
 
 export function defaultMcpConfig(): McpConfig {
   return {
@@ -28,6 +29,7 @@ export function defaultMcpConfig(): McpConfig {
       listProfiles: true, readTerminal: true, readFiles: false, writeFiles: false,
       runCommand: false, openSession: false, manageProfiles: false, tunnels: false,
       remoteDesktop: false, callRpc: false,
+      readNotes: false, writeNotes: false, readWorkspaces: false, batchOperations: false,
     },
   };
 }

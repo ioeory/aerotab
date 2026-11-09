@@ -4,19 +4,32 @@
  */
 
 import type { RpcClient } from './rpc';
+// @ts-ignore Node's native TS test runner requires an explicit extension.
+import { syncTargetFingerprint } from './syncWizard.ts';
 
-export type SyncBackend = 'webdav' | 'git';
+export type SyncBackend = 'webdav' | 'git' | 's3' | 'drive';
 export type SyncGroup =
   | 'Connections'
   | 'Appearance'
   | 'Shortcuts'
   | 'PluginCfg'
-  | 'Credentials';
+  | 'Credentials'
+  | 'Notes';
 
 export type GitAuthMode = 'none' | 'https' | 'ssh' | 'oauth_github' | 'oauth_gitlab';
 
 export interface PersistedSyncSettings {
   backend?: SyncBackend;
+  s3Endpoint?: string;
+  s3Region?: string;
+  s3Bucket?: string;
+  s3Prefix?: string;
+  s3PathStyle?: boolean;
+  driveClientId?: string;
+  drivePrefix?: string;
+  firstSyncApproved?: boolean;
+  approvedTarget?: string;
+  setupVersion?: number;
   webdavUrl?: string;
   webdavUser?: string;
   webdavPassword?: string;
@@ -117,6 +130,7 @@ const SYNC_GROUPS: SyncGroup[] = [
   'Shortcuts',
   'PluginCfg',
   'Credentials',
+  'Notes',
 ];
 
 const DEFAULT_ENABLED: Record<SyncGroup, boolean> = {
@@ -125,13 +139,27 @@ const DEFAULT_ENABLED: Record<SyncGroup, boolean> = {
   Shortcuts: true,
   PluginCfg: true,
   Credentials: false,
+  Notes: false,
 };
 
 export async function loadPersistedSyncSettings(rpc: RpcClient): Promise<PersistedSyncSettings | null> {
   try {
     const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sync' });
     if (!r.value || typeof r.value !== 'object') return null;
-    return r.value as PersistedSyncSettings;
+    const settings = { ...r.value } as PersistedSyncSettings;
+    // Existing configs without a version are legacy; never silently opt in.
+    settings.protocol ??= 2;
+    let migrated = false;
+    for (const [field, account] of [['webdavPassword', 'sync.webdav.password'], ['gitSshPassphrase', 'sync.git.ssh'], ['gitRemotePassword', gitHttpsKeyringAccount(settings)]] as const) {
+      const secret = settings[field];
+      if (secret) {
+        await rpc.call('secret.setMaster', { account, secret });
+        delete settings[field];
+        migrated = true;
+      }
+    }
+    if (migrated) await rpc.call('settings.set', { key: 'sync', value: settings });
+    return settings;
   } catch {
     return null;
   }
@@ -154,6 +182,8 @@ function secretParams(settings: PersistedSyncSettings | null): { account?: strin
 }
 
 function hasMinimumSyncConfig(settings: PersistedSyncSettings): boolean {
+  if (settings.backend === 's3') return Boolean(settings.s3Endpoint && settings.s3Bucket && settings.s3Region);
+  if (settings.backend === 'drive') return Boolean(settings.driveClientId);
   if (settings.backend === 'webdav') {
     return Boolean(settings.webdavUrl?.trim());
   }
@@ -178,11 +208,23 @@ export async function configureSyncEngineFromSettings(
   settings: PersistedSyncSettings,
   masterPassword: string,
 ): Promise<void> {
+  if (settings.backend === 's3' || settings.backend === 'drive') {
+    await rpc.call(settings.backend === 's3' ? 'sync.configureS3' : 'sync.configureDrive', {
+      endpoint: settings.s3Endpoint, region: settings.s3Region, bucket: settings.s3Bucket,
+      prefix: settings.backend === 's3' ? settings.s3Prefix : settings.drivePrefix,
+      path_style: settings.s3PathStyle ?? true, client_id: settings.driveClientId,
+      protocol: settings.protocol ?? 3,
+      master_password: masterPassword, state_dir: settings.stateDir || undefined,
+    });
+    return;
+  }
   if (settings.backend === 'webdav') {
+    const saved = await rpc.call<{ secret: string }>('secret.getMaster', { account: 'sync.webdav.password' }).catch(() => ({ secret: '' }));
     await rpc.call('sync.configureWebdav', {
+      protocol: settings.protocol ?? 3,
       base_url: settings.webdavUrl,
       user: settings.webdavUser || undefined,
-      password: settings.webdavPassword || undefined,
+      password: settings.webdavPassword || saved.secret || undefined,
       master_password: masterPassword,
       state_dir: settings.stateDir || undefined,
     });
@@ -190,6 +232,7 @@ export async function configureSyncEngineFromSettings(
   }
 
   const args: Record<string, unknown> = {
+    protocol: settings.protocol ?? 3,
     repo_path: settings.gitRepoPath,
     master_password: masterPassword,
     author_name: settings.gitAuthorName || undefined,
@@ -213,7 +256,8 @@ export async function configureSyncEngineFromSettings(
   } else if (mode === 'ssh') {
     args.remote_auth = 'ssh';
     args.remote_ssh_key = settings.gitSshKeyPath;
-    if (settings.gitSshPassphrase) args.remote_ssh_passphrase = settings.gitSshPassphrase;
+    const saved = await rpc.call<{ secret: string }>('secret.getMaster', { account: 'sync.git.ssh' }).catch(() => ({ secret: '' }));
+    if (settings.gitSshPassphrase || saved.secret) args.remote_ssh_passphrase = settings.gitSshPassphrase || saved.secret;
     const port = Number(settings.gitSshPort);
     if (port > 0 && port !== 22) args.remote_ssh_port = port;
   } else if (mode === 'oauth_github') {
@@ -229,6 +273,10 @@ export async function applyPersistedAutoSync(
   settings: PersistedSyncSettings,
   opts?: { force?: boolean },
 ): Promise<void> {
+  if (settings.setupVersion === 3 && (!settings.firstSyncApproved || settings.approvedTarget !== syncTargetFingerprint(settings))) {
+    await rpc.call('sync.stopAutoSync', {});
+    return;
+  }
   if (!settings.autoSyncEnabled) {
     await rpc.call('sync.stopAutoSync', {});
     return;
@@ -300,6 +348,8 @@ export async function bootstrapSyncEngine(rpc: RpcClient): Promise<SyncBootstrap
 
 /** Ensure engine is live before sync.now (palette or settings). */
 export async function ensureSyncEngineConfigured(rpc: RpcClient): Promise<void> {
+  const settings = await loadPersistedSyncSettings(rpc);
+  if (settings?.setupVersion === 3 && (!settings.firstSyncApproved || settings.approvedTarget !== syncTargetFingerprint(settings))) throw new Error('Finish Config sync setup and approve the first merge preview before syncing.');
   if (await isSyncEngineConfigured(rpc)) return;
   const boot = await bootstrapSyncEngine(rpc);
   if (boot === 'configured' || boot === 'already_configured') return;

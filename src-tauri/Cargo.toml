@@ -47,7 +47,10 @@ keyring = { workspace = true }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 base64 = { workspace = true }
-quick-xml = "0.37"
+quick-xml = { version = "0.37", features = ["serialize"] }
+sha2 = "=0.10.9"
+hmac = "=0.12.1"
+chrono = { version = "=0.4.44", default-features = false, features = ["clock"] }
 wasmi = { workspace = true }
 encoding_rs = "0.8"
 

@@ -1,56 +1,18 @@
 #!/usr/bin/env bash
-# Copy NSIS installer to Windows Downloads, silent-install, launch for smoke test.
-# Run from repository root after ./tools/build-windows-xwin.sh
+# Safe by default: isolate startup and use a network-disabled Sandbox when a user app runs.
 set -euo pipefail
-
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-
-version="$(grep -E '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+version="$(node -p "require('./apps/ui/package.json').version")"
 installer_name="AeroTab_${version}_x64-setup.exe"
 src="target/x86_64-pc-windows-msvc/release/bundle/nsis/${installer_name}"
-
-if [[ ! -f "$src" ]]; then
-  echo "Installer not found: $src" >&2
-  echo "Run ./tools/build-windows-xwin.sh first." >&2
-  exit 1
-fi
-
+[[ -f "$src" ]] || { echo "Installer not found: $src" >&2; exit 1; }
+[[ "${SMOKE_ISOLATED:-1}" == 1 ]] || { echo 'Only isolated smoke is supported; refusing real user startup.' >&2; exit 1; }
 win_user="${WIN_USER:-ioe}"
-dest_dir="/mnt/c/Users/${win_user}/Downloads"
-dest="${dest_dir}/AeroTab_${version}_x64-setup.exe"
-
+dest_dir="/mnt/c/Users/${win_user}/Downloads/aerotab-smoke-${version}"
 mkdir -p "$dest_dir"
-cp -f "$src" "$dest"
-echo "Copied to ${dest}"
-
-win_dest=$(wslpath -w "$dest" 2>/dev/null || echo "C:\\Users\\${win_user}\\Downloads\\AeroTab_${version}_x64-setup.exe")
-
-# NSIS silent install (/S). Overwrites same-version install under LocalAppData\Programs.
-powershell.exe -NoProfile -Command "
-  \$ErrorActionPreference = 'Stop'
-  \$installer = '${win_dest}'
-  Write-Host \"Installing: \$installer\"
-  \$p = Start-Process -FilePath \$installer -ArgumentList '/S' -Wait -PassThru
-  if (\$p.ExitCode -ne 0) { throw \"Installer exit code \$(\$p.ExitCode)\" }
-  \$candidates = @(
-    (Join-Path \$env:LOCALAPPDATA 'AeroTab\aerotab-app.exe'),
-    (Join-Path \$env:LOCALAPPDATA 'Programs\AeroTab\aerotab-app.exe'),
-    (Join-Path \$env:LOCALAPPDATA 'Programs\aerotab\aerotab-app.exe')
-  )
-  \$exe = \$candidates | Where-Object { Test-Path \$_ } | Select-Object -First 1
-  if (-not \$exe) {
-    \$exe = Get-ChildItem -Path \$env:LOCALAPPDATA -Recurse -Filter 'aerotab-app.exe' -ErrorAction SilentlyContinue |
-      Where-Object { \$_.FullName -match 'AeroTab' } |
-      Sort-Object LastWriteTime -Descending |
-      Select-Object -First 1 -ExpandProperty FullName
-  }
-  if (-not \$exe) { throw 'Installed aerotab-app.exe not found under LocalAppData' }
-  Write-Host \"Launching: \$exe\"
-  \$app = Start-Process -FilePath \$exe -PassThru
-  Start-Sleep -Seconds 4
-  \$proc = Get-Process -Id \$app.Id -ErrorAction SilentlyContinue
-  if (-not \$proc) { throw 'Process exited within 4s' }
-  Write-Host \"Smoke OK: PID \$(\$proc.Id) still running\"
-"
-
-echo "Windows smoke test passed for ${version}"
+cp -f "$src" "$dest_dir/$installer_name"
+cp -f tools/windows-isolated-smoke.ps1 "$dest_dir/windows-isolated-smoke.ps1"
+echo "Copied to $dest_dir/$installer_name"
+# The PowerShell helper passes --smoke-test, checks MainWindowTitle including
+# [SMOKE TEST - ISOLATED], and installs with /D= in a separate temporary directory.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$dest_dir/windows-isolated-smoke.ps1")" -Version "$version"

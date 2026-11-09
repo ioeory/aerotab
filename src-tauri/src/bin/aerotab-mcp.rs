@@ -170,6 +170,44 @@ impl rmcp::ServerHandler for HttpProxy {
         self.peer.list_tools(request).await.map_err(proxy_error)
     }
 
+    async fn list_resources(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParam>,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        self.peer.list_resources(request).await.map_err(proxy_error)
+    }
+    async fn list_resource_templates(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParam>,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
+        self.peer
+            .list_resource_templates(request)
+            .await
+            .map_err(proxy_error)
+    }
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParam,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
+        self.peer.read_resource(request).await.map_err(proxy_error)
+    }
+    async fn list_prompts(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParam>,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
+        self.peer.list_prompts(request).await.map_err(proxy_error)
+    }
+    async fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParam,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::GetPromptResult, rmcp::ErrorData> {
+        self.peer.get_prompt(request).await.map_err(proxy_error)
+    }
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParam,
@@ -265,6 +303,13 @@ async fn headless(dir: &std::path::Path) -> anyhow::Result<()> {
     *state.profiles.lock().await = Some(profiles);
     *state.known_hosts.lock().await = Some(known_hosts);
     *state.vault.lock().await = Some(vault);
+    *state.notes.lock().await =
+        Some(aerotab_core::notes::NotesStore::open(dir.join("notes")).map_err(anyhow::Error::msg)?);
+    *state.scripts.lock().await = Some(Arc::new(aerotab_core::scripts::ScriptsService::new(
+        aerotab_core::scripts::ScriptsStore::open(dir.join("scripts"))
+            .map_err(anyhow::Error::msg)?,
+    )));
+    // Headless stdio can prepare plans but cannot create a visible local approval.
     let dispatcher = Arc::new(Dispatcher::new());
     register_all(&dispatcher, state.clone());
     McpServer::new(state, dispatcher, config)

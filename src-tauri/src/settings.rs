@@ -111,6 +111,22 @@ impl SettingsStore {
         Ok(())
     }
 
+    /// Atomically persist identity and protocol progress in the local tree.
+    pub fn local_set_batch(&self, entries: &[(&str, Value)]) -> Result<(), SettingsError> {
+        if self.inner.read_only {
+            return Err(SettingsError::Sled(sled::Error::Unsupported(
+                "settings store is read-only".into(),
+            )));
+        }
+        let mut batch = sled::Batch::default();
+        for (key, value) in entries {
+            batch.insert(key.as_bytes(), serde_json::to_vec(value)?);
+        }
+        self.inner.local.apply_batch(batch)?;
+        self.inner.local.flush()?;
+        Ok(())
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Value>, SettingsError> {
         match self.inner.tree.get(key)? {
             None => Ok(None),

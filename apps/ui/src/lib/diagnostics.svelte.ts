@@ -1,4 +1,5 @@
 import { b64encode, tauriInvoke, type RpcClient } from './rpc';
+import { terminalGeometrySnapshot } from './termgrid/resizeDiagnostics';
 
 export type DiagnosticCategory = 'connection' | 'sync' | 'transfer' | 'profile' | 'workspace' | 'settings' | 'update' | 'app';
 export type DiagnosticLevel = 'info' | 'warn' | 'error';
@@ -24,6 +25,7 @@ interface DiagnosticPack {
   };
   summary: Record<DiagnosticCategory, number>;
   events: DiagnosticEvent[];
+  terminalGeometry: ReturnType<typeof terminalGeometrySnapshot>;
 }
 
 const STORAGE_KEY = 'aerotab.diagnostics.events.v1';
@@ -119,6 +121,7 @@ class DiagnosticsStore {
       },
       summary: this.summary(),
       events: this.events,
+      terminalGeometry: terminalGeometrySnapshot(),
     };
   }
 }

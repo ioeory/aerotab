@@ -1,11 +1,20 @@
 <script lang="ts">
-  import { MoreHorizontal, Plug } from '@lucide/svelte';
+  import { tick } from 'svelte';
+  import type { ProfileTreeFolder } from '../../lib/profileTree';
+  import { MoreHorizontal, Plug, Folder } from '@lucide/svelte';
   import type { ProfileHealthResult, StoredProfile } from '../../lib/types';
   import ProfileListRow, { type ProfileQuickAction } from '../ProfileListRow.svelte';
   import { i18n } from '../../lib/i18n.svelte';
   import { tabs } from '../../lib/tabs.svelte';
   import { hostLabel } from './hostLabels';
-  let { profiles, view, selectedIds, focusedId, health, onOpen, onSelect, onCheck, onMenu, onDrag, onKeydown, onQuickAction, renaming, renameDraft, onRenameDraft, onRenameCommit, onRenameCancel }: {
+  let { folders, onEnterFolder, onFolderMenu, onFolderDrag, onFolderOver, onFolderDrop, folderRenaming, folderRenameDraft, onFolderRenameDraft, onFolderRenameCommit, onFolderRenameCancel, profiles, view, selectedIds, focusedId, health, onOpen, onSelect, onCheck, onMenu, onDrag, onKeydown, onQuickAction, renaming, renameDraft, onRenameDraft, onRenameCommit, onRenameCancel }: {
+    folders: ProfileTreeFolder[];
+    onEnterFolder: (folder: ProfileTreeFolder) => void;
+    onFolderMenu: (folder: ProfileTreeFolder, ev: MouseEvent) => void;
+    onFolderDrag: (folder: ProfileTreeFolder, ev: DragEvent) => void;
+    onFolderOver: (folder: ProfileTreeFolder, ev: DragEvent) => void;
+    onFolderDrop: (folder: ProfileTreeFolder, ev: DragEvent) => void;
+    folderRenaming: string | null; folderRenameDraft: string; onFolderRenameDraft: (value: string) => void; onFolderRenameCommit: (path: string) => void; onFolderRenameCancel: () => void;
     profiles: StoredProfile[]; view: 'grid' | 'list'; selectedIds: Set<string>; focusedId: string | null;
     health: Record<string, ProfileHealthResult>;
     onOpen: (profile: StoredProfile) => void; onSelect: (profile: StoredProfile, ev: MouseEvent) => void;
@@ -15,9 +24,25 @@
     renaming: string | null; renameDraft: string; onRenameDraft: (value: string) => void;
     onRenameCommit: (profile: StoredProfile) => void; onRenameCancel: () => void;
   } = $props();
+  let folderRenameInput = $state<HTMLInputElement | null>(null);
+  $effect(() => {
+    if (!folderRenaming) return;
+    let cancelled = false;
+    void tick().then(() => { if (!cancelled) { folderRenameInput?.focus({ preventScroll: true }); folderRenameInput?.select(); } });
+    return () => { cancelled = true; };
+  });
   const connected = $derived(new Set(tabs.tabs.flatMap(tab => tab.panes.map(pane => pane.profileId).filter(Boolean))));
 </script>
 <div class="resource-views" class:grid={view === 'grid'}>
+  {#each folders as folder (folder.path)}
+    <article class="folder-card">
+      <button type="button" class="folder-open" draggable="true" ondragstart={(ev) => onFolderDrag(folder, ev)} ondragover={(ev) => onFolderOver(folder, ev)} ondrop={(ev) => onFolderDrop(folder, ev)} onclick={() => onEnterFolder(folder)} oncontextmenu={(ev) => onFolderMenu(folder, ev)}><Folder size={26} /><span>{folder.name}</span></button>
+      {#if folderRenaming === folder.path}
+        <input bind:this={folderRenameInput} aria-label={i18n.t('sidebar.renameGroup')} value={folderRenameDraft} oninput={(ev) => onFolderRenameDraft(ev.currentTarget.value)} onblur={() => onFolderRenameCommit(folder.path)} onkeydown={(ev) => { if (ev.key === 'Enter') onFolderRenameCommit(folder.path); if (ev.key === 'Escape') onFolderRenameCancel(); }} />
+      {/if}
+      <button type="button" aria-label={i18n.t('sidebar.bulkActions')} onclick={(ev) => onFolderMenu(folder, ev)}><MoreHorizontal size={18} /></button>
+    </article>
+  {/each}
   {#each profiles as profile (profile.id)}
     <article class:selected={selectedIds.has(profile.id)}>
       <ProfileListRow {profile} variant="resource" health={health[profile.id]} focused={focusedId === profile.id}
@@ -37,6 +62,8 @@
   {/each}
 </div>
 <style>
+  .folder-card { display: flex !important; align-items: center; gap: 8px; }
+  .folder-open { flex: 1; display: flex; gap: 12px; padding: 12px; justify-content: flex-start; text-align: left; }
   .resource-views { display: grid; gap: 8px; align-content: start; padding: 4px; }
   .resource-views.grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); gap: 14px; }
   article { min-width: 0; border: 1px solid var(--color-border-soft); border-radius: 10px; background: var(--color-panel); padding: 12px; }

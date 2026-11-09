@@ -102,6 +102,8 @@
 <div class="settings-section">
   <h2 class="flex items-center gap-2"><Plug size={16} />{i18n.t('settings.nav.mcp')}</h2>
   <p class="hint">{i18n.t('mcp.intro')}</p>
+  <h3 class="section-h">{i18n.t('mcp.discovery')}</h3>
+  <p class="hint">{i18n.t('mcp.discoveryHint')}</p>
   <fieldset disabled={busy || !loaded}>
     <legend class="section-h">{i18n.t('mcp.server')}</legend>
     <label class="row"><span>{i18n.t('mcp.enabled')}</span><input type="checkbox" bind:checked={config.enabled} onchange={dirty} /></label>

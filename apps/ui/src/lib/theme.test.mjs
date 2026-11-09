@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { BUILTIN_THEMES, themeTokens, contrastRatio, xtermPalette, applyTheme } from './theme.ts';
 import { normalizeAppearancePreferences, resolveAppearanceTheme, createAppearanceCoordinator } from './appearancePreferences.ts';
 
-test('six stable palettes meet body AAA and help AA on every chrome surface', () => {
-  assert.deepEqual(BUILTIN_THEMES.map(t => t.name).sort(), ['gruvbox-dark', 'one-light', 'solarized-dark', 'termora-dark', 'termora-light', 'tokyo-night']);
+test('twenty-four palettes preserve six stable IDs and meet body AAA and help AA on every chrome surface', () => {
+  assert.ok(BUILTIN_THEMES.length >= 24);
+  for (const id of ['gruvbox-dark', 'one-light', 'solarized-dark', 'termora-dark', 'termora-light', 'tokyo-night']) assert.ok(BUILTIN_THEMES.some(t => t.name === id));
+  assert.equal(new Set(BUILTIN_THEMES.map(t => themeTokens(t).bg)).size, BUILTIN_THEMES.length);
   for (const theme of BUILTIN_THEMES) {
     const tokens = themeTokens(theme);
     for (const surface of ['bg', 'panel', 'panel-2', 'surface-raised']) {

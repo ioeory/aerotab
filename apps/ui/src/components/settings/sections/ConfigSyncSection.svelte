@@ -6,12 +6,14 @@
   // engine on launch via bootstrapSyncEngine().
 
   import { onMount, onDestroy } from 'svelte';
+  import { wizardCanEnter, syncSetupComplete, syncTargetFingerprint } from '../../../lib/syncWizard';
   import { RefreshCw, Play } from '@lucide/svelte';
   import { b64decode, b64encode, type RpcClient } from '../../../lib/rpc';
   import { i18n } from '../../../lib/i18n.svelte';
   import { appConfirm } from '../../../lib/confirm.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import {
+    loadPersistedSyncSettings,
     applyPersistedAutoSync,
     bootstrapSyncEngine,
     configureSyncEngineFromSettings,
@@ -32,9 +34,75 @@
   }
   let { rpc, onError, onSyncApplied }: Props = $props();
 
-  type Backend = 'webdav' | 'git';
-  type SyncGroup = 'Connections' | 'Appearance' | 'Shortcuts' | 'PluginCfg' | 'Credentials';
-  const syncGroups: SyncGroup[] = ['Connections', 'Appearance', 'Shortcuts', 'PluginCfg', 'Credentials'];
+  type Backend = 'webdav' | 'git' | 's3' | 'drive';
+  let s3Endpoint = $state('');
+  let s3Region = $state('us-east-1');
+  let s3Bucket = $state('');
+  let s3Prefix = $state('aerotab');
+  let s3PathStyle = $state(true);
+  let s3AccessKey = $state('');
+  let s3SecretKey = $state('');
+  let s3SessionToken = $state('');
+  let driveClientId = $state('');
+  let drivePrefix = $state('aerotab');
+  let firstSyncApproved = $state(false);
+  let wizardStep = $state(0);
+  let tested = $state(false);
+  let configuredTarget = $state('');
+  let approvedTarget = $state('');
+  let previewAccepted = $state(false);
+  let previewToken = $state<string | null>(null);
+  const wizardState = $derived.by(() => ({
+    storage: backend === 'git' ? Boolean(gitRepoPath.trim()) : backend === 'webdav' ? /^https:\/\//.test(webdavUrl) : backend === 's3' ? Boolean(/^https:\/\//.test(s3Endpoint) && s3Bucket && s3Region) : Boolean(driveClientId),
+    tested, password: Boolean(masterPassword || masterSecretSaved), content: selectedGroups().length > 0,
+    configured: configured && configuredTarget === syncTargetFingerprint(currentPersistedSettings()), preview: previewAccepted,
+  }));
+  async function testProvider() {
+    if (!wizardState.storage) return;
+    if (backend === 's3' || backend === 'drive') { await testCloud(); return; }
+    busy = true;
+    const target = syncTargetFingerprint(currentPersistedSettings());
+    try {
+      await saveTransportSecrets();
+      await rpc.call('sync.testProvider', { ...currentPersistedSettings() });
+      tested = target === syncTargetFingerprint(currentPersistedSettings());
+    } catch (e) { onError((e as Error).message); }
+    finally { busy = false; }
+  }
+  function goStep(step: number) { if (!busy && wizardCanEnter(step, wizardState)) wizardStep = step; }
+  const wizardLabels = ['sync.stepStorage', 'sync.stepAuthorize', 'sync.stepPassword', 'sync.stepContent', 'sync.stepFirst'] as const;
+  let cloudPreview = $state<{ objects: number; bytes: number } | null>(null);
+
+  async function saveTransportSecrets() {
+    if (webdavPassword) await rpc.call('secret.setMaster', { account: 'sync.webdav.password', secret: webdavPassword });
+    if (gitSshPassphrase) await rpc.call('secret.setMaster', { account: 'sync.git.ssh', secret: gitSshPassphrase });
+    if (s3AccessKey && s3SecretKey) await rpc.call('secret.setMaster', { account: 'sync.s3.credentials', secret: JSON.stringify({ access_key_id: s3AccessKey, secret_access_key: s3SecretKey, session_token: s3SessionToken || undefined }) });
+    webdavPassword = ''; gitSshPassphrase = ''; s3SecretKey = ''; s3SessionToken = ''; s3AccessKey = '';
+  }
+  function cloudParams() {
+    return { provider: backend, endpoint: s3Endpoint, region: s3Region, bucket: s3Bucket, prefix: backend === 's3' ? s3Prefix : drivePrefix, path_style: s3PathStyle, client_id: driveClientId, master_password: '' };
+  }
+  async function testCloud() {
+    busy = true;
+    const target = syncTargetFingerprint(currentPersistedSettings());
+    try { await saveTransportSecrets(); const result = await rpc.call<{ objects: number; bytes: number }>('sync.testCloud', cloudParams()); if (target === syncTargetFingerprint(currentPersistedSettings())) { cloudPreview = result; tested = true; } }
+    catch (e) { onError((e as Error).message); }
+    finally { busy = false; }
+  }
+  async function authorizeDrive() {
+    busy = true;
+    try {
+      await rpc.call('sync.driveAuthorize', { client_id: driveClientId });
+      await rpc.call('sync.driveFinishAuthorization', {});
+      configured = false; configuredTarget = ''; approvedTarget = '';
+      firstSyncApproved = false; previewAccepted = false; previewToken = null;
+      await persist();
+      await testCloud();
+    } catch (e) { onError((e as Error).message); }
+    finally { busy = false; }
+  }
+  type SyncGroup = import('../../../lib/syncConfig').SyncGroup;
+  const syncGroups: SyncGroup[] = ['Connections', 'Appearance', 'Shortcuts', 'PluginCfg', 'Credentials', 'Notes'];
 
   function defaultEnabledGroups(): Record<SyncGroup, boolean> {
     return {
@@ -43,6 +111,7 @@
       Shortcuts: true,
       PluginCfg: true,
       Credentials: false,
+      Notes: false,
     };
   }
 
@@ -111,8 +180,65 @@
   let deviceId = $state<string | null>(null);
   let lastSyncMs = $state<number | null>(null);
   let autoIntervalMs = $state<number | null>(null);
+  let notesPausedDirty = $state(false);
   let kindLive = $state<Backend | null>(null);
   let protocol = $state<number>(1);
+  let configuredProtocol = $state(3);
+  let maintenancePending = $state<{pending:boolean;checkpointChanged?:boolean;blocked?:boolean;canCancel?:boolean;counts?:Record<string,{candidate:number;checkpoint:number;different:number;tombstones:number}>}>({pending:false});
+  async function inspectMaintenance() {try{maintenancePending=await rpc.call('sync.maintenanceStatus',{});}catch(e){setSyncInfo('err',(e as Error).message);}}
+  async function cancelMaintenance() {if(!(await appConfirm(i18n.t('sync.pendingCancelConfirm'))))return;busy=true;try{await rpc.call('sync.maintenanceCancel',{confirm:'CANCEL MAINTENANCE KEEP LOCAL'});maintenancePending={pending:false};firstSyncApproved=false;previewAccepted=false;previewToken=null;await refreshStatus();setSyncInfo('info',i18n.t('sync.pendingCancelled'));}catch(e){setSyncInfo('err',(e as Error).message);}finally{busy=false;}}
+  let recoveryArchive = $state<{available:boolean;encrypted?:boolean;groups?:string[];records?:number}>({available:false});
+  let recoveryError = $state('');
+  let recoveryConfirm = $state('');
+  async function inspectRecovery() {
+    try { const summary=await rpc.call<typeof recoveryArchive>('sync.recoveryInspect',{}); recoveryArchive=summary; recoveryError=''; }
+    catch(e) { recoveryError=(e as Error).message; }
+  }
+  async function exportRecovery() {
+    busy=true;
+    try {
+      const result=await rpc.call<{available:boolean;encrypted:boolean;bundle?:string}>('sync.recoveryExport',{});
+      if(!result.available || result.encrypted!==true || !result.bundle) throw new Error(i18n.t('sync.recoveryUnavailable'));
+      const bytes=Uint8Array.from(atob(result.bundle),c=>c.charCodeAt(0));
+      const url=URL.createObjectURL(new Blob([bytes],{type:'application/octet-stream'}));
+      try {const link=document.createElement('a');link.href=url;link.download='aerotab-sync-recovery.bin';link.click();} finally {URL.revokeObjectURL(url);}
+      recoveryError='';
+    } catch(e) {recoveryError=(e as Error).message;} finally {busy=false;}
+  }
+  async function restoreRecovery() {
+    if(busy || recoveryConfirm!=='RESTORE LOCAL RECOVERY') return;
+    if(!(await appConfirm(i18n.t('sync.recoveryRestoreConfirm'),{danger:true})))return;
+    busy=true;
+    try {
+      await rpc.call('sync.recoveryRestore',{confirm:recoveryConfirm});
+      firstSyncApproved=false;previewAccepted=false;previewToken=null;recoveryConfirm='';
+      await refreshStatus(); await inspectRecovery();setSyncInfo('info',i18n.t('sync.recoveryRestored'));
+    } catch(e) {recoveryError=(e as Error).message;} finally {busy=false;}
+  }
+  let peers = $state<{id:string;retired:boolean;self:boolean}[]>([]);
+  async function refreshPeers() {
+    if (protocol !== 3) return;
+    try { const r=await rpc.call<{devices:typeof peers}>('sync.devices',{}); peers=r.devices; } catch(e) {onError((e as Error).message);}
+  }
+  async function migrateV3() {
+    busy=true;
+    try {
+      const p=await rpc.call<{previewToken:string;legacyObjects:number;groups:Record<string,number>}>('sync.migrationPreview',{});
+      if (!(await appConfirm(i18n.t('sync.v3MigrationConfirm',{count:p.legacyObjects})))) return;
+      await rpc.call('sync.migrateV3',{previewToken:p.previewToken,confirm:'MIGRATE TO V3'});
+      configuredProtocol=3; firstSyncApproved=false; previewAccepted=false; previewToken=null;
+      await persist(); await refreshStatus();
+      setSyncInfo('ok',i18n.t('sync.v3MigrationDone'));
+    } catch(e) {setSyncInfo('err',(e as Error).message);} finally {busy=false;}
+  }
+  async function rejoinDevice() {
+    if (!(await appConfirm(i18n.t('sync.v3RejoinConfirm'),{danger:true}))) return;
+    try {await rpc.call('sync.rejoin',{confirm:'REJOIN AS NEW DEVICE'});firstSyncApproved=false;previewAccepted=false;previewToken=null;await persist();await refreshStatus();await refreshPeers();} catch(e) {setSyncInfo('err',(e as Error).message);}
+  }
+  async function retirePeer(id:string) {
+    if (!(await appConfirm(i18n.t('sync.v3RetireConfirm',{id}),{danger:true}))) return;
+    try {await rpc.call('sync.retireDevice',{deviceId:id,confirm:id});await refreshPeers();} catch(e) {setSyncInfo('err',(e as Error).message);}
+  }
   let ownSeq = $state<number | null>(null);
   let cursors = $state<Record<string, number> | null>(null);
   let lastOplog = $state<{
@@ -122,6 +248,31 @@
     snapshotUsed?: boolean;
     compacted?: boolean;
   } | null>(null);
+  let capacity = $state<{
+    worktreeBytes: number; gitBytes: number | null; totalBytes: number;
+    opBytes: number; opFiles: number; snapshotBytes: number; snapshotFiles: number;
+    commits: number | null; branch?: string; headOid?: string; historyRewriteAllowed: boolean;
+  } | null>(null);
+  let rewriteConfirmation = $state('');
+
+  async function refreshCapacity() {
+    try { capacity = await rpc.call('sync.capacity', {}); }
+    catch (e) { onError(`sync capacity: ${(e as Error).message}`); }
+  }
+
+  async function rewriteHistory() {
+    if (!capacity?.headOid || rewriteConfirmation !== 'REWRITE SYNC HISTORY') return;
+    if (!(await appConfirm(i18n.t('sync.rewriteConfirm'), { danger: true }))) return;
+    busy = true;
+    try {
+      await rpc.call('sync.rewriteHistory', { expectedOid: capacity.headOid, confirmation: rewriteConfirmation });
+      rewriteConfirmation = '';
+      await refreshCapacity();
+      setSyncInfo('ok', i18n.t('sync.rewriteDone'));
+    } catch (e) { setSyncInfo('err', (e as Error).message); }
+    finally { busy = false; }
+  }
+
   let busy = $state(false);
   let info = $state('');
   let infoTone = $state<'info' | 'ok' | 'err'>('info');
@@ -213,7 +364,16 @@
   }
   let syncHistory = $state<SyncHistoryEntry[]>([]);
 
-  function markDirty() { settingsCoord.markDirty('configsync'); }
+  function markDirty() {
+    firstSyncApproved = false; approvedTarget = ''; previewAccepted = false; tested = false;
+    configuredTarget = ''; cloudPreview = null;
+    void rpc.call('sync.stopAutoSync', {}).catch(() => {});
+    void rpc.call('settings.get', { key: 'sync' }).then((result) => {
+      const value = (result as { value?: PersistedSyncSettings }).value;
+      if (value) return rpc.call('settings.set', { key: 'sync', value: { ...value, setupVersion: 3, firstSyncApproved: false, approvedTarget: '' } });
+    }).catch(() => {});
+    settingsCoord.markDirty('configsync');
+  }
 
   function fmtTime(ms: number | null): string {
     if (ms == null) return 'never';
@@ -228,6 +388,7 @@
       case 'Shortcuts': return 'Custom hotkey bindings';
       case 'PluginCfg': return 'Plugin paths and plugin configuration';
       case 'Credentials': return 'Encrypted Vault-backed passwords and private key material';
+      case 'Notes': return i18n.t('sync.notesDescription');
     }
   }
 
@@ -238,6 +399,8 @@
   function currentPersistedSettings(): PersistedSyncSettings {
     return {
       backend,
+      protocol: configuredProtocol,
+      s3Endpoint, s3Region, s3Bucket, s3Prefix, s3PathStyle, driveClientId, drivePrefix, firstSyncApproved, approvedTarget, setupVersion: 3,
       webdavUrl,
       webdavUser,
       webdavPassword,
@@ -314,14 +477,25 @@
       nextChecked = await appConfirm(i18n.t('sync.credentialSyncEnableConfirm'));
     }
     enabledGroups = { ...enabledGroups, [group]: nextChecked };
-    markDirty();
+    firstSyncApproved = false; approvedTarget = ''; configuredTarget = ''; previewAccepted = false;
+    void rpc.call('sync.stopAutoSync', {}).catch(() => {});
+    settingsCoord.markDirty('configsync');
   }
 
   async function loadPersisted() {
     try {
-      const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'sync' });
-      const v = (r.value ?? {}) as Record<string, unknown>;
-      if (v.backend === 'webdav' || v.backend === 'git') backend = v.backend;
+      const v = (await loadPersistedSyncSettings(rpc) ?? {}) as Record<string, unknown>;
+      configuredProtocol = typeof v.protocol === 'number' ? v.protocol : 3;
+      if (v.backend === 'webdav' || v.backend === 'git' || v.backend === 's3' || v.backend === 'drive') backend = v.backend;
+      if (typeof v.s3Endpoint === 'string') s3Endpoint = v.s3Endpoint;
+      if (typeof v.s3Region === 'string') s3Region = v.s3Region;
+      if (typeof v.s3Bucket === 'string') s3Bucket = v.s3Bucket;
+      if (typeof v.s3Prefix === 'string') s3Prefix = v.s3Prefix;
+      if (typeof v.s3PathStyle === 'boolean') s3PathStyle = v.s3PathStyle;
+      if (typeof v.driveClientId === 'string') driveClientId = v.driveClientId;
+      if (typeof v.drivePrefix === 'string') drivePrefix = v.drivePrefix;
+      firstSyncApproved = v.firstSyncApproved === true;
+      approvedTarget = typeof v.approvedTarget === 'string' ? v.approvedTarget : '';
       if (typeof v.webdavUrl === 'string') webdavUrl = v.webdavUrl;
       if (typeof v.webdavUser === 'string') webdavUser = v.webdavUser;
       if (typeof v.webdavPassword === 'string') webdavPassword = v.webdavPassword;
@@ -365,23 +539,21 @@
   }
 
   async function persist() {
-    // Note: this is the SettingsLayout "Save" hook; passwords here are stored
-    // alongside the rest of settings (sled). Production deployments should
-    // store credentials in the OS keychain via aerotab-core's `secret` module;
-    // master password is intentionally excluded.
+    await saveTransportSecrets();
     await rpc.call('settings.set', {
       key: 'sync',
       value: {
         backend,
-        webdavUrl, webdavUser, webdavPassword,
+        s3Endpoint, s3Region, s3Bucket, s3Prefix, s3PathStyle, driveClientId, drivePrefix, firstSyncApproved, approvedTarget, setupVersion: 3,
+        webdavUrl, webdavUser,
         gitRepoPath, gitRemoteUrl, gitRemoteName, gitRemoteBranch,
         gitAuthorName, gitAuthorEmail,
         gitRemoteUser,
-        gitSshKeyPath, gitSshPassphrase, gitSshPort,
+        gitSshKeyPath, gitSshPort,
         gitAuthMode, githubOAuthClientId, gitlabOAuthClientId, gitlabOAuthBaseUrl,
         keyringAccount, vaultKeyringAccount, gitHttpsKeyringAccount: GIT_HTTPS_KEYRING,
         stateDir, autoSyncEnabled, autoSyncMinutes, enabledGroups,
-        protocol: 2,
+        protocol: configuredProtocol,
       },
     });
   }
@@ -394,6 +566,7 @@
         deviceId: string | null;
         lastSyncMs: number | null;
         autoIntervalMs: number | null;
+        notesPausedDirty?: boolean;
         protocol?: number;
         ownSeq?: number | null;
         cursors?: Record<string, number> | null;
@@ -404,10 +577,12 @@
       deviceId = s.deviceId;
       lastSyncMs = s.lastSyncMs;
       autoIntervalMs = s.autoIntervalMs;
+      notesPausedDirty = s.notesPausedDirty ?? false;
       protocol = s.protocol ?? (s.configured ? 2 : 1);
       ownSeq = s.ownSeq ?? null;
       cursors = s.cursors ?? null;
       lastOplog = s.lastOplog ?? null;
+      if(configured) { await inspectMaintenance(); await inspectRecovery(); }
     } catch {
       /* engine not configured yet */
     }
@@ -418,8 +593,9 @@
     busy = true;
     setSyncInfo('info', i18n.t('sync.compacting'));
     try {
-      await rpc.call('sync.compact', { groups: selectedGroups() });
-      setSyncInfo('ok', i18n.t('sync.compactDone'));
+      const result = await rpc.call<{ compacted: boolean }>('sync.compact', { groups: selectedGroups() });
+      setSyncInfo(result.compacted ? 'ok' : 'info', i18n.t(result.compacted ? 'sync.compactDone' : 'sync.partialSnapshotRefused'));
+      await refreshCapacity();
       await refreshStatus();
     } catch (e) {
       setSyncInfo('err', i18n.t('sync.compactFailed', { message: (e as Error).message }));
@@ -642,6 +818,7 @@
   }
 
   async function configure() {
+    if (!wizardCanEnter(4, wizardState)) return;
     const passwordForConfigure = await masterPasswordForConfigure().catch((e) => {
       onError(`secret read: ${(e as Error).message}`);
       return null;
@@ -661,8 +838,9 @@
     busy = true;
     setSyncInfo('info', i18n.t('sync.configuring'));
     try {
+      await saveTransportSecrets();
       const snapshot = currentPersistedSettings();
-      if (gitAuthMode === 'https') {
+      if (backend === 'git' && gitAuthMode === 'https') {
         if (gitRemotePassword.trim()) {
           await saveGitHttpsPassword(rpc, snapshot, gitRemotePassword);
           gitRemotePassword = '';
@@ -680,8 +858,10 @@
         masterPassword = '';
         await refreshSecretStatus();
       }
+      configuredTarget = syncTargetFingerprint(currentPersistedSettings());
+      previewAccepted = false;
       await persist();
-      await applyPersistedAutoSync(rpc, snapshot, { force: true });
+      await rpc.call('sync.stopAutoSync', {});
       setSyncInfo('ok', i18n.t('sync.engineConfigured'));
       await refreshStatus();
       await loadSyncHistory();
@@ -695,8 +875,8 @@
   }
 
   async function syncNow() {
+    if (!wizardState.configured || !wizardCanEnter(4, wizardState)) return;
     try {
-      await ensureSyncEngineConfigured(rpc);
       await refreshStatus();
       if (!configured) {
         setSyncInfo('err', i18n.t('sync.notConfiguredHint'));
@@ -721,10 +901,25 @@
       return;
     }
     if (!(await ensureVaultForSync())) return;
+    {
+      try {
+        const target = syncTargetFingerprint(currentPersistedSettings());
+        const preview = await rpc.call<{ added: number; changed: number; deleted: number; publish: number; conflicts: number; previewToken: string }>('sync.preview', { groups });
+        if (!(await appConfirm(i18n.t('sync.mergePreview', { added: preview.added, changed: preview.changed, deleted: preview.deleted, publish: preview.publish, conflicts: preview.conflicts })))) return;
+        if (target !== syncTargetFingerprint(currentPersistedSettings()) || !wizardState.configured) return;
+        previewAccepted = true;
+        previewToken = preview.previewToken;
+      } catch (e) { onError((e as Error).message); return; }
+    }
+    if (!syncSetupComplete(wizardState)) return;
     busy = true;
     setSyncInfo('info', i18n.t('sync.syncing'));
     try {
-      const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups });
+      const stats = await rpc.call<Record<string, unknown>>('sync.now', { groups, preview_token: previewToken });
+      firstSyncApproved = true;
+      approvedTarget = syncTargetFingerprint(currentPersistedSettings());
+      await persist();
+      await applyPersistedAutoSync(rpc, currentPersistedSettings());
       setSyncInfo('ok', formatSyncStats(stats));
       await refreshStatus();
       await loadSyncHistory();
@@ -768,7 +963,7 @@
   }
 
   function onAutoSyncSettingsChanged() {
-    markDirty();
+    settingsCoord.markDirty('configsync');
   }
 
   async function listSyncRecords() {
@@ -962,7 +1157,27 @@
 
 <div class="settings-section">
   <h2>Config Sync</h2>
+  <p class="help">{i18n.t('sync.wizardSteps')}</p>
+  <nav class="flex gap-2 flex-wrap" aria-label={i18n.t('sync.wizardSteps')}>
+    {#each wizardLabels as label, index}
+      <button type="button" class="btn-secondary" aria-current={wizardStep === index ? 'step' : undefined} disabled={busy || !wizardCanEnter(index, wizardState)} onclick={() => goStep(index)}>{index + 1}. {i18n.t(label)}</button>
+    {/each}
+  </nav>
+  {#if cloudPreview}<p class="help">{i18n.t('sync.cloudPreview', { count: cloudPreview.objects, bytes: cloudPreview.bytes })}</p>{/if}
 
+  {#if configured}
+    <button class="btn" disabled={busy} onclick={() => void inspectMaintenance()}>{i18n.t('sync.pendingInspect')}</button>
+    {#if maintenancePending.pending}
+      <div role="status" class="help">
+        <strong>{i18n.t('sync.pendingMaintenance')}</strong>
+        <p>{i18n.t(maintenancePending.checkpointChanged ? 'sync.pendingChanged' : 'sync.pendingCheckpoint')}</p>
+        {#each Object.entries(maintenancePending.counts ?? {}) as [group, count]}
+          <p>{group}: {i18n.t('sync.pendingCounts',{candidate:count.candidate,checkpoint:count.checkpoint,different:count.different})} / {count.tombstones} {i18n.t('sync.pendingTombstones')}</p>
+        {/each}
+        <button class="btn" disabled={busy || maintenancePending.blocked || !maintenancePending.canCancel} onclick={() => void cancelMaintenance()}>{i18n.t('sync.pendingCancel')}</button>
+      </div>
+    {/if}
+  {/if}
   <div class="text-[12px] text-[var(--color-fg-muted)]">
     Status:
     {#if configured}
@@ -980,7 +1195,31 @@
   </div>
 
   {#if configured && protocol >= 2}
+    <div class="info"><p>{i18n.t('sync.v3MigrationHelp')}</p><button class="btn" disabled={busy} onclick={() => void migrateV3()}>{i18n.t('sync.v3Migrate')}</button></div>
+  {/if}
+  {#if configured && protocol === 3}
+    <div class="info"><p>{i18n.t('sync.v3MaintenanceHelp')}</p><button class="btn" onclick={() => void refreshPeers()}>{i18n.t('sync.v3Devices')}</button>
+      {#each peers as peer (peer.id)}
+        <div><code>{peer.id}</code> {peer.retired ? i18n.t('sync.v3Retired') : ''}
+          {#if peer.retired && peer.self}<button class="btn" disabled={busy} onclick={() => void rejoinDevice()}>{i18n.t('sync.v3Rejoin')}</button>{/if}
+          {#if !peer.retired && !peer.self}<button class="btn" disabled={busy} onclick={() => void retirePeer(peer.id)}>{i18n.t('sync.v3Retire')}</button>{/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+  {#if configured && protocol >= 2}
+    <details><summary>{i18n.t('sync.advancedMaintenance')}</summary>
     <div class="mt-2 text-[12px] text-[var(--color-fg-muted)] space-y-1">
+      <div class="section-h">{i18n.t('sync.recoveryTitle')}</div>
+      <button type="button" class="btn" disabled={busy} onclick={() => void inspectRecovery()}>{i18n.t('sync.recoveryInspect')}</button>
+      {#if recoveryError}<p role="alert">{recoveryError}</p>{/if}
+      {#if recoveryArchive.available}
+        <p>{i18n.t('sync.recoverySummary',{count:recoveryArchive.records ?? 0,groups:(recoveryArchive.groups ?? []).join(', ')})}</p>
+        <p class="help">{i18n.t('sync.recoveryCiphertext')}</p>
+        <button type="button" class="btn" disabled={busy} onclick={() => void exportRecovery()}>{i18n.t('sync.recoveryExport')}</button>
+        <label class="row"><span class="row-label">{i18n.t('sync.recoveryPhrase')}</span><input bind:value={recoveryConfirm} autocomplete="off" spellcheck="false" placeholder="RESTORE LOCAL RECOVERY" /></label>
+        <button type="button" class="btn" disabled={busy || recoveryConfirm !== 'RESTORE LOCAL RECOVERY'} onclick={() => void restoreRecovery()}>{i18n.t('sync.recoveryRestore')}</button>
+      {:else}<p class="help">{i18n.t('sync.recoveryUnavailable')}</p>{/if}
       <div class="section-h">{i18n.t('sync.oplogSectionTitle')}</div>
       <div>
         {i18n.t('sync.oplogOwnSeq')}: <code>{ownSeq ?? 0}</code>
@@ -1010,19 +1249,35 @@
         </button>
       </div>
       <div class="help">{i18n.t('sync.oplogHelp')}</div>
+      <div class="section-h">{i18n.t('sync.capacityTitle')}</div>
+      <button type="button" class="btn-secondary" disabled={busy} onclick={() => void refreshCapacity()}>{i18n.t('sync.capacityRefresh')}</button>
+      {#if capacity}
+        <div>{i18n.t('sync.capacityWorktree')}: {formatBytes(capacity.worktreeBytes)} · .git: {capacity.gitBytes === null ? '—' : formatBytes(capacity.gitBytes)} · {i18n.t('sync.capacityTotal')}: {formatBytes(capacity.totalBytes)}</div>
+        <div>ops: {capacity.opFiles} / {formatBytes(capacity.opBytes)} · snapshots: {capacity.snapshotFiles} / {formatBytes(capacity.snapshotBytes)} · commits: {capacity.commits ?? '—'}</div>
+        <div class="help">{i18n.t('sync.capacityScope')}</div>
+        {#if kindLive === 'git'}
+          <div class="help">{i18n.t('sync.rewriteHelp')} ({capacity.branch ?? '—'})</div>
+          <label for="sync-rewrite-confirm" class="lbl">REWRITE SYNC HISTORY</label>
+          <input id="sync-rewrite-confirm" class="input" bind:value={rewriteConfirmation} autocomplete="off" />
+          <button type="button" class="btn-secondary" disabled={busy || !capacity.historyRewriteAllowed || !capacity.headOid || rewriteConfirmation !== 'REWRITE SYNC HISTORY'} onclick={() => void rewriteHistory()}>{i18n.t('sync.rewriteAction')}</button>
+        {/if}
+      {/if}
     </div>
+    </details>
   {/if}
 
-  <div>
+  <div hidden={wizardStep !== 0}>
     <div class="section-h">Backend</div>
     <label for="cs-backend" class="lbl">Type</label>
     <select id="cs-backend" bind:value={backend} onchange={markDirty} class="select">
       <option value="webdav">WebDAV</option>
       <option value="git">Git</option>
+      <option value="s3">S3 compatible</option>
+      <option value="drive">Google Drive</option>
     </select>
   </div>
 
-  <div>
+  <div hidden={wizardStep !== 3}>
     <div class="section-h">Groups</div>
     <div class="group-grid">
       {#each syncGroups as group (group)}
@@ -1044,6 +1299,7 @@
     </div>
   </div>
 
+  <div hidden={wizardStep !== 0 && wizardStep !== 1}>
   {#if backend === 'webdav'}
     <div>
       <div class="section-h">WebDAV</div>
@@ -1057,6 +1313,29 @@
       <label for="cs-pw" class="lbl">Password (optional)</label>
       <input id="cs-pw" type="password"
         bind:value={webdavPassword} oninput={markDirty} class="input" />
+    </div>
+  {:else if backend === 's3'}
+    <div class="space-y-2">
+      <div class="section-h">S3 compatible</div>
+      <label class="lbl" for="s3-endpoint">HTTPS endpoint</label><input id="s3-endpoint" class="input" bind:value={s3Endpoint} oninput={markDirty} placeholder="https://s3.example.com" />
+      <label class="lbl" for="s3-region">Region</label><input id="s3-region" class="input" bind:value={s3Region} oninput={markDirty} />
+      <label class="lbl" for="s3-bucket">Bucket</label><input id="s3-bucket" class="input" bind:value={s3Bucket} oninput={markDirty} />
+      <label class="lbl" for="s3-prefix">Prefix</label><input id="s3-prefix" class="input" bind:value={s3Prefix} oninput={markDirty} />
+      <label><input type="checkbox" bind:checked={s3PathStyle} onchange={markDirty} /> Path style</label>
+      <label class="lbl" for="s3-access">Access key ID</label><input id="s3-access" class="input" bind:value={s3AccessKey} oninput={markDirty} autocomplete="off" />
+      <label class="lbl" for="s3-secret">Secret access key</label><input id="s3-secret" class="input" type="password" bind:value={s3SecretKey} oninput={markDirty} autocomplete="new-password" />
+      <label class="lbl" for="s3-token">Session token (optional)</label><input id="s3-token" class="input" type="password" bind:value={s3SessionToken} oninput={markDirty} autocomplete="off" />
+      <div class="help">{i18n.t('sync.cloudPermissions')}</div>
+      <button class="btn-secondary" disabled={busy} onclick={() => void testCloud()}>{i18n.t('sync.cloudTest')}</button>
+    </div>
+  {:else if backend === 'drive'}
+    <div class="space-y-2">
+      <div class="section-h">Google Drive</div>
+      <label class="lbl" for="drive-client">OAuth client ID</label><input id="drive-client" class="input" bind:value={driveClientId} oninput={markDirty} />
+      <label class="lbl" for="drive-prefix">Prefix</label><input id="drive-prefix" class="input" bind:value={drivePrefix} oninput={markDirty} />
+      <div class="help">{i18n.t('sync.driveRegistration')}</div>
+      <button class="btn-secondary" disabled={busy || !driveClientId} onclick={() => void authorizeDrive()}>{i18n.t('sync.cloudAuthorize')}</button>
+      <button class="btn-secondary" disabled={busy} onclick={() => void testCloud()}>{i18n.t('sync.cloudTest')}</button>
     </div>
   {:else}
     <div>
@@ -1158,12 +1437,16 @@
     </div>
   {/if}
 
-  <div>
+    {#if backend === 'git' || backend === 'webdav'}
+      <button type="button" class="btn-secondary" disabled={busy || !wizardState.storage} onclick={() => void testProvider()}>{i18n.t('sync.cloudTest')}</button>
+    {/if}
+  </div>
+  <div hidden={wizardStep !== 2}>
     <div class="section-h">Encryption</div>
     <label for="cs-mp" class="lbl">
       Master password (required, not persisted)
     </label>
-    <input id="cs-mp" type="password" bind:value={masterPassword} class="input"
+    <input id="cs-mp" type="password" bind:value={masterPassword} oninput={() => { configuredTarget = ''; previewAccepted = false; firstSyncApproved = false; approvedTarget = ''; void rpc.call('sync.stopAutoSync', {}); }} class="input"
       placeholder="Enter to (re-)configure the engine" />
     <div class="help">
       {i18n.t('sync.masterPasswordHelp')}
@@ -1193,7 +1476,7 @@
     {/if}
   </div>
 
-  {#if enabledGroups.Credentials}
+  {#if enabledGroups.Credentials && wizardStep === 3}
     <div>
       <div class="section-h">{i18n.t('sync.vaultSectionTitle')}</div>
       <div class="text-[12px] text-[var(--color-fg-muted)] mb-2">
@@ -1255,14 +1538,14 @@
     </div>
   {/if}
 
+  <details><summary>{i18n.t('sync.advancedMaintenance')}</summary>
   <div>
     <div class="section-h">Local state</div>
     <label for="cs-statedir" class="lbl">State directory (optional)</label>
     <input id="cs-statedir" bind:value={stateDir} oninput={markDirty}
-      placeholder="(default: in-memory only)" class="input" />
+      placeholder="(default: device-local settings storage)" class="input" />
     <div class="help">
-      When set, the local sync state survives process restart so reconciliation
-      can resume incrementally.
+      {i18n.t('sync.localStateHelp')}
     </div>
   </div>
 
@@ -1281,6 +1564,7 @@
       {i18n.t('sync.autoSyncMinutes')}
     </label>
     <div class="help">{i18n.t('sync.autoSyncHelp')}</div>
+    {#if notesPausedDirty}<p class="help" role="status">{i18n.t('sync.notesPausedDirty')}</p>{/if}
     {#if configured && autoIntervalMs}
       <div class="help text-[var(--color-accent)]">
         {i18n.t('sync.autoSyncActive', { minutes: Math.round(autoIntervalMs / 60_000) })}
@@ -1337,15 +1621,19 @@
     {/if}
   </div>
 
-  <div class="flex gap-2 items-center pt-2">
-    <button type="button" class="btn-primary" disabled={busy} onclick={() => void configure()}>
+  </details>
+  {#if wizardStep < 4}
+    <button type="button" class="btn-primary" disabled={busy || !wizardCanEnter(wizardStep + 1, wizardState)} onclick={() => goStep(wizardStep + 1)}>{i18n.t('sync.stepNext')}</button>
+  {/if}
+  <div class="flex gap-2 items-center pt-2" hidden={wizardStep !== 4}>
+    <button type="button" class="btn-primary" disabled={busy || !wizardCanEnter(4, wizardState)} onclick={() => void configure()}>
       <Play size={12} /> Configure / re-key
     </button>
-    <button type="button" class="btn-secondary" disabled={busy || !configured}
+    <button type="button" class="btn-secondary" disabled={busy || !wizardState.configured || !wizardCanEnter(4, wizardState)}
       onclick={() => void syncNow()}>
       <RefreshCw size={12} /> Sync now
     </button>
-    <button type="button" class="btn-secondary" disabled={busy || !configured}
+    <button type="button" class="btn-secondary" disabled={busy || !firstSyncApproved || !syncSetupComplete(wizardState)}
       onclick={() => void applyAutoSync()}>
       {i18n.t('sync.autoSyncApply')}
     </button>
@@ -1356,6 +1644,7 @@
     </p>
   {/if}
 
+  <details><summary>{i18n.t('sync.advancedMaintenance')}</summary>
   <div>
     <div class="section-h">Advanced local records</div>
     <div class="help">
@@ -1416,6 +1705,7 @@
       {/if}
     </div>
   </div>
+  </details>
 </div>
 
 <style>

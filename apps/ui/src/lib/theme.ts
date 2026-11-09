@@ -143,6 +143,28 @@ export const TERMORA_LIGHT: Theme = {
   ],
 };
 
+// Original AeroTab surface families. No third-party palette collection is used.
+const ORIGINAL_UI: Array<[string, string, ThemeMode, string, string, string, string]> = [
+  ['ink', 'Ink', 'dark', '#080b10', '#101620', '#182230', '#a1c4ff'],
+  ['aubergine', 'Aubergine', 'dark', '#211026', '#2a1630', '#35203d', '#e7b3f2'],
+  ['forest', 'Forest', 'dark', '#0c2017', '#142a1e', '#1e3528', '#9ee0b1'],
+  ['copper', 'Copper', 'dark', '#27170e', '#302117', '#3c2a1c', '#ffbd8e'],
+  ['ocean', 'Ocean', 'dark', '#081d30', '#10283c', '#183348', '#91d7ff'],
+  ['rosewood', 'Rosewood', 'dark', '#29131c', '#321c26', '#3e2732', '#ffb0cc'],
+  ['olive', 'Olive', 'dark', '#1d2110', '#272d18', '#323921', '#d6e59b'],
+  ['ultraviolet', 'Ultraviolet', 'dark', '#181334', '#231c42', '#2e2851', '#c5b6ff'],
+  ['carbon', 'Carbon', 'dark', '#0e0e0e', '#191919', '#292929', '#dddddd'],
+  ['lagoon', 'Lagoon', 'dark', '#062728', '#0c3133', '#173d40', '#85e2de'],
+  ['parchment', 'Parchment', 'light', '#f6edda', '#fff8e9', '#e9dfca', '#725118'],
+  ['glacier', 'Glacier', 'light', '#e7f3fa', '#f5fcff', '#d8e8f2', '#225b83'],
+  ['sakura', 'Sakura', 'light', '#fbeaf0', '#fff6f9', '#efdae4', '#843c60'],
+  ['mint', 'Mint', 'light', '#e6f5e9', '#f5fff7', '#d5e9db', '#23633c'],
+  ['lavender', 'Lavender', 'light', '#efeafa', '#faf7ff', '#e2dbf0', '#67428e'],
+  ['sandstone', 'Sandstone', 'light', '#f4e7da', '#fff6ed', '#e7d7c6', '#7d4b2b'],
+  ['porcelain', 'Porcelain', 'light', '#f0f0ee', '#ffffff', '#dededc', '#494949'],
+  ['seafoam', 'Seafoam', 'light', '#e0f4f0', '#f2fffc', '#cce8e1', '#1c6259'],
+];
+
 export const BUILTIN_THEMES: Theme[] = [
   TERMORA_DARK,
   TOKYO_NIGHT,
@@ -167,7 +189,7 @@ export interface UiPalette {
   accent: string;
 }
 
-/** Netcatty-inspired neutral surfaces, with the six persisted IDs intact. */
+/** Original surfaces plus the six persisted compatibility IDs. */
 export const UI_PALETTES: Record<string, UiPalette> = {
   'termora-dark': { label: 'Graphite', mode: 'dark', bg: '#17191c', panel: '#1d2024', panel2: '#272b30', raised: '#2b3036', fg: '#f0f1f3', muted: '#b5bcc6', border: '#49515c', accent: '#a9bdf0' },
   'tokyo-night': { label: 'Slate', mode: 'dark', bg: '#171c25', panel: '#1d2430', panel2: '#273140', raised: '#2b3545', fg: '#f0f3fa', muted: '#bbc5d6', border: '#4b5c73', accent: '#a5c2ff' },
@@ -176,6 +198,15 @@ export const UI_PALETTES: Record<string, UiPalette> = {
   'one-light': { label: 'Warm light', mode: 'light', bg: '#f7f5f1', panel: '#fffefa', panel2: '#ede9e2', raised: '#ffffff', fg: '#282621', muted: '#625d54', border: '#b4ada1', accent: '#735027' },
   'termora-light': { label: 'Cloud', mode: 'light', bg: '#f4f6f9', panel: '#ffffff', panel2: '#e9edf3', raised: '#ffffff', fg: '#202833', muted: '#536174', border: '#aab5c4', accent: '#315eac' },
 };
+
+for (const [name, label, mode, bg, panel, panel2, accent] of ORIGINAL_UI) {
+  const light = mode === 'light';
+  const palette: UiPalette = { label, mode, bg, panel, panel2, raised: panel2, fg: light ? '#171b21' : '#faf9f6', muted: light ? '#4d5159' : '#c5c9d1', border: light ? '#9299a4' : '#677080', accent };
+  UI_PALETTES[name] = palette;
+  BUILTIN_THEMES.push({ name, label, bg, panel, panel2, fg: palette.fg, fgMuted: palette.muted, border: palette.border, borderSoft: panel2, accent, danger: light ? '#ae2940' : '#f697a9', ansi: light
+    ? ['#17202a','#a93046','#27673c','#805900','#285fa0','#7c3e91','#176974','#515961','#78828b','#bd2442','#26733a','#916100','#2869b4','#9148a8','#157c88','#101820']
+    : ['#18212c','#ed8391','#9dcc92','#e5c278','#8db9ef','#c2a1e5','#86d2ce','#d4d7df','#7e8999','#ffa8b4','#b5e8a8','#ffe1a3','#acd4ff','#dfc0ff','#a1f0e8','#faf9f6'] });
+}
 
 export function themeMode(theme: Theme): ThemeMode {
   return UI_PALETTES[theme.name]?.mode ?? (contrastRatio(theme.bg, '#ffffff') < 4.5 ? 'light' : 'dark');
@@ -230,7 +261,7 @@ export function themeTokens(theme: Theme, accentOverride?: string | null): Recor
     success: light ? '#27643d' : '#a4d7ad', warning: light ? '#805612' : '#e9c386',
     danger: light ? '#b22e3e' : '#f2a3ab', info: light ? '#315eac' : '#a5c2ff',
     'danger-soft': mix(light ? '#b22e3e' : '#f2a3ab', p.panel, 0.12),
-    'scrollbar-thumb': p.border, 'scrollbar-hover': p.muted,
+    'scrollbar-thumb': p.border, 'scrollbar-hover': p.muted, overlay: light ? '#17202a66' : '#00000099',
   };
 }
 

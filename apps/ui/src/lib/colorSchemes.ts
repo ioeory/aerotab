@@ -30,9 +30,10 @@ function s(
   return { name, label, background, foreground, cursor, selection, ansi };
 }
 
-// 30 hand-picked schemes covering the most-requested aesthetics.
-// Sourced from iTerm2-Color-Schemes (MIT licensed) and the original
-// authors' palettes. Extend the list to reach the full ~80 over time.
+// Legacy compatibility palettes retained verbatim. Historical attribution:
+// iTerm2-Color-Schemes and the original authors. This change does not import
+// or claim license verification for that pre-existing data; additions below
+// are original AeroTab recipes, not copied from third-party projects.
 export const COLOR_SCHEMES: ColorScheme[] = [
   s('tokyo-night', 'Tokyo Night',
     '#1a1b26', '#a9b1d6', '#c0caf5', '#33467c',
@@ -155,6 +156,52 @@ export const COLOR_SCHEMES: ColorScheme[] = [
     ['#292d3e','#f07178','#c3e88d','#ffcb6b','#82aaff','#c792ea','#89ddff','#959dcb',
      '#676e95','#f07178','#c3e88d','#ffcb6b','#82aaff','#c792ea','#89ddff','#ffffff']),
 ];
+
+// Thirty original AeroTab palettes. Existing third-party-named entries above
+// remain compatibility data; no new palette is imported from a collection.
+// Each recipe specifies its own surfaces and six ANSI hues (R G Y B M C).
+const ORIGINAL_SCHEMES: Array<[string, string, string, string, string, string]> = [
+  ['ember', 'Ember', '#24120c', '#f3dfca', '#563522', '#ed8e75 #b4c785 #e6b776 #86b6d8 #d7a1be #8fc9bc'],
+  ['kelp', 'Kelp', '#10231e', '#dcece0', '#315247', '#e49291 #a6cd86 #dacb83 #8fbacb #b9a2cf #79cbbc'],
+  ['orbit', 'Orbit', '#14132b', '#e5e1fa', '#36335b', '#ed91ac #a5d5a1 #dfc989 #9eaff0 #c59ee5 #8cd7de'],
+  ['ceramic', 'Ceramic', '#f6efe7', '#39322e', '#d7c5b5', '#aa3946 #3e693e #825d12 #3c6098 #844b89 #226c72'],
+  ['cove', 'Cove', '#0c2230', '#dfebf4', '#28465d', '#e88e9f #98d0ad #e3ce90 #86b8ee #b8a3e3 #81cdd8'],
+  ['petal', 'Petal', '#f9eaf1', '#422b3a', '#dfc4d4', '#a63b5e #386c4e #825f23 #395f9e #91448b #276c75'],
+  ['basalt', 'Basalt', '#191d21', '#e4e8eb', '#3c454f', '#e89199 #a8ca91 #dcc48e #94b6e0 #bba1d5 #8ccbc6'],
+  ['citron', 'Citron', '#232509', '#e9edcc', '#4b5120', '#ed9690 #c1d381 #e4c678 #9bb9db #c3a1cb #8bccba'],
+  ['frost', 'Frost', '#eaf6fc', '#253b4b', '#bed9e8', '#a13552 #2e6d48 #805b19 #28619c #7c4699 #176b76'],
+  ['velvet', 'Velvet', '#2b1126', '#f1dfed', '#58334f', '#ef9ab3 #a9cfab #e8c78a #a8bbeb #d2a0e4 #90d7cf'],
+  ['meadow', 'Meadow', '#edf7df', '#334027', '#cfdebb', '#a13d40 #3f6a24 #7a5b16 #365f96 #7e4687 #216b63'],
+  ['adobe', 'Adobe', '#321d17', '#f3e3d5', '#614036', '#f19e88 #bdcd9c #e8c688 #9cbde0 #d2a6cb #9cd5c5'],
+  ['linen', 'Linen', '#f7f2df', '#3e3929', '#ded4b6', '#a53839 #466b32 #815d17 #365e91 #854b8c #2a6b70'],
+  ['arctic', 'Arctic', '#102832', '#dcf0ef', '#31515c', '#ef9fa4 #a6d6ad #e8d598 #9bc6ee #c2b0e5 #8fdfd4'],
+  ['plum', 'Plum', '#21152e', '#e9ddf3', '#4a345c', '#ee98ae #afcc9b #dfc98d #a9b9ed #d1a5e8 #93d4cf'],
+  ['chalk', 'Chalk', '#eeeeed', '#303333', '#cdcfce', '#aa3442 #306635 #7f5a12 #345d98 #80468f #206a73'],
+  ['reed', 'Reed', '#202719', '#e7efda', '#455237', '#e39b91 #bbd799 #e4cf94 #a5bedb #c5acd9 #96d5c4'],
+  ['marine', 'Marine', '#07192d', '#dce9fa', '#213e60', '#ea9aab #a7d3ae #e6ce98 #93bdf6 #bba8ed #89d4e2'],
+  ['sorbet', 'Sorbet', '#fcebe0', '#47342a', '#e4c9b8', '#a43c45 #406c40 #7d5c20 #365e9c #874b8c #256e70'],
+  ['willow', 'Willow', '#e6f4ed', '#293e34', '#bfdacb', '#a33a4a #2d6a45 #805d20 #345f9e #814b94 #226e6d'],
+  ['dusk', 'Dusk', '#282039', '#ede3f8', '#514660', '#f0a0b4 #b9d4a0 #ecd49a #aec5f3 #d5b1ef #a3ded8'],
+  ['espresso', 'Espresso', '#201a14', '#ece1d1', '#473a2d', '#e99b85 #b6c998 #e3bf87 #9ebadb #c3a2ce #94ccbb'],
+  ['paperblue', 'Paper Blue', '#eef0fc', '#30354e', '#cdd1eb', '#a53758 #396b46 #805d20 #3b5ba7 #834795 #236d79'],
+  ['bloom', 'Bloom', '#301824', '#f7e5ed', '#5e394a', '#ffa1b9 #b8d59f #f0d299 #b1bff0 #e1b2e7 #a5ded1'],
+  ['spruce', 'Spruce', '#071e1b', '#d9eee5', '#25463c', '#e69794 #9ecb9b #ddc98b #92b9d8 #bea5d9 #84cec0'],
+  ['apricot', 'Apricot', '#faeed1', '#443823', '#e5d2a6', '#a13d37 #486b30 #7f5a13 #3a6096 #824a8e #286c6b'],
+  ['metal', 'Metal', '#24272c', '#eceef3', '#4b515e', '#efa3af #bad8a6 #edd49d #afcaf4 #d1b5ed #a9dedc'],
+  ['iris', 'Iris', '#eae2f9', '#3b2e50', '#cfc1e5', '#a13655 #396947 #805b20 #3d5ca1 #854794 #226c78'],
+  ['tide', 'Tide', '#163235', '#e3f6ef', '#385c5d', '#f0aaa7 #bee0ad #f0dda7 #afd3f3 #d1bbed #a6e5d5'],
+  ['nocturne', 'Nocturne', '#090c18', '#dce3f5', '#293149', '#e99bae #a8d39f #e4c992 #a0bdf2 #c8a7e6 #92d6dd'],
+];
+for (const [name, label, background, foreground, selection, hues] of ORIGINAL_SCHEMES) {
+  const light = parseInt(background.slice(1, 3), 16) > 180;
+  const colors = hues.split(' ');
+  const bright = colors.map(hex => '#' + [1, 3, 5].map(i => {
+    const value = parseInt(hex.slice(i, i + 2), 16);
+    return Math.round(light ? value * 0.85 : value + (255 - value) * 0.22).toString(16).padStart(2, '0');
+  }).join(''));
+  COLOR_SCHEMES.push(s(`aero-${name}`, `Aero ${label}`, background, foreground, colors[3]!, selection,
+    [light ? '#242931' : background, ...colors, foreground, light ? '#707782' : '#7c889a', ...bright, light ? '#131821' : '#ffffff']));
+}
 
 export function colorSchemeByName(name: string | null | undefined): ColorScheme | undefined {
   if (!name) return undefined;

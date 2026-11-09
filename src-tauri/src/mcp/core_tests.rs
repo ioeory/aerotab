@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn phase_six_tools_require_independent_grants_and_no_approval_escape() {
+    let mut config = McpConfig::default();
+    config.permissions.insert("runCommand".into(), true);
+    for (tool, grant) in [
+        ("search_notes", "readNotes"),
+        ("read_note", "readNotes"),
+        ("write_note", "writeNotes"),
+        ("list_workspaces", "readWorkspaces"),
+        ("workspace_snapshot", "readWorkspaces"),
+        ("batch_plan", "batchOperations"),
+        ("batch_execute", "batchOperations"),
+        ("batch_status", "batchOperations"),
+        ("batch_results", "batchOperations"),
+        ("batch_cancel", "batchOperations"),
+    ] {
+        assert_eq!(tools::permission(tool), Some(grant));
+        assert!(permissions::authorize(&config, tool, &json!({})).is_err());
+        config.permissions.insert(grant.into(), true);
+        assert!(permissions::authorize(&config, tool, &json!({})).is_ok());
+        config.permissions.insert(grant.into(), false);
+    }
+    config.permissions.insert("callRpc".into(), true);
+    for method in [
+        "mcp.batchApprove",
+        "scripts.prepare",
+        "scripts.run",
+        "notes.put",
+        "settings.get",
+    ] {
+        assert!(permissions::authorize(&config, "call_rpc", &json!({"method":method})).is_err());
+    }
+}
+
+#[test]
+fn phase_six_capabilities_are_real() {
+    let server = McpServer::new(
+        AppState::new(),
+        Arc::new(Dispatcher::new()),
+        McpConfig::default(),
+    );
+    let info = server.get_info();
+    assert!(info.capabilities.resources.is_some());
+    assert!(info.capabilities.prompts.is_some());
+}
+
+#[test]
 fn rotating_token_revokes_inflight_generation() {
     let runtime = McpRuntime::new();
     runtime.replace_token("first".into());

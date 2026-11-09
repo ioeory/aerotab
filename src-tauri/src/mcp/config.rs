@@ -38,6 +38,10 @@ impl Default for McpConfig {
                 ("remoteDesktop".into(), false),
                 ("tunnels".into(), false),
                 ("callRpc".into(), false),
+                ("readNotes".into(), false),
+                ("writeNotes".into(), false),
+                ("readWorkspaces".into(), false),
+                ("batchOperations".into(), false),
             ]),
         }
     }

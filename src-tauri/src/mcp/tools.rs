@@ -133,7 +133,12 @@ const TOOLS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn permission(name: &str) -> Option<&'static str> {
-    TOOLS.iter().find(|t| t.0 == name).map(|t| t.1)
+    TOOLS
+        .iter()
+        .chain(super::context::TOOLS)
+        .chain(super::batch::TOOLS)
+        .find(|t| t.0 == name)
+        .map(|t| t.1)
 }
 /// Deliberately exact, not prefix-based. Raw file/terminal write/configuration RPCs are forbidden.
 pub fn rpc_permission(method: &str) -> Option<&'static str> {
@@ -149,7 +154,7 @@ pub fn rpc_permission(method: &str) -> Option<&'static str> {
 }
 
 pub fn definitions() -> Vec<Value> {
-    TOOLS.iter().map(|(name,_,description)| {
+    TOOLS.iter().chain(super::context::TOOLS).chain(super::batch::TOOLS).map(|(name,_,description)| {
 let (fields,required):(&[&str],&[&str])=match *name {
 "get_profile"|"close_session"|"close_sftp"|"delete_profile"|"tunnel_close"=>(&["id"],&["id"]),
 "host_stats"|"open_session"|"open_sftp"|"remote_open"=>(&["profile_id"],&["profile_id"]),
@@ -165,6 +170,10 @@ let (fields,required):(&[&str],&[&str])=match *name {
 "open_terminal"=>(&["profile_id"],&["profile_id"]),
 "upsert_profile"=>(&["profile"],&["profile"]),
 "tunnel_open"=>(&["profile_id","kind","bind_host","bind_port","target_host","target_port"],&["profile_id","kind","bind_host","bind_port","target_host","target_port"]),
+"search_notes"=>(&["query","profile_id"],&[]),
+"read_note"|"workspace_snapshot"|"batch_execute"|"batch_status"|"batch_results"|"batch_cancel"=>(&["id"],&["id"]),
+"write_note"=>(&["note","expectedRevision","expectedVersion"],&["note","expectedRevision","expectedVersion"]),
+"batch_plan"=>(&["script_id","profile_ids","concurrency"],&["script_id","profile_ids"]),
 "call_rpc"=>(&["method","params"],&["method"]), _=>(&[],&[]) };
 let mut properties=serde_json::Map::new();
 for field in fields {
@@ -176,7 +185,10 @@ let schema=match *field {
 "offset"=>json!({"type":"integer","minimum":0,"maximum":9007199254740991u64}),
 "bind_port"|"target_port"=>json!({"type":"integer","minimum":0,"maximum":65535}),
 "regex"|"caseSensitive"|"directory"=>json!({"type":"boolean"}),
-"profile"|"params"=>json!({"type":"object"}),
+"profile"|"params"|"note"=>json!({"type":"object"}),
+"expectedRevision"|"expectedVersion"=>json!({"type":"integer","minimum":0}),
+"concurrency"=>json!({"type":"integer","minimum":1,"maximum":4}),
+"profile_ids"=>json!({"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32}),
 "scope"=>json!({"type":"string","enum":["local","sftp"]}),
 "direction"=>json!({"type":"string","enum":["next","prev"]}),
 _=>json!({"type":"string","maxLength":if *field=="data" {1398104} else {16384}}) };
@@ -186,7 +198,7 @@ json!({"name":name,"description":description,"inputSchema":{"type":"object","pro
 }).collect()
 }
 
-fn redact(value: Value) -> Value {
+pub(super) fn redact(value: Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.into_iter().map(redact).collect()),
         Value::Object(fields) => Value::Object(
@@ -231,7 +243,7 @@ fn limit(args: &Value, key: &str, default: u64, maximum: u64) -> Result<u64, Str
             .ok_or_else(|| format!("{key} must be between 1 and {maximum}")),
     }
 }
-fn validate_args(name: &str, args: &Value) -> Result<(), String> {
+pub(super) fn validate_args(name: &str, args: &Value) -> Result<(), String> {
     let object = args.as_object().ok_or("arguments must be an object")?;
     let definition = definitions()
         .into_iter()
@@ -255,6 +267,12 @@ fn validate_args(name: &str, args: &Value) -> Result<(), String> {
             }),
             Some("boolean") => value.is_boolean(),
             Some("object") => value.is_object(),
+            Some("array") => value.as_array().is_some_and(|a| {
+                !a.is_empty()
+                    && a.len() <= 32
+                    && a.iter()
+                        .all(|v| v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 128))
+            }),
             _ => false,
         };
         if !valid
@@ -267,7 +285,11 @@ fn validate_args(name: &str, args: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-async fn dispatch(dispatcher: &Dispatcher, method: &str, params: Value) -> Result<Value, String> {
+pub(super) async fn dispatch(
+    dispatcher: &Dispatcher,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
     let response = dispatcher
         .dispatch(Request {
             jsonrpc: "2.0".into(),
@@ -434,6 +456,9 @@ async fn call_inner(
         "list_files" | "read_file" | "get_file_info" | "find_file" | "write_file"
         | "create_file" | "create_directory" | "remove_path" | "rename_path" => {
             file_tool(name, args, dispatcher, state).await
+        }
+        name if super::context::TOOLS.iter().any(|t| t.0 == name) => {
+            super::context::call(name, args, dispatcher, state).await
         }
         _ => Err("unknown tool".into()),
     }
@@ -853,7 +878,7 @@ mod tests {
     #[test]
     fn every_advertised_tool_has_permission_and_schema() {
         let tools = definitions();
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 39);
         let mut names = std::collections::HashSet::new();
         for tool in tools {
             let name = tool["name"].as_str().unwrap();

@@ -241,6 +241,14 @@ impl ScriptsService {
                 self.store.delete(&text("id")?, version()?)?;
                 Ok(json!(true))
             }
+            "scripts.preview" => {
+                let script = self.store.get(&text("id")?)?;
+                let profile_id = text("profile_id")?;
+                let resolved = resolve(profile_id.clone()).await?;
+                Ok(
+                    json!({"script_name":script.input.name,"profile_id":profile_id,"target":target(&resolved.profile)}),
+                )
+            }
             "scripts.prepare" => {
                 let script = self.store.get(&text("id")?)?;
                 let profile_id = text("profile_id")?;

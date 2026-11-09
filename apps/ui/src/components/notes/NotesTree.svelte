@@ -29,6 +29,6 @@
 <style>
   nav { overflow:auto; padding:8px; } ul { list-style:none; padding-left:13px; margin:3px 0; } nav>ul { padding-left:0; }
   button { color:inherit; background:none; border:0; text-align:left; padding:6px; border-radius:4px; cursor:pointer; max-width:100%; overflow-wrap:anywhere; }
-  .active { background:var(--bg-hover, #ffffff18); } summary,.note { display:flex; align-items:center; gap:3px; } summary>button,.note>button { flex:1; }
-  .menu { margin-left:auto; } .menu>summary { cursor:pointer; padding:4px 7px; } .menu-items { display:flex; flex-direction:column; border:1px solid var(--border, #414656); border-radius:5px; padding:3px; }
+  .active { background:var(--color-surface-selected); } summary,.note { display:flex; align-items:center; gap:3px; } summary>button,.note>button { flex:1; }
+  .menu { margin-left:auto; } .menu>summary { cursor:pointer; padding:4px 7px; } .menu-items { display:flex; flex-direction:column; border:1px solid var(--color-border); border-radius:5px; padding:3px; }
 </style>

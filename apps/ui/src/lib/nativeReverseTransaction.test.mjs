@@ -4,6 +4,7 @@ import {readFile} from 'node:fs/promises';
 import ts from 'typescript';
 import {runNativeViewTransaction,recoverNativeInputRollback} from './nativeViewTransaction.ts';
 import {quiesceAndDrainNativeInput,createNativeInputQueue} from './nativeInputBridge.ts';
+import {nativeViewGeometryEquals} from './nativeViewHost.ts';
 const text=await readFile(new URL('../components/NativeTerminalView.svelte',import.meta.url),'utf8');
 const body=text.slice(text.indexOf('  export async function stageWebviewSurface('),text.indexOf('  export function cancelViewTransition')).replace('export async','async')+'\nreturn stageWebviewSurface;';
 const js=ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
@@ -12,7 +13,7 @@ function fixture(failure,queue){
  const source={prepareWebviewSurface:async()=>events.push('prepare'),waitForDraw:async()=>{events.push('draw');if(failure==='draw')throw Error('draw timeout');if(failure==='geometry')geometry++;if(failure==='config')config++;if(failure==='close')closed=true;},beginWebviewInputHandoff:()=>events.push('buffer'),focusWebviewHandoff:()=>events.push('focus'),focus:()=>events.push('focus'),commitWebviewSurface:()=>events.push('commit'),rollbackWebviewSurface:async()=>events.push('rollback')};
  const host={generation:()=> 'g',suspendForWebview:async()=>{events.push('suspend');return 4;},restoreAfterWebview:async()=>{events.push('restore');if(failure==='restore'&&events.filter(e=>e==='restore').length<3)throw Error('native_surface_unavailable: update rejected');},dispose:async()=>events.push('detach'),setFocusAllowed(){}};
  const scope={quiesceAndDrainNativeInput:(h,q)=>quiesceAndDrainNativeInput(h,q,10),onRecovered:()=>events.push('recovered'),nativeSurfaceError:error=>error,transitionClosing:false,onError:()=>{},recoverNativeInputRollback,rollbackPending:false,controller:source,hostAdapter:host,inputQueue:{drainThrough:async t=>{assert.equal(t,4);events.push('drain');if((failure==='drain'||failure==='restore') && events.filter(e=>e==='drain').length===1)throw Error('ACK timeout');}},disposed:false,stagingWebview:false,committedWebview:false,stagingNative:false,committedNative:true,webviewHandoff:false,reverseEpoch:0,
- surface:{getBoundingClientRect:()=>({x:0,y:0,width:geometry,height:10})},viewConfig:()=>({config}),visible:true,occluded:false,globalOccluded:false,document:{hidden:false},runNativeViewTransaction,settlePaneLayout:async()=>{},tick:async()=>{},cleanupSurface:null,syncSurface:null,disposePaste:()=>events.push('listeners.dispose'),canFocusSurface:()=>true};
+ surface:{getBoundingClientRect:()=>({x:0,y:0,width:geometry,height:10})},viewConfig:()=>({config}),visible:true,occluded:false,globalOccluded:false,document:{hidden:false},runNativeViewTransaction,settlePaneLayout:async()=>{},tick:async()=>{},cleanupSurface:null,syncSurface:null,disposePaste:()=>events.push('listeners.dispose'),canFocusSurface:()=>true,nativeViewGeometryEquals};
  // Closure accessors make supersession/close visible to the exact production body.
  Object.defineProperty(scope,'disposed',{get:()=>closed,set:v=>{closed=v;}});
  if(queue)scope.inputQueue={drainThrough:target=>queue.drainThrough(target,10)};

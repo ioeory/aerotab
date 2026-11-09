@@ -2453,7 +2453,43 @@ fn runtime_diagnostic_snapshot(
     .map_err(|_| "diagnostic write failed".into())
 }
 
+// Explicit release-capable smoke path: do not enter the application's startup graph.
+fn run_isolated_smoke() {
+    let root = std::env::temp_dir().join(format!("aerotab-smoke-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("create isolated smoke directory");
+    let page = root.join("smoke.html");
+    std::fs::write(&page, format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>AeroTab {CORE_VERSION} smoke</title></head><body style=\"background:#0b0d12;color:#eee;font:20px sans-serif;padding:40px\"><h1>AeroTab {CORE_VERSION} — SMOKE TEST — ISOLATED</h1><p>Temporary data only. No user configuration, connections, synchronization, MCP, updates or credentials.</p></body></html>"))
+        .expect("write isolated smoke page");
+    let mut context = tauri::generate_context!();
+    context.config_mut().identifier = "com.aerotab.smoke".into();
+    context.config_mut().app.windows.clear();
+    context.config_mut().app.with_global_tauri = false;
+    let title = format!("AeroTab {CORE_VERSION} [SMOKE TEST - ISOLATED]");
+    let storage = root.join("webview");
+    tauri::Builder::default()
+        .setup(move |app| {
+            WebviewWindowBuilder::new(
+                app,
+                "smoke",
+                WebviewUrl::External(tauri::Url::from_file_path(&page).expect("smoke file URL")),
+            )
+            .title(&title)
+            .inner_size(900.0, 500.0)
+            .data_directory(storage.clone())
+            .build()?;
+            Ok(())
+        })
+        .run(context)
+        .expect("isolated smoke window");
+    // Only remove the fresh directory owned by this invocation, after WebView exits.
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn main() {
+    if std::env::args_os().skip(1).any(|arg| arg == "--smoke-test") {
+        run_isolated_smoke();
+        return;
+    }
     // Before any worker threads or stores: smoke must never migrate/open user data.
     #[cfg(all(feature = "native-view", target_os = "linux"))]
     if std::env::var_os("AEROTAB_NATIVE_HOST_SMOKE").is_some()

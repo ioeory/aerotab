@@ -35,16 +35,54 @@ export function nativeOutputSeq(value: unknown): bigint {
 
 export type NativeViewInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
+/** Match pane layout barrier: CSS/DPI round-trips may drift by a fraction of a pixel. */
+export const NATIVE_VIEW_GEOMETRY_EPS_PX = 1;
+
+type NativeViewBounds = {
+  x?: number; y?: number; left?: number; top?: number; width: number; height: number;
+};
+
+/** Staging/current() must ignore subpixel jitter; a full CSS px move still supersedes. */
+export function nativeViewGeometryEquals(
+  a: NativeViewBounds | null | undefined,
+  b: NativeViewBounds | null | undefined,
+  eps = NATIVE_VIEW_GEOMETRY_EPS_PX,
+): boolean {
+  if (!a || !b) return false;
+  const ax = a.x ?? a.left, ay = a.y ?? a.top, bx = b.x ?? b.left, by = b.y ?? b.top;
+  return [ax, ay, a.width, a.height, bx, by, b.width, b.height].every(Number.isFinite)
+    && Math.abs(ax! - bx!) < eps && Math.abs(ay! - by!) < eps
+    && Math.abs(a.width - b.width) < eps && Math.abs(a.height - b.height) < eps;
+}
+
 /** GTK allocation uses logical pixels. DPR belongs to the GL backing buffer ONLY.
- * Refuse partial clipping rather than display an input surface over adjacent UI. */
+ * Refuse real clipping onto adjacent UI; clamp only sub-CSS-px viewport overflow. */
 export function nativeViewGeometry(
-  rect: { left: number; top: number; width: number; height: number },
+  rect: { left?: number; top?: number; x?: number; y?: number; width: number; height: number },
   viewport: { width: number; height: number },
   _devicePixelRatio = 1,
 ): NativeViewGeometry | null {
-  const { left: x, top: y, width, height } = rect;
-  if (![x, y, width, height].every(v => Number.isFinite(v) && v >= 0 && v <= 16384)
-    || width < 1 || height < 1 || x + width > viewport.width || y + height > viewport.height) return null;
+  let x = rect.left ?? rect.x ?? NaN;
+  let y = rect.top ?? rect.y ?? NaN;
+  let width = rect.width;
+  let height = rect.height;
+  if (![x, y, width, height].every(v => Number.isFinite(v) && v <= 16384) || width < 1 || height < 1) return null;
+  // Tiny negative origin is DPI noise; a full CSS px off-viewport is a real clip.
+  if (x < 0) {
+    if (x <= -NATIVE_VIEW_GEOMETRY_EPS_PX) return null;
+    width += x; x = 0;
+  }
+  if (y < 0) {
+    if (y <= -NATIVE_VIEW_GEOMETRY_EPS_PX) return null;
+    height += y; y = 0;
+  }
+  if (width < 1 || height < 1 || x > 16384 || y > 16384) return null;
+  const overflowX = x + width - viewport.width;
+  const overflowY = y + height - viewport.height;
+  if (overflowX >= NATIVE_VIEW_GEOMETRY_EPS_PX || overflowY >= NATIVE_VIEW_GEOMETRY_EPS_PX) return null;
+  if (overflowX > 0) width -= overflowX;
+  if (overflowY > 0) height -= overflowY;
+  if (width < 1 || height < 1 || x + width > viewport.width || y + height > viewport.height) return null;
   return { x, y, width, height };
 }
 

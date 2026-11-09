@@ -72,6 +72,44 @@ export function profileInScope(profile: StoredProfile, group: string | null, fav
   return group === '' ? path === '' : path === group || path.startsWith(`${group}/`);
 }
 
+/** null is the aggregate All view; '' is a real root directory. */
+export function catalogGroupPaths(groups: string[], group: string | null, query: string): string[] {
+  const needle = query.trim().toLowerCase();
+  return groups.filter(path => (group === null || group === '' || path === group || path.startsWith(`${group}/`)) && (!needle || path.toLowerCase().includes(needle)));
+}
+
+export function catalogDirectory(profiles: StoredProfile[], groups: string[], group: string | null, query = ''): { profiles: StoredProfile[]; folders: Array<{ name: string; path: string }> } {
+  const normalize = (path: string | null | undefined) => profileGroupBreadcrumbs(path ?? null).at(-1)?.path ?? '';
+  const current = group === null ? null : normalize(group);
+  const paths = new Set(groups.map(normalize));
+  for (const profile of profiles) paths.add(normalize(profile.group));
+  const folders = new Map<string, { name: string; path: string }>();
+  const prefix = current ? `${current}/` : '';
+  for (const path of paths) {
+    if (!path.startsWith(prefix)) continue;
+    const remaining = path.slice(prefix.length);
+    const name = query.trim() ? remaining.split('/').at(-1) : remaining.split('/')[0];
+    const target = query.trim() ? path : `${prefix}${name}`;
+    if (name && (!query.trim() || path.toLowerCase().includes(query.trim().toLowerCase()))) folders.set(target, { name, path: target });
+  }
+  return {
+    profiles: current === null ? profiles : profiles.filter(profile => normalize(profile.group) === current),
+    folders: [...folders.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+/** A scoped tree is the same directory listing as grid/list, with each child
+ * recursively expanded. Root keeps direct ungrouped hosts AND folder entries;
+ * All is aggregate only in flat views, not duplicated into the tree root. */
+export function buildCatalogTree(profiles: StoredProfile[], groups: string[], group: string | null): import('./profileTree').ProfileTreeFolder {
+  const path = profileGroupBreadcrumbs(group).at(-1)?.path ?? '';
+  const directory = catalogDirectory(profiles, groups, path);
+  return {
+    name: path.split('/').at(-1) ?? '', path, profiles: directory.profiles,
+    folders: directory.folders.map(folder => buildCatalogTree(profiles, groups, folder.path)),
+  };
+}
+
 export function reconcileCatalogSelection(selected: Set<string>, visible: StoredProfile[]): Set<string> {
   return new Set(visible.filter(profile => selected.has(profile.id)).map(profile => profile.id));
 }

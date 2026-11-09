@@ -134,6 +134,48 @@ test('geometry remains CSS pixels at high DPR and hides invalid or clipped bound
   ]) assert.equal(nativeViewGeometry(invalid, { width: 1920, height: 1080 }, 2), null);
 });
 
+// Wide full-bleed panes often report left+width a fraction over innerWidth.
+test('near-1920 full-width subpixel overflow clamps instead of hiding the surface', async () => {
+  const { nativeViewGeometry } = await api();
+  const viewport = { width: 1920, height: 1080 };
+  assert.deepEqual(
+    nativeViewGeometry({ left: 0, top: 0, width: 1920.0005, height: 1080 }, viewport, 1),
+    { x: 0, y: 0, width: 1920, height: 1080 },
+  );
+  assert.deepEqual(
+    nativeViewGeometry({ left: 0.25, top: 36.5, width: 1919.8, height: 1043.5002 }, viewport, 1),
+    { x: 0.25, y: 36.5, width: 1919.75, height: 1043.5 },
+  );
+  assert.deepEqual(
+    nativeViewGeometry({ left: -0.0004, top: 0, width: 1920, height: 1080 }, viewport, 1),
+    { x: 0, y: 0, width: 1919.9996, height: 1080 },
+  );
+  // Real overlap onto adjacent UI must still refuse rather than clip into neighbors.
+  assert.equal(
+    nativeViewGeometry({ left: 100, top: 0, width: 1900, height: 1080 }, viewport, 1),
+    null,
+  );
+});
+
+test('staging geometry equality tolerates subpixel jitter under one CSS px', async () => {
+  const { nativeViewGeometryEquals } = await api();
+  assert.equal(typeof nativeViewGeometryEquals, 'function');
+  assert.equal(
+    nativeViewGeometryEquals(
+      { x: 0, y: 36, width: 1920, height: 1044 },
+      { x: 0.0003, y: 35.9997, width: 1919.9994, height: 1044.0002 },
+    ),
+    true,
+  );
+  assert.equal(
+    nativeViewGeometryEquals(
+      { left: 0, top: 0, width: 1920, height: 1080 },
+      { left: 0, top: 0, width: 1921, height: 1080 },
+    ),
+    false,
+  );
+});
+
 test('unavailable capability fails explicitly before any attach', async () => {
   const { createNativeViewHost } = await api();
   const calls = [];

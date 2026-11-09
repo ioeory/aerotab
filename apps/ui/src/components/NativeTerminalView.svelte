@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
+  import { createFloatFallback } from '../lib/nativeFloatFallback';
   import { i18n } from '../lib/i18n.svelte';
   import { settlePaneLayout } from '../lib/paneLayoutBarrier';
   import { traceView, traceLayout } from '../lib/viewCausalTrace';
   import { runNativeViewTransaction, recoverNativeInputRollback } from '../lib/nativeViewTransaction';
   import type { RpcClient } from '../lib/rpc';
   import {
-    createNativeViewHost, nativeViewGeometry, nativeSurfaceError,
+    createNativeViewHost, nativeViewGeometry, nativeViewGeometryEquals, nativeSurfaceError,
     NATIVE_VIEW_OCCLUSION_EVENT, type TerminalViewBackend, type NativeViewConfig,
   } from '../lib/nativeViewHost';
   import { tracePaste } from '../lib/nativePasteTrace';
@@ -135,6 +136,24 @@
     unlistenFontDelta?.(); unlistenFontDelta = null;
     inputQueue?.dispose(); unlistenInput?.(); unlistenInput = null;
   }
+  let floatTransitionError = $state('');
+  const floatFallback=createFloatFallback({
+    native:()=>!!hostAdapter && !committedWebview,
+    toWebview:async()=>{await stageWebviewSurface(-1);},
+    toNative:async()=>{await stageNativeSurface(-1);},
+  });
+  onMount(()=>{
+    let alive=true;
+    const sync=()=>{if(!controller||!visible||occluded||globalOccluded||document.hidden||releasingInput||transitionClosing||stagingNative||stagingWebview)return;
+      const floating=[...document.querySelectorAll<HTMLElement>('[data-workbench-float]')].some(el=>el.getClientRects().length>0);
+      const focused=document.activeElement;
+      const changing=floating?!!hostAdapter&&!committedWebview:committedWebview&&backend==='native-surface';
+      void (startup??Promise.resolve()).then(()=>{if(!alive)return;return floatFallback.update(floating);}).then(()=>{floatTransitionError='';if(changing&&focused instanceof HTMLElement&&focused.isConnected&&!surface?.contains(focused)&&focused!==document.body)focused.focus({preventScroll:true});}).catch(error=>{if(alive)floatTransitionError=String(error);});
+    };
+    const observer=new MutationObserver(sync);observer.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-workbench-float','hidden','class','style']});
+    const timer=window.setInterval(sync,250);sync();
+    return()=>{alive=false;observer.disconnect();window.clearInterval(timer);floatFallback.dispose();};
+  });
   let startup: Promise<void> | null = null;
   let syncSurface: (() => void) | null = null;
   let cleanupSurface: (() => void) | null = null;
@@ -246,8 +265,12 @@
     let dirty = false;
     let lastGeometry = { x: 0, y: 0, width: 1, height: 1 };
     let lastConfig = '';
+    let lastUpdate = '';
     let focusRestored = false;
     const sync = async () => {
+      // A retained WebView owns visibility during/after reverse staging. Do not
+      // resurrect a native draw gate from an unrelated ancestor mutation.
+      if (disposed || surfaceError || !surface || stagingWebview || (committedWebview && !stagingNative)) return;
       // Cancel first-draw polling even while the main sync is awaiting a frame.
       const rectNow = surface && nativeViewGeometry(surface.getBoundingClientRect(), {
         width: window.innerWidth, height: window.innerHeight,
@@ -265,7 +288,9 @@
           if (stagingWebview || (committedWebview && !stagingNative)) return;
           const shown = visible && !occluded && !globalOccluded && !document.hidden && !!rect;
           if (!started && !shown) continue;
-          if (rect) lastGeometry = rect;
+          // Keep the first stable CSS bounds so subpixel observer noise cannot
+          // advance host revisions or flap first-draw visibility.
+          if (rect && (!started || !nativeViewGeometryEquals(rect, lastGeometry))) lastGeometry = rect;
           if (!started) {
             // terminal.attach + frame Channel must have completed before native view attach.
             await hostAdapter!.start(lastGeometry);
@@ -276,8 +301,14 @@
           const configKey = JSON.stringify(cfg);
           hostAdapter!.setFocusAllowed(canFocusSurface() && shown);
           if (!canFocusSurface() || !shown) focusRestored = false;
-          await hostAdapter!.update(lastGeometry, shown, configKey === lastConfig ? undefined : cfg);
-          lastConfig = configKey;
+          const updateKey = JSON.stringify([lastGeometry, shown, configKey]);
+          // Mutation/resize observers can report unchanged bounds (including our
+          // own canvas style changes). Only real changes advance host revisions.
+          if (updateKey !== lastUpdate) {
+            await hostAdapter!.update(lastGeometry, shown, configKey === lastConfig ? undefined : cfg);
+            lastConfig = configKey;
+            lastUpdate = updateKey;
+          }
           if (!inputAcknowledged && !stagingNative) {
             await hostAdapter!.acknowledgeInput(0);
             inputAcknowledged = true;
@@ -341,16 +372,15 @@
     await settlePaneLayout(surface);
     if (disposed || controller !== source) throw new Error('native staging superseded during layout barrier');
     const sourceConfig = JSON.stringify(viewConfig());
-    const sourceBounds = surface?.getBoundingClientRect();
-    const sourceGeometry = sourceBounds && [sourceBounds.x, sourceBounds.y, sourceBounds.width, sourceBounds.height].join(',');
+    const sourceBounds = surface?.getBoundingClientRect() ?? null;
     traceLayout('capture', surface);
     stagingNative = true;
     stagingError = null;
     const current = () => {
-      const bounds = surface?.getBoundingClientRect();
+      const bounds = surface?.getBoundingClientRect() ?? null;
       const status = disposed || transitionClosing ? 'disposed' : stagingError ? 'target-error' : controller !== source ? 'controller'
         : sourceConfig !== JSON.stringify(viewConfig()) ? 'config'
-        : !bounds || sourceGeometry !== [bounds.x, bounds.y, bounds.width, bounds.height].join(',') ? 'geometry'
+        : !nativeViewGeometryEquals(sourceBounds, bounds) ? 'geometry'
         : !visible || occluded || globalOccluded || document.hidden ? 'visibility' : 'current';
       traceView({ stage: 'transaction.current', status });
       traceLayout('current', surface);
@@ -437,10 +467,10 @@
     if (disposed || controller !== source || hostAdapter !== host) throw new Error('WebView staging superseded during layout barrier');
     const generation = host.generation(), epoch = ++reverseEpoch;
     const config = JSON.stringify(viewConfig());
-    const bounds = () => { const r = surface?.getBoundingClientRect(); return r && [r.x,r.y,r.width,r.height].join(','); };
-    const geometry = bounds();
+    const sourceBounds = surface?.getBoundingClientRect() ?? null;
     const current = () => !disposed && reverseEpoch === epoch && controller === source && hostAdapter === host
-      && host.generation() === generation && JSON.stringify(viewConfig()) === config && bounds() === geometry
+      && host.generation() === generation && JSON.stringify(viewConfig()) === config
+      && nativeViewGeometryEquals(sourceBounds, surface?.getBoundingClientRect() ?? null)
       && visible && !occluded && !globalOccluded && !document.hidden;
     stagingWebview = true;
     let suspended = false;
@@ -624,7 +654,7 @@
       if (((backend === 'native-surface' && !committedWebview) || committedNative)) await mountSurface();
       if (disposed || surfaceError) return;
       if (backend === 'webview') {
-        await ctl.waitForDraw();
+        await ctl.waitForInitialDraw();
         if (disposed || surfaceError) return;
         onReady?.(ctl);
         if (visible && active && !occluded && !globalOccluded) ctl.focus();
@@ -690,6 +720,7 @@
 </script>
 
 <div bind:this={surface} data-native-session={sessionId} data-native-input-active={active && visible && !occluded && !globalOccluded && !surfaceError && !rollbackPending} data-terminal-view-backend={backend} class="native-term absolute inset-0 min-h-0 min-w-0 overflow-hidden">
+  {#if floatTransitionError}<div role="alert" class="absolute bottom-2 left-2 z-30 text-xs">{i18n.t('workbench.nativeCovered')}: {floatTransitionError}</div>{/if}
   {#if inputBackpressure}
     <div role="alert" class="absolute bottom-2 left-2 right-2 text-xs text-[var(--color-warning)]">{i18n.t('terminal.inputBackpressure')}</div>
   {/if}

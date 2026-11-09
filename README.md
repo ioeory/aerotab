@@ -15,7 +15,11 @@
 - **SSH & serial** — profiles, jump chains, agent / key / password / **Vault** auth, known_hosts
 - **Pane layout** — splits, drag-reorder, maximize, session workspaces
 - **SFTP** — dual-pane local/remote browser, drag-and-drop, pause/resume transfers
-- **Encrypted config sync** — WebDAV or Git; exports profiles, settings, shortcuts, plugins metadata, and optional Vault entries
+- **Encrypted config sync** — Git, WebDAV, S3-compatible object storage, or Google Drive app data; profiles, settings, shortcuts, plugin metadata, and opt-in Notes / Vault entries
+- **AI chat** — multiple OpenAI-compatible, Anthropic, and Ollama providers; explicit context selection, external MCP tools, and one bound visible terminal with Observer / Confirm / explicitly authorized Auto modes
+- **Workbench** — resizable primary navigation and docked / floating Files, Notes, system, and AI panels around session panes
+- **MCP automation** — permission-scoped notes / workspace context and locally approved, bounded-concurrency script batches
+- **Terminal views & diagnostics** — WebView termgrid / native GPU view switching, xterm fallbacks, stable resize / scrollbar geometry, pointer-captured sidebar / panel resizing, and JSON diagnostic export
 - **Vault** — master-password secret store; unlock in Settings → Vault or **Config sync** when syncing credentials
 - **Git OAuth** — GitHub / GitLab device-flow tokens in the OS keyring
 - **Broadcast input** — send keystrokes to all SSH panes in a tab (`Ctrl+Shift+B`)
@@ -45,9 +49,12 @@ cd src-tauri && cargo run --bin aerotab-app --features desktop
 ### Checks
 
 ```bash
+cargo fmt --all
+cargo fmt --all -- --check
 cargo check --features desktop
-cargo test --lib --features desktop
-cd apps/ui && npm run check
+cargo clippy --workspace --all-targets --features desktop -- -D warnings
+cargo test --lib --features desktop -- --test-threads=1
+cd apps/ui && npm run check && npm run build
 ```
 
 ### Windows installer (WSL cross-compile)
@@ -64,7 +71,7 @@ Copy the installer to a Windows local path before installing (not from `\\wsl.lo
 
 Sync has two layers:
 
-1. **Engine** — configured once with **Configure / re-key** (Git/WebDAV URL, sync master password, device id). Settings live in `settings.sync`; the sync master password is stored in the **OS credential store** (default account `sync.master`), not in plain settings.
+1. **Engine** — configure a Git, WebDAV, S3-compatible, or Google Drive target with a sync master password. New setup uses protocol 3; saved protocol-2 configurations stay on protocol 2 until explicitly migrated. Settings live in `settings.sync`; the master password is stored in the **OS credential store** (default account `sync.master`), not in plain settings.
 2. **Data** — each **Sync now** (or auto-sync tick) exports local state → reconciles with the remote → imports back into local stores, then refreshes the UI.
 
 | Group | What syncs |
@@ -73,19 +80,32 @@ Sync has two layers:
 | Appearance | Theme, window, terminal, appearance, hotkeys bundle, most other `settings` keys |
 | Shortcuts | `hotkeys` |
 | PluginCfg | Loaded WASM plugin list |
-| Credentials | Vault entries (vault must be **unlocked**; optional auto-unlock via keyring account `sync.vault`) |
+| Credentials | Vault entries (opt-in; vault must be **unlocked**; optional keyring auto-unlock via `sync.vault`) |
+| Notes | Ordinary notes, folders, tags, and profile associations (opt-in; not Vault secrets) |
 
 **Typical setup (Settings → Config sync):**
 
-1. Fill Git (or WebDAV) fields and choose sync groups.
-2. **Save to OS credential store** for the sync master password → **Configure / re-key**.
-3. If **Credentials** is enabled: use **Vault (credential sync)** to initialize/unlock, or save the vault password to the OS store.
-4. **Sync now** — expect non-zero push/pull when data differs; sidebar profiles and theme update without restart.
-5. Optional: **Apply auto-sync** for periodic sync.
+1. Choose a provider and configure its target / credentials. S3 needs an existing bucket, HTTPS endpoint, region, and access credentials; Google Drive needs your OAuth client ID and browser authorization (appDataFolder only).
+2. Save the sync master password to the OS credential store and configure the engine; test the connection, inspect the first merge preview, and explicitly approve it before the first sync / auto-sync in the new setup wizard.
+3. Enable **Notes** and / or **Credentials** only if wanted. Credential sync requires an unlocked Vault; save unsaved note drafts before Notes sync / preview.
+4. **Sync now** — exports and merges selected groups, then refreshes the UI. Target / group changes can require a fresh preview and approval.
+5. Optional: enable periodic auto-sync after setup approval. Existing configurations can be restored on launch from the keyring; missing credentials or approvals still block sync.
+
+The implemented cloud backends are **S3-compatible** storage and **Google Drive app data**, not a generic connector for Dropbox, OneDrive, Azure Blob, or arbitrary cloud drives. Provider tests and mock-backed coverage are not evidence of a successful live account round-trip.
 
 On launch, the app runs `bootstrapSyncEngine()` so **Sync now** works without reopening settings when the engine was configured before.
 
 Protocol details: [docs/sync-protocol.md](docs/sync-protocol.md).
+
+## AI and terminal safety (0.3.0)
+
+Configure providers in Settings → AI; API keys stay in the OS keyring. Presets include OpenAI, Anthropic, Ollama, DeepSeek (OpenAI-compatible), and a custom OpenAI-compatible endpoint. Remote endpoints require HTTPS; loopback HTTP is supported for local services such as Ollama.
+
+- Bind one visible terminal and explicitly authorize output reads. **Observer** is read-only; **Confirm** approves each exact terminal input / interrupt; **Auto** requires explicit authorization for that bound session. Changing terminal, revoking access, or starting a new conversation clears authorization.
+- External MCP tool calls still need their own approval; terminal Auto does not authorize arbitrary external tools. Treat terminal output, notes, resources, and prompts as untrusted context.
+- Configurable execution budgets default to **12 model rounds / 30 tool calls / 3 consecutive waits** (not billing limits). Exhaustion ends tool execution and requests a summary; it does not terminate an already-running shell command. Terminal reads / waits do not establish an exit code or prove success.
+- WebView shared-core rendering and native GPU surfaces are distinct views; platform availability and overlay / fallback rules apply. Wayland native embedding remains unsupported. Native-surface drag behavior and Windows Sandbox smoke results must be verified on the target machine, not inferred from unit tests or a successful build.
+- Export diagnostics from Application settings or the command palette. The JSON includes sanitized failures and bounded terminal geometry events, not a terminal transcript; review it before sharing.
 
 ## Local data
 
@@ -106,6 +126,8 @@ Bump version in this order, then rebuild installers:
 1. [Cargo.toml](Cargo.toml) — `[workspace.package].version`
 2. [src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) — `"version"` and window `title`
 3. [apps/ui/package.json](apps/ui/package.json) — `"version"`
+
+For **0.3.0**, keep workspace entries in `Cargo.lock`, frontend package-lock metadata, and the footer `buildId` in `App.svelte` aligned as well. Run the formatting, lint, test, frontend, and isolated Windows smoke preflight in the release playbook; report Sandbox unavailability as a blocker rather than bypassing isolation.
 
 Tag releases `vX.Y.Z`. GitHub Actions attaches **deb** (amd64 + arm64), **Arch `.pkg.tar.zst`** (x86_64 + aarch64), **Windows NSIS**, and **macOS DMG** to each release. Full signing and feed steps: [docs/release.md](docs/release.md).
 

@@ -10,6 +10,7 @@
 //! - [`sync`]    — config/session sync (WebDAV + Git, self-hosted only).
 //! - [`plugins`] — legacy v1 plugin RPC bridge.
 
+pub mod ai;
 pub mod commands;
 pub mod core;
 pub mod desktop_session;
@@ -17,6 +18,7 @@ pub mod error;
 pub mod import;
 pub mod ipc;
 pub mod mcp;
+pub mod mcp_client;
 pub mod migrate;
 pub mod native_terminal;
 pub mod network_resources;

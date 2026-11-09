@@ -2,6 +2,51 @@ use super::*;
 use rmcp::{transport::StreamableHttpClientTransport, ServiceExt};
 
 #[tokio::test]
+async fn standard_resources_and_prompts_use_real_sdk_handlers() {
+    let state = AppState::new();
+    let dispatcher = Arc::new(Dispatcher::new());
+    dispatcher.register("profile.list", |_| async {
+        Ok(json!([{ "id":"p","auth":{"password":"SECRET"}}]))
+    });
+    let config = McpConfig::default();
+    let server = McpServer::new(state, dispatcher, config);
+    let (client_transport, server_transport) = tokio::io::duplex(65536);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await.unwrap() });
+    let client = ().serve(client_transport).await.unwrap();
+    let service = server_task.await.unwrap();
+    let listed = client.list_resources(None).await.unwrap();
+    assert!(listed.resources.iter().any(|r| r.uri == "aerotab://hosts"));
+    assert!(!listed.resources.iter().any(|r| r.uri == "aerotab://notes"));
+    let hosts = client
+        .read_resource(ReadResourceRequestParam {
+            uri: "aerotab://hosts".into(),
+        })
+        .await
+        .unwrap();
+    assert!(!serde_json::to_string(&hosts).unwrap().contains("SECRET"));
+    assert!(client
+        .read_resource(ReadResourceRequestParam {
+            uri: "aerotab://notes".into()
+        })
+        .await
+        .is_err());
+    assert_eq!(client.list_prompts(None).await.unwrap().prompts.len(), 3);
+    let prompt = client
+        .get_prompt(GetPromptRequestParam {
+            name: "change-preflight".into(),
+            arguments: None,
+        })
+        .await
+        .unwrap();
+    assert!(serde_json::to_string(&prompt)
+        .unwrap()
+        .contains("visible local approval"));
+    assert!(!serde_json::to_string(&prompt).unwrap().contains("SECRET"));
+    let _ = client.cancel().await;
+    let _ = service.cancel().await;
+}
+
+#[tokio::test]
 async fn streamable_http_roundtrip_permissions_and_revocation() {
     let state = AppState::new();
     let dispatcher = Arc::new(Dispatcher::new());

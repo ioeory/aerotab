@@ -4,5 +4,8 @@
 //! is intentionally minimal so additional backends (S3, plain HTTP) can land
 //! post-GA without protocol churn.
 
+pub mod cloud;
+pub mod drive;
 pub mod git;
+pub mod s3;
 pub mod webdav;

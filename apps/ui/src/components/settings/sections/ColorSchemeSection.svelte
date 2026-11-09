@@ -1,11 +1,12 @@
 <script lang="ts">
-  // Color scheme picker (M4). Persists the chosen scheme id under settings
-  // key `terminalColorScheme`. TerminalPane consumes it as a palette
-  // override layered on top of the app theme.
+  // Window-local preview transaction. Only Apply / Save persists the override;
+  // cancel and section teardown restore the existing terminal palette.
 
   import { onMount, onDestroy } from 'svelte';
   import type { RpcClient } from '../../../lib/rpc';
+  import { createTerminalPaletteDraft, setTerminalPalettePreview } from '../../../lib/terminalPalettePreview';
   import { COLOR_SCHEMES, type ColorScheme } from '../../../lib/colorSchemes';
+  import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
 
   interface Props {
@@ -25,60 +26,68 @@
       : COLOR_SCHEMES,
   );
 
-  // Color schemes auto-apply on click — no need for a Save step. Persist
-  // through the existing settings.set and bump the live-preview revision so
-  // every open TerminalPane re-reads the palette immediately.
-  async function applyNow(name: string) {
-    selected = name;
-    try {
-      await rpc.call('settings.set', { key: 'terminalColorScheme', value: name });
-      settingsCoord.bumpRev();
-    } catch (e) {
-      onError(`color scheme save: ${(e as Error).message}`);
-    }
+  let saving = $state(false);
+  let loaded = $state(false);
+  let draft: ReturnType<typeof createTerminalPaletteDraft> | null = null;
+  function preview(name: string) {
+    if (!draft || saving) return;
+    selected = draft.preview(name);
+    settingsCoord.markDirty('colorscheme');
   }
-  function pick(s: ColorScheme) { void applyNow(s.name); }
-  function clearChoice() { void applyNow(''); }
+  function pick(s: ColorScheme) { preview(s.name); }
+  function clearChoice() { preview(''); }
+  function cancel() {
+    if (!draft || saving) return;
+    selected = draft.cancel();
+    settingsCoord.markClean('colorscheme');
+  }
+  async function apply() {
+    try { await settingsCoord.saveSection('colorscheme'); }
+    catch (e) { onError(`color scheme save: ${(e as Error).message}`); }
+  }
 
   async function load() {
     try {
       const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminalColorScheme' });
       if (typeof r.value === 'string') selected = r.value;
+      draft = createTerminalPaletteDraft(selected, { render: setTerminalPalettePreview, persist: value => rpc.call('settings.set', { key: 'terminalColorScheme', value }) });
+      loaded = true;
     } catch (e) {
       onError(`color scheme load: ${(e as Error).message}`);
     }
   }
   async function save() {
-    // Already auto-applied on pick — keep this as a no-op so the Save button
-    // still works for other sections.
-    await rpc.call('settings.set', { key: 'terminalColorScheme', value: selected });
-    settingsCoord.bumpRev();
+    if (!draft || !loaded) throw new Error('Terminal palettes have not loaded');
+    saving = true;
+    try { selected = await draft.apply(); }
+    catch (error) { selected = draft.cancel(); throw error; }
+    finally { saving = false; }
   }
 
   onMount(() => {
     settingsCoord.registerSaver('colorscheme', save);
     void load();
   });
-  onDestroy(() => settingsCoord.unregisterSaver('colorscheme'));
+  onDestroy(() => { draft?.cancel(); settingsCoord.markClean('colorscheme'); settingsCoord.unregisterSaver('colorscheme'); });
 </script>
 
 <div class="settings-section">
-  <h2>Color scheme</h2>
+  <h2>{i18n.t('settings.terminalPalette.title')}</h2>
+  <p role="status">{i18n.t(selected ? 'settings.terminalPalette.independent' : 'settings.terminalPalette.following')}</p>
 
   <div>
     <input
       type="search" bind:value={query}
-      placeholder="Filter {COLOR_SCHEMES.length} schemes…" class="input"
+      placeholder={i18n.t('settings.terminalPalette.filter')} aria-label={i18n.t('settings.terminalPalette.filter')} class="input"
     />
     <div class="help">
-      Overrides the terminal palette only. The application chrome (panels,
-      sidebar) is controlled by the theme in <em>Appearance</em>.
+      {i18n.t('settings.terminalPalette.hint')}
     </div>
   </div>
 
   <div class="flex items-center gap-2">
-    <button type="button" class="btn-secondary" onclick={clearChoice} disabled={!selected}>
-      Use Appearance theme (no override)
+    <button type="button" class="btn-secondary" onclick={clearChoice} disabled={!loaded || !selected || saving}>
+      {i18n.t('settings.terminalPalette.follow')}
     </button>
     {#if selected}
       <span class="text-[12px] text-[var(--color-fg-muted)]">
@@ -87,12 +96,17 @@
     {/if}
   </div>
 
+  <div class="flex gap-2">
+    <button type="button" class="btn-primary" disabled={!loaded || saving} onclick={apply}>{i18n.t('settings.appearance.apply')}</button>
+    <button type="button" class="btn-secondary" disabled={!loaded || saving} onclick={cancel}>{i18n.t('settings.appearance.cancelPreview')}</button>
+  </div>
   <div class="grid grid-cols-2 gap-3">
     {#each filtered as scheme (scheme.name)}
       <button
         type="button"
         class="scheme-card"
         class:selected={selected === scheme.name}
+        disabled={!loaded || saving} aria-pressed={selected === scheme.name}
         onclick={() => pick(scheme)}
         style="background: {scheme.background}; color: {scheme.foreground};
                border-color: {selected === scheme.name ? 'var(--color-accent)' : scheme.selection};"

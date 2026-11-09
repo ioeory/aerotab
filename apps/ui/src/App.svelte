@@ -3,9 +3,11 @@
   import ResourceWorkspace from './components/hosts/ResourceWorkspace.svelte';
   import PrimaryNav from './components/PrimaryNav.svelte';
   import type { WorkspacePage } from './lib/workspacePages';
-  import { toggleAuxiliaryPanel, type AuxiliaryPanels } from './lib/sessionAuxiliary';
   import { getHostMonitoring } from './lib/hostMonitoring.svelte';
   import MonitoringWorkspace from './components/MonitoringWorkspace.svelte';
+  import { snapshotSessionLayout, parseSessionLayout, instantiateLayout } from './lib/sessionLayout';
+  import Workbench from './components/Workbench.svelte';
+  import AIChat from './components/AIChat.svelte';
   import HostSystemPanel from './components/HostSystemPanel.svelte';
   import NotesWorkspace from './components/notes/NotesWorkspace.svelte';
   import SessionNotesPanel from './components/notes/SessionNotesPanel.svelte';
@@ -17,6 +19,7 @@
   import TabBar from './components/TabBar.svelte';
   import PaneGrid from './components/PaneGrid.svelte';
   import AppConfirmDialog from './components/AppConfirmDialog.svelte';
+  import McpBatchApproval from './components/McpBatchApproval.svelte';
   import ProfileModal from './components/ProfileModal.svelte';
   import { appConfirm, appPrompt } from './lib/confirm.svelte';
   import VaultUnlockModal from './components/VaultUnlockModal.svelte';
@@ -92,7 +95,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.2.34-ui-20261107-native-pane-activation';
+  const buildId = '0.3.0-ui-20261109';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -152,11 +155,11 @@
   const WORKSPACE_SESSION_TIMEOUT_MS = 20_000;
   let workspacePage = $state<WorkspacePage>('hosts');
   let filesWorkspace: { openEndpoint: (side: 'left' | 'right', profileId: string, path?: string) => void } | null = $state(null);
-  let auxiliaryPanels = $state<AuxiliaryPanels>({});
+  let sessionPanelVisible = $state({ notes: false, system: false });
+  let aiVisible = $state(false);
   function toggleSessionAuxiliary(panel: 'system' | 'notes') {
     if (!tabs.activeId) return;
-    auxiliaryPanels = toggleAuxiliaryPanel(auxiliaryPanels, tabs.activeId, panel);
-    sftpDockCollapsed = { ...sftpDockCollapsed, [tabs.activeId]: true };
+    sessionPanelVisible = { ...sessionPanelVisible, [panel]: !sessionPanelVisible[panel] };
     requestAnimationFrame(() => {
       dispatchFitAllPanes(tabs.tabs.flatMap(tab => tab.panes.map(pane => pane.id)));
       focusActivePane();
@@ -374,7 +377,7 @@
 
   // ── M9 — session restore ────────────────────────────────────────────────
   // A `Restorable` describes how to re-open a session after a restart. We
-  // record one per opened session and persist the list under `openTabs`.
+  // Keep safe recipes in a local-only, versioned complete pane-tree snapshot.
   type Restorable =
     | { kind: 'local' }
     | { kind: 'shell'; command: string; args: string[]; label: string }
@@ -417,16 +420,8 @@
 
   function persistOpenTabsNow() {
     if (!restoreReady) return;
-    const out = tabs.tabs
-      .map((t) => {
-        const head = t.panes[0];
-        if (!head) return null;
-        const r = restoreMap.get(head.id);
-        if (!r) return null;
-        return { title: t.title, restore: r };
-      })
-      .filter(Boolean);
-    rpc.call('settings.set', { key: 'openTabs', value: out }).catch(() => { /* ignore */ });
+    // Local-only layout, not settings sync: full tree, safe recipes, no inline auth.
+    try { localStorage.setItem('aerotab.sessions.layout.v1', JSON.stringify(snapshotSessionLayout(tabs.tabs, restoreMap))); } catch { /* storage unavailable */ }
   }
 
   function schedulePersistOpenTabs() {
@@ -531,9 +526,9 @@
       const item = opened[node.paneIndex];
       return item ? { type: 'leaf', id: item.session.id, pane: item.session } : null;
     }
-    const children = node.children
-      .map((child) => instantiateWorkspaceNode(child, opened))
-      .filter((child): child is PaneNode => !!child);
+    const children: PaneNode[] = [];
+    const keptRatios: number[] = [];
+    node.children.forEach((child,index)=>{const built=instantiateWorkspaceNode(child,opened);if(built){children.push(built);keptRatios.push(node.ratios[index]??1);}});
     if (children.length === 0) return null;
     if (children.length === 1) return children[0] ?? null;
     return {
@@ -541,7 +536,7 @@
       id: uuidv4(),
       direction: node.direction,
       children,
-      ratios: normalizeRatios(node.ratios, children.length),
+      ratios: normalizeRatios(keptRatios, children.length),
     };
   }
 
@@ -819,12 +814,17 @@
       const wantAutoOpen = v.autoOpenTerminal !== false;
       if (wantRestore) {
         try {
-          const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'openTabs' });
-          const list = Array.isArray(r.value) ? (r.value as Array<{ restore: Restorable }>) : [];
-          for (const e of list) {
-            if (!e || !e.restore) continue;
-            await replayRestorable(e.restore);
-            restored++;
+          let saved:unknown=null;
+          try { const local=localStorage.getItem('aerotab.sessions.layout.v1');if(local)saved=JSON.parse(local); } catch { /* legacy migration */ }
+          if(saved===null){try{const legacy=await rpc.call<{value:unknown}>('settings.get',{key:'openTabs'});saved=legacy.value;}catch{/* local restore does not depend on legacy settings */}}
+          for (const entry of parseSessionLayout(saved)) {
+            const opened:Array<OpenedRestorable|null>=[];
+            for(const recipe of entry.panes){try{opened.push(await openRestorableSessionTimed(recipe));}catch{opened.push(null);}}
+            const layout=instantiateLayout(entry.layout,opened.map(item=>item?.session??null),uuidv4);
+            if(!layout)continue;
+            const tab=tabs.addLayout(entry.customTitle??entry.title,layout,opened[entry.activePaneIndex]?.session.id,entry.maximizedPaneIndex==null?null:opened[entry.maximizedPaneIndex]?.session.id);
+            for(const item of opened)if(item)restoreMap.set(item.session.id,item.restore);
+            restored+=tab.panes.length;
           }
         } catch { /* nothing saved yet */ }
       }
@@ -1299,9 +1299,6 @@
   }
 
   function openSftpDock(target: SftpDockTarget, tabId = tabs.activeId ?? GLOBAL_SFTP_KEY) {
-    const nextPanels = { ...auxiliaryPanels };
-    delete nextPanels[tabId];
-    auxiliaryPanels = nextPanels;
     sftpDockOpen = { ...sftpDockOpen, [tabId]: true };
     sftpDockCollapsed = { ...sftpDockCollapsed, [tabId]: false };
     sftpDockPinned = { ...sftpDockPinned, [tabId]: target };
@@ -1374,11 +1371,6 @@
 
   function setCurrentSftpCollapsed(collapsed: boolean) {
     if (!sftpDockOpen[activeSftpKey]) return;
-    if (!collapsed) {
-      const nextPanels = { ...auxiliaryPanels };
-      delete nextPanels[activeSftpKey];
-      auxiliaryPanels = nextPanels;
-    }
     sftpDockCollapsed = { ...sftpDockCollapsed, [activeSftpKey]: collapsed };
   }
 
@@ -1945,6 +1937,8 @@
   $effect(() => {
     void tabs.revision;
     void tabs.activeId;
+    // resizeSplit replaces layout without bumping revision; traverse the actual tree.
+    void JSON.stringify(snapshotSessionLayout(tabs.tabs,restoreMap));
     schedulePersistOpenTabs();
   });
 
@@ -2107,11 +2101,15 @@
       />
 
       <div class="session-auxiliary-toolbar">
-        <button class="btn-ghost" disabled={!activePane || !isSshPane(activePane)} aria-pressed={!!tabs.activeId && auxiliaryPanels[tabs.activeId] === 'system'} onclick={() => toggleSessionAuxiliary('system')}>{i18n.t('shell.system')}</button>
-        <button class="btn-ghost" disabled={!tabs.activeId} aria-pressed={!!tabs.activeId && auxiliaryPanels[tabs.activeId] === 'notes'} onclick={() => toggleSessionAuxiliary('notes')}>{i18n.t('shell.notes')}</button>
+        <button class="btn-ghost" disabled={!activePane || !isSshPane(activePane)} aria-pressed={hasOpenSftpDock && !currentSftpCollapsed} onclick={()=>{void openSftpForActivePane();}}>{i18n.t('shell.files')}</button>
+        <button class="btn-ghost" disabled={!activePane || !isSshPane(activePane)} aria-pressed={sessionPanelVisible.system} onclick={() => toggleSessionAuxiliary('system')}>{i18n.t('shell.system')}</button>
+        <button class="btn-ghost" disabled={!tabs.activeId} aria-pressed={sessionPanelVisible.notes} onclick={() => toggleSessionAuxiliary('notes')}>{i18n.t('shell.notes')}</button>
+        <button class="btn-ghost" aria-pressed={aiVisible} onclick={() => aiVisible = !aiVisible}>{i18n.t('ai.title')}</button>
       </div>
-      <div class="flex-1 min-h-0 bg-[var(--color-bg)] border-t border-[var(--color-border-soft)] flex">
-        <div class="relative flex-1 min-w-0 min-h-0">
+      {#snippet aiPanel()}<AIChat {rpc} activeSessionId={activePane?.id} onSettings={() => openSettings('ai')} />{/snippet}
+      <Workbench extraPanels={[{id:'ai-chat',type:'ai',title:i18n.t('ai.title'),content:aiPanel,visible:aiVisible}]} notesVisible={sessionPanelVisible.notes} systemVisible={sessionPanelVisible.system} sftpVisible={hasOpenSftpDock && !currentSftpCollapsed}>
+        {#snippet terminal()}
+        <div class="absolute inset-0">
           {#each tabs.tabs as tab (tab.id)}
             <div class="absolute inset-0" hidden={tabs.activeId !== tab.id}>
               {#if tab.kind !== 'transfer'}
@@ -2142,15 +2140,10 @@
             </div>
           {/if}
         </div>
-        {#if tabs.activeId && auxiliaryPanels[tabs.activeId] && workspacePage === 'sessions'}
-          <aside class="session-auxiliary-panel" data-aerotab-focus-zone="">
-            {#if auxiliaryPanels[tabs.activeId] === 'system'}
-              <HostSystemPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />
-            {:else if auxiliaryPanels[tabs.activeId] === 'notes'}
-              <SessionNotesPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />
-            {/if}
-          </aside>
-        {/if}
+        {/snippet}
+        {#snippet notes()}<SessionNotesPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />{/snippet}
+        {#snippet system()}<HostSystemPanel {rpc} profileId={activePane?.profileId ?? null} {onError} />{/snippet}
+        {#snippet sftp()}
         <!-- Keep SFTP browsers mounted for every tab with an open dock (like terminal panes). -->
         {#if sftpDockKeepAliveTabs.length > 0}
           {#if hasOpenSftpDock && currentSftpCollapsed}
@@ -2186,21 +2179,12 @@
                 <X size={13} />
               </button>
             </div>
-          {:else if hasOpenSftpDock}
-            <button
-              type="button"
-              aria-label={i18n.t('sftp.resizeDock')}
-              class="shrink-0 w-[3px] cursor-col-resize bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] border-0 p-0"
-              onpointerdown={onSftpDockResizePointerDown}
-            ></button>
           {/if}
           <div
             class="relative shrink-0 h-full min-w-0 overflow-hidden"
             class:border-l={hasOpenSftpDock && !currentSftpCollapsed}
             class:border-[var(--color-border-soft)]={hasOpenSftpDock && !currentSftpCollapsed}
-            style={hasOpenSftpDock && !currentSftpCollapsed
-              ? `width: ${sftpDockWidthPx}px; max-width: min(${SFTP_DOCK_WIDTH_MAX}px, 55vw);`
-              : 'width: 0; max-width: 0;'}
+            style="width:100%;height:100%;"
             aria-hidden={!(hasOpenSftpDock && !currentSftpCollapsed)}
           >
             {#each sftpDockKeepAliveTabs as dockTab (dockTab.id)}
@@ -2244,7 +2228,8 @@
             {/each}
           </div>
         {/if}
-      </div>
+        {/snippet}
+      </Workbench>
     </div>
 
 
@@ -2361,6 +2346,7 @@
   }}
 />
 <AppConfirmDialog />
+<McpBatchApproval {rpc} />
 {#if settingsOpen}
   <SettingsLayout
     {rpc}
@@ -2421,5 +2407,4 @@
   .session-workspace{min-height:0}
   .session-auxiliary-toolbar{display:flex;justify-content:flex-end;gap:8px;padding:3px 12px;border-top:1px solid var(--color-border-soft)}
   .session-auxiliary-toolbar button[aria-pressed="true"]{color:var(--color-accent);background:var(--color-accent-soft)}
-  .session-auxiliary-panel{width:360px;max-width:45vw;min-width:260px;overflow:auto;border-left:1px solid var(--color-border-soft);background:var(--color-panel);flex-shrink:0}
 </style>

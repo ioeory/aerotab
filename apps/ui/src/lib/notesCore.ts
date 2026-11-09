@@ -1,7 +1,7 @@
 import { Marked, Renderer } from 'marked';
 
 export interface Note { id: string; parent_id: string | null; title: string; markdown: string; tags: string[]; profile_ids: string[]; version: number; updated_at: number }
-export interface NoteFolder { id: string; parent_id: string | null; name: string; version: number; updated_at: number }
+export interface NoteFolder { id: string; parent_id: string | null; name: string; version: number; updated_at: number; recovered_parent_id?: string | null }
 export interface NotesSnapshot { notes: Note[]; folders: NoteFolder[]; revision: number }
 export const emptySnapshot = (): NotesSnapshot => ({ notes: [], folders: [], revision: 0 });
 const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);

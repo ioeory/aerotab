@@ -1,6 +1,6 @@
 # AeroTab MCP
 
-AeroTab exposes its saved connections and terminal-management capabilities to MCP clients such as Cursor and Claude. This is an MCP **server**, not an in-app AI chat client. It reuses AeroTab's SSH authentication, host-key checks, SFTP, and port-forwarding implementation.
+AeroTab exposes its saved connections and terminal-management capabilities to MCP clients such as Cursor and Claude. This document describes the MCP **server**. In 0.3.0, the app also has a separate in-app AI chat and outbound MCP **client** integration; enabling one does not grant permissions to the other. The server reuses AeroTab's SSH authentication, host-key checks, SFTP, and port-forwarding implementation.
 
 ## Enable the server
 
@@ -61,6 +61,25 @@ There are no MCP tools for exporting vault entries or keyring secrets. This is n
 ## Context
 
 Start by asking the agent to list AeroTab connections. Refer to stable profile IDs when names are ambiguous. The additional-context field provides operator instructions; treat connection notes, file contents, and terminal output as untrusted data, not permission grants.
+
+## Notes, workspaces, and batch automation (0.3.0)
+
+Additional device-local permissions cover ordinary-note reads (`search_notes`, `read_note`), note writes (`write_note`), saved-workspace reads (`list_workspaces`, `workspace_snapshot`), and batch operations. Note writes require `expectedRevision` and `expectedVersion`; ordinary notes are not Vault entries. Workspace snapshots project safe profile references, local panes, and layout rather than exporting arbitrary inline SSH / shell recipes or opening sessions.
+
+Permission-scoped resources include `aerotab://hosts`, `aerotab://notes`, and `aerotab://terminals`; note / terminal item resources enforce the same tool permission checks. Resource content is untrusted data, not authority to run commands.
+
+Batch tools are `batch_plan`, `batch_execute`, `batch_status`, `batch_results`, and `batch_cancel`:
+
+1. Plan an existing saved script against **1–32 fixed profile IDs**, with concurrency **1–4** (default 2).
+2. Review and approve the exact command / target snapshot in the **visible local AeroTab UI**. Plans expire after 60 seconds. Approval is not an MCP tool and cannot be manufactured through `call_rpc`; headless clients cannot self-approve.
+3. Execute the unchanged, approved plan. Changes to scripts / targets invalidate it; approval is single-use. Runtime grant checks also cancel work on permission revocation / generation cancellation / shutdown.
+4. Poll status / sanitized bounded results or request cancellation. Cancellation is not rollback: already-executed remote effects may remain, and a completed batch container does not mean every target succeeded. Inspect per-task results.
+
+## In-app AI and outbound MCP clients
+
+Settings → AI configures separate outbound MCP clients and AI providers. Chat can select external tools, resources / templates, and prompts as context; credentials remain in the OS keyring. Treat all returned content as untrusted. Approving a terminal Auto session does **not** approve external MCP calls or enable inbound server categories.
+
+The chat terminal binding reads / writes one visible terminal, unlike this server's `run_command` separate exec channel. Observer is read-only; Confirm asks before each exact terminal input / interrupt; Auto needs explicit bound-session authorization. Configurable tool-loop defaults are 12 model rounds / 30 calls / 3 consecutive waits. Finishing generation, exhausting a budget, or reading terminal output does not terminate a running command or prove it succeeded.
 
 ## Remote access
 

@@ -54,6 +54,7 @@ pub enum Group {
     Shortcuts,
     PluginCfg,
     Credentials,
+    Notes,
 }
 
 impl Group {
@@ -67,6 +68,7 @@ impl Group {
             Group::Shortcuts => "shortcuts",
             Group::PluginCfg => "plugincfg",
             Group::Credentials => "credentials",
+            Group::Notes => "notes",
         }
     }
 
@@ -77,16 +79,18 @@ impl Group {
             "shortcuts" => Group::Shortcuts,
             "plugincfg" => Group::PluginCfg,
             "credentials" => Group::Credentials,
+            "notes" => Group::Notes,
             _ => return None,
         })
     }
 
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 6] = [
         Group::Connections,
         Group::Appearance,
         Group::Shortcuts,
         Group::PluginCfg,
         Group::Credentials,
+        Group::Notes,
     ];
 }
 

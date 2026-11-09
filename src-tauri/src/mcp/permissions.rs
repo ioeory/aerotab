@@ -7,6 +7,9 @@ pub fn authorize(config: &McpConfig, name: &str, args: &Value) -> Result<(), Str
     if !config.permitted(category) {
         return Err(format!("Permission denied: {category}"));
     }
+    if name == "batch_execute" && !config.permitted("runCommand") {
+        return Err("Permission denied: runCommand".into());
+    }
     if name == "open_sftp" && !config.permitted("readFiles") && !config.permitted("writeFiles") {
         return Err("Permission denied: SFTP requires readFiles or writeFiles".into());
     }

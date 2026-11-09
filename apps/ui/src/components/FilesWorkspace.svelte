@@ -7,6 +7,8 @@
   import type { TransferRequest, TransferTask } from '../lib/transferQueue';
   import { fileMessage } from '../lib/fileMessages';
   import { transferTabBridge } from '../lib/transferTabBridge.svelte';
+  import Splitter from './Splitter.svelte';
+  let sideRatio = $state(50), queueHeight = $state(180), sidesWidth = $state(1000);
   import FileWorkspaceSide from './FileWorkspaceSide.svelte';
   import SftpTransferQueue from './SftpTransferQueue.svelte';
   interface Props { rpc: RpcClient; profiles: StoredProfile[]; onError: (message: string) => void }
@@ -32,11 +34,13 @@
 </script>
 <div class="files-workspace" data-aerotab-focus-zone="">
   <header><h1>{fileMessage('title')}</h1><p>{fileMessage('partial')}</p></header>
-  <div class="files-sides">
+  <div class="files-sides" bind:clientWidth={sidesWidth} style={`grid-template-columns:minmax(0,${sideRatio}fr) 5px minmax(0,${100-sideRatio}fr);`}>
     <FileWorkspaceSide {rpc} {profiles} tabs={layout.left} activeId={layout.activeLeft} label={fileMessage('left')} onAdd={() => change('left', 'add')} onActivate={id => change('left', 'activate', id)} onClose={id => change('left', 'close', id)} onChange={persist} {onError} />
+    <Splitter unitsPerPixel={100/Math.max(1,sidesWidth)} value={sideRatio} min={15} max={85} label={fileMessage('title')} onChange={v=>sideRatio=v} storageKey="files.sides" />
     <FileWorkspaceSide {rpc} {profiles} tabs={layout.right} activeId={layout.activeRight} label={fileMessage('right')} onAdd={() => change('right', 'add')} onActivate={id => change('right', 'activate', id)} onClose={id => change('right', 'close', id)} onChange={persist} {onError} />
   </div>
-  <section class="files-queue">
+  <Splitter axis="y" value={queueHeight} min={100} max={500} sign={-1} label={fileMessage('title')} onChange={v=>queueHeight=v} storageKey="files.queue" />
+  <section class="files-queue" style={`height:${queueHeight}px;max-height:65%;`}>
     <div class="queue-switch"><button type="button" class="btn-secondary" aria-pressed={!history} onclick={() => { history = false; }}> {fileMessage('title')} · {tasks.filter(t => ['queued', 'running', 'canceling'].includes(t.status)).length}</button><button type="button" class="btn-secondary" aria-pressed={history} onclick={() => { history = true; }}>{tasks.filter(t => !['queued', 'running', 'canceling'].includes(t.status)).length} · {fileMessage('retry')}</button></div>
     <SftpTransferQueue variant="full" queueView={history ? 'history' : 'active'} tasks={items} onCancel={id => service.queue.cancel(id)} onRetry={id => { if (!service.queue.retry(id)) onError(fileMessage('interrupted')); }} onCancelAll={() => { for (const task of tasks) service.queue.cancel(task.id); }} onClearFinished={() => service.queue.clearFinished()} onClearHistory={() => service.queue.clearFinished()} />
   </section>

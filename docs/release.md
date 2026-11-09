@@ -9,8 +9,12 @@ runs automatically during day-to-day development.
 Bump the version in three places, in this order:
 
 1. `Cargo.toml` (workspace `[workspace.package].version`)
-2. `src-tauri/tauri.conf.json` (`"version"`)
+2. `src-tauri/tauri.conf.json` (`"version"` and main-window `title`)
 3. `apps/ui/package.json` (`"version"`)
+
+For **v0.3.0**, use `0.3.0` consistently in these files, the workspace package entries in `Cargo.lock`, frontend root-package metadata in `apps/ui/package-lock.json`, and the footer `buildId` in `apps/ui/src/App.svelte`. Do not blanket-replace matching dependency versions in lockfiles. Check any version-specific artifact paths in `.github/workflows/ci.yml` as well.
+
+The release includes the Workbench / PrimaryNav shell, AI providers and visible-terminal permissions, opt-in Notes sync, S3-compatible / Drive app-data backends and protocol-3 setup, MCP batch / context tools, and terminal view / geometry diagnostics. These are implementation scope, not a statement that every provider, native-surface drag path, or Windows Sandbox smoke has been manually validated.
 
 Tag the release commit `vX.Y.Z`. The updater feed (`latest.json`) MUST be
 regenerated for every tagged release — see §4.
@@ -112,11 +116,18 @@ signtool verify /pa /v $installer
 
 ### 3b. Cross-compile from Linux, sign separately
 
+Use the repository wrapper from WSL / Linux; it selects `cargo-xwin`, the correct working directory, and NSIS rather than relying on a local MSVC toolchain:
+
 ```bash
-cd src-tauri
-cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc \
-  --bundles nsis -- --features desktop
+./tools/build-windows-xwin.sh
+./tools/install-windows-smoke.sh
 ```
+
+The installer is `target/x86_64-pc-windows-msvc/release/bundle/nsis/AeroTab_0.3.0_x64-setup.exe` for this release. The smoke wrapper copies it and `tools/windows-isolated-smoke.ps1` to a Windows-local Downloads subdirectory before installation; never run an installer directly from `\\wsl.localhost\...`.
+
+**Isolation is mandatory.** The helper installs into a separate temporary location and starts the app with `--smoke-test`, verifying the exact `AeroTab <version> [SMOKE TEST - ISOLATED]` title. If a user's AeroTab is already running, it preserves that process and uses Windows Sandbox with networking / clipboard redirection disabled. Sandbox availability and successful initialization are prerequisites for that branch. A missing Sandbox, initialization error, or absent guest smoke report is a **blocked / failed smoke**, not a pass. Do not kill the user's app, reuse their data, disable isolation (`SMOKE_ISOLATED=0` is rejected), or bypass the protection to manufacture a successful result.
+
+Record build and smoke results separately. An NSIS build, unit tests, or source inspection cannot prove the installed native GPU view / drag behavior works; perform and record those UI checks on a suitable Windows desktop.
 
 Copy the produced `.exe` to a Windows signing host (or a CI runner with
 access to the HSM-backed EV cert) and run `signtool` as in §3a.
@@ -203,11 +214,15 @@ xcrun stapler staple "target/release/bundle/dmg/AeroTab_<version>_aarch64.dmg"
 
 ## 6. Release checklist
 
-- [ ] Bump version in the three files above.
-- [ ] `cargo fmt --all -- --check`
+- [ ] Align `0.3.0` in the three version files, window title, workspace lockfile entries, frontend package-lock metadata, footer buildId, and version-specific CI artifact paths.
+- [ ] Run `cargo fmt --all`, then `cargo fmt --all -- --check` (blocking before commit / push).
+- [ ] `cargo check --features desktop`
 - [ ] `cargo clippy --workspace --all-targets --features desktop -- -D warnings`
-- [ ] `cargo test --lib --features desktop`
-- [ ] `cd apps/ui && npm run build`
+- [ ] `cargo test --lib --features desktop -- --test-threads=1`
+- [ ] `cd apps/ui && npm run check && npm run build`
+- [ ] Run relevant frontend regressions for AI permissions / budgets, Notes / sync recovery, MCP approvals, Workbench / splitter geometry, and terminal view switching; record actual results rather than assuming they passed.
+- [ ] From WSL: `./tools/build-windows-xwin.sh`, then `./tools/install-windows-smoke.sh`; report Sandbox unavailability / initialization failure as blocked, never bypass user-process isolation.
+- [ ] Manually verify WebView / native GPU switching, pane / panel drag and cancellation, resize / scrollbar stability, and diagnostic JSON export on target platforms. Mark unperformed native drag checks as unverified.
 - [ ] Build Linux bundles (§2) with signing env vars set.
 - [ ] Build Windows bundles (§3) on Windows host or cross-compile + sign.
 - [ ] Build macOS DMGs (§5) on macOS (`./tools/build-macos-dmg.sh`; notarize if distributing).

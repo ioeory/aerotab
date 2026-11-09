@@ -180,6 +180,98 @@ impl SyncEngine {
         Ok(self)
     }
 
+    /// Isolated in-memory copy for read-only merge previews. No persistence is attached.
+    pub async fn preview_copy(&self) -> Self {
+        let mut copy = Self::with_clock(
+            self.device_id,
+            self.password.clone(),
+            self.params,
+            self.backend.clone(),
+            self.clock.clone(),
+        );
+        *copy.local.get_mut() = self.local.read().await.clone();
+        copy
+    }
+
+    /// Explicit user resolution: current payload causally follows all known variants.
+    pub async fn resolve_current(
+        &self,
+        group: Group,
+        id: RecordId,
+        current: &LocalRecord,
+        known: &[LocalRecord],
+    ) -> Result<(), SyncError> {
+        let mut r = current.clone();
+        for other in known {
+            r.vv.merge(&other.vv);
+        }
+        r.vv.bump(self.device_id);
+        r.writer = self.device_id;
+        r.updated_at_ms = self.clock.now_ms();
+        self.local.write().await.insert((group, id), r.clone());
+        self.persist(group, id, &r).await
+    }
+
+    pub async fn replace_candidate(&self, candidate: &Self) -> Result<Self, SyncError> {
+        let mut next = candidate.preview_copy().await;
+        if let Some(store) = &self.store {
+            let records = next
+                .local
+                .read()
+                .await
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            store.replace_all(records).await?;
+        }
+        next.store = self.store.clone();
+        Ok(next)
+    }
+
+    pub async fn persist_candidate(&self, candidate: &Self) -> Result<Self, SyncError> {
+        let mut next = candidate.preview_copy().await;
+        if let Some(store) = &self.store {
+            for ((group, id), record) in next.local.read().await.iter() {
+                store.upsert(*group, *id, record).await?;
+            }
+        }
+        next.store = self.store.clone();
+        Ok(next)
+    }
+
+    pub async fn preview_digest(&self) -> Result<String, SyncError> {
+        let map = self.local.read().await;
+        let mut records: Vec<_> = map
+            .iter()
+            .map(|((g, id), r)| (g.as_str(), id.0, r))
+            .collect();
+        records.sort_by_key(|(g, id, _)| (*g, *id));
+        let bytes =
+            serde_json::to_vec(&records).map_err(|e| SyncError::Transport(e.to_string()))?;
+        Ok(Uuid::new_v5(&Uuid::NAMESPACE_OID, &bytes).to_string())
+    }
+    pub async fn rejoin_identity(&self, id: Uuid) -> Self {
+        let mut next = Self::with_clock(
+            id,
+            self.password.clone(),
+            self.params,
+            self.backend.clone(),
+            self.clock.clone(),
+        );
+        *next.local.get_mut() = self.local.read().await.clone();
+        next.store = self.store.clone();
+        next
+    }
+
+    /// Decode a legacy envelope without adopting it or writing remote data.
+    pub fn decode_legacy(&self, bytes: &[u8]) -> Result<LocalRecord, SyncError> {
+        let plain = crypto::decrypt(&self.password, bytes, self.params)
+            .map_err(|e| SyncError::Crypto(e.to_string()))?;
+        let wire: WireRecord =
+            serde_json::from_slice(&plain).map_err(|e| SyncError::Crypto(e.to_string()))?;
+        Ok(LocalRecord::from_wire(wire))
+    }
+
     pub fn device_id(&self) -> Uuid {
         self.device_id
     }
@@ -214,7 +306,7 @@ impl SyncEngine {
     }
 
     /// Apply a remote op with the same VV semantics as [`Self::sync_group`].
-    pub async fn apply_op(&self, op: &crate::sync::oplog::Op) -> Result<(), SyncError> {
+    pub async fn apply_op(&self, op: &crate::sync::oplog::Op) -> Result<bool, SyncError> {
         use crate::sync::oplog::OpKind;
         let remote = LocalRecord {
             vv: op.vv.clone(),
@@ -231,6 +323,9 @@ impl SyncEngine {
             let map = self.local.read().await;
             map.get(&(op.group, op.id)).cloned()
         };
+        let conflict = local
+            .as_ref()
+            .is_some_and(|local| local.vv.compare(&remote.vv) == VvOrdering::Concurrent);
         match local {
             None => {
                 self.local
@@ -249,7 +344,9 @@ impl SyncEngine {
                     self.persist(op.group, op.id, &remote).await?;
                 }
                 VvOrdering::Concurrent => {
-                    let merged = self.merge(local, remote);
+                    self.preserve_note_conflict(op.group, op.id, &local, &remote)
+                        .await?;
+                    let merged = self.merge_for_group(op.group, local, remote);
                     self.local
                         .write()
                         .await
@@ -258,7 +355,7 @@ impl SyncEngine {
                 }
             },
         }
-        Ok(())
+        Ok(conflict)
     }
 
     /// Local write. Bumps the device counter and stores locally; the new
@@ -408,7 +505,9 @@ impl SyncEngine {
                             stats.pulled += 1;
                         }
                         VvOrdering::Concurrent => {
-                            let merged = self.merge(local, remote);
+                            self.preserve_note_conflict(group, id, &local, &remote)
+                                .await?;
+                            let merged = self.merge_for_group(group, local, remote);
                             let blob = self.encrypt_wire(&merged.to_wire())?;
                             self.backend.put(group, id, &blob).await?;
                             self.local.write().await.insert((group, id), merged.clone());
@@ -445,6 +544,68 @@ impl SyncEngine {
         self.sync_all().await
     }
 
+    async fn preserve_note_conflict(
+        &self,
+        group: Group,
+        id: RecordId,
+        local: &LocalRecord,
+        remote: &LocalRecord,
+    ) -> Result<(), SyncError> {
+        if group != Group::Notes || local.payload == remote.payload {
+            return Ok(());
+        }
+        // Preserve both live variants, including edit-vs-delete. Content-addressed
+        // IDs make replay idempotent across devices, independent of wall clocks.
+        for record in [local, remote] {
+            if record.tombstone {
+                continue;
+            }
+            let mut entity: crate::notes::SyncEntity = serde_json::from_slice(&record.payload)
+                .map_err(|_| SyncError::Transport("invalid notes conflict payload".into()))?;
+            let copy_id = Uuid::new_v5(&id.0, &record.payload).to_string();
+            match &mut entity {
+                crate::notes::SyncEntity::Note(n) => {
+                    n.id = copy_id;
+                    n.title.push_str(" (conflict)");
+                }
+                crate::notes::SyncEntity::Folder(f) => {
+                    f.id = copy_id;
+                    f.name.push_str(" (conflict)");
+                }
+            }
+            self.put_local_if_changed(
+                group,
+                entity.record_id(),
+                serde_json::to_vec(&entity).map_err(|e| SyncError::Transport(e.to_string()))?,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    fn merge_for_group(
+        &self,
+        group: Group,
+        mut local: LocalRecord,
+        mut remote: LocalRecord,
+    ) -> LocalRecord {
+        if group == Group::Notes {
+            // Stable content ordering, never timestamp-overwrite Markdown.
+            let order = local.payload.cmp(&remote.payload);
+            local.updated_at_ms = 0;
+            remote.updated_at_ms = 0;
+            local.writer = if order.is_gt() {
+                Uuid::from_u128(1)
+            } else {
+                Uuid::nil()
+            };
+            remote.writer = if order.is_gt() {
+                Uuid::nil()
+            } else {
+                Uuid::from_u128(1)
+            };
+        }
+        self.merge(local, remote)
+    }
     fn merge(&self, mut local: LocalRecord, remote: LocalRecord) -> LocalRecord {
         // Deterministic concurrent merge:
         //   1. tombstone wins (deletions propagate);
@@ -571,6 +732,82 @@ mod tests {
             backend,
             clock,
         )
+    }
+
+    #[tokio::test]
+    async fn two_devices_notes_keep_concurrent_markdown_and_edit_delete() {
+        let backend = Arc::new(MemBackend::default());
+        let a = engine(dev(1), backend.clone(), Arc::new(FakeClock::new(99999)));
+        let b = engine(dev(2), backend, Arc::new(FakeClock::new(1)));
+        let note = |body: &str| {
+            crate::notes::SyncEntity::Note(crate::notes::Note {
+                id: "stable".into(),
+                parent_id: None,
+                title: "N".into(),
+                markdown: body.into(),
+                tags: vec!["tag".into()],
+                profile_ids: vec!["missing-profile".into()],
+                version: 0,
+                updated_at: 0,
+            })
+        };
+        let id = note("base").record_id();
+        a.put_local(Group::Notes, id, serde_json::to_vec(&note("base")).unwrap())
+            .await
+            .unwrap();
+        a.sync_group(Group::Notes).await.unwrap();
+        b.sync_group(Group::Notes).await.unwrap();
+        a.put_local(Group::Notes, id, serde_json::to_vec(&note("left")).unwrap())
+            .await
+            .unwrap();
+        b.put_local(
+            Group::Notes,
+            id,
+            serde_json::to_vec(&note("right")).unwrap(),
+        )
+        .await
+        .unwrap();
+        a.sync_group(Group::Notes).await.unwrap();
+        b.sync_group(Group::Notes).await.unwrap();
+        b.sync_group(Group::Notes).await.unwrap();
+        a.sync_group(Group::Notes).await.unwrap();
+        for e in [&a, &b] {
+            let bodies: Vec<_> = e
+                .snapshot_group(Group::Notes)
+                .await
+                .into_iter()
+                .filter(|(_, r)| !r.tombstone)
+                .map(|(_, r)| {
+                    let crate::notes::SyncEntity::Note(n) =
+                        serde_json::from_slice(&r.payload).unwrap()
+                    else {
+                        panic!()
+                    };
+                    assert_eq!(n.profile_ids, vec!["missing-profile"]);
+                    n.markdown
+                })
+                .collect();
+            assert!(bodies.contains(&"left".into()) && bodies.contains(&"right".into()));
+        }
+        a.delete_local(Group::Notes, id).await.unwrap();
+        b.put_local(
+            Group::Notes,
+            id,
+            serde_json::to_vec(&note("edit against delete")).unwrap(),
+        )
+        .await
+        .unwrap();
+        a.sync_group(Group::Notes).await.unwrap();
+        b.sync_group(Group::Notes).await.unwrap();
+        b.sync_group(Group::Notes).await.unwrap();
+        a.sync_group(Group::Notes).await.unwrap();
+        assert!(a.get_local(Group::Notes, id).await.is_none());
+        assert!(a
+            .snapshot_group(Group::Notes)
+            .await
+            .iter()
+            .any(|(_, r)| !r.tombstone
+                && String::from_utf8_lossy(&r.payload).contains("edit against delete")));
     }
 
     #[tokio::test]
@@ -747,7 +984,7 @@ mod tests {
             .await
             .unwrap();
         let results = a.sync_all().await.unwrap();
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.len(), Group::ALL.len());
         let total: usize = results.iter().map(|(_, s)| s.total()).sum();
         assert!(total >= 2);
     }

@@ -8,7 +8,8 @@
 </script>
 <nav aria-label={i18n.t('profileModal.group')}>
   <button type="button" aria-current={group === null && !favorites && !recent ? 'page' : undefined} onclick={() => onSelect(null)}>{hostLabel('all')}</button>
-  {#if favorites || recent || group === ''}
+  {#if group !== null && !favorites && !recent}<ChevronRight size={14} aria-hidden="true" /><button type="button" aria-current={group === '' ? 'page' : undefined} onclick={() => onSelect('')}>{i18n.t('hosts.root')}</button>{/if}
+  {#if favorites || recent}
     <ChevronRight size={14} aria-hidden="true" /><span aria-current="page">{recent ? i18n.t('picker.recent') : favorites ? i18n.t('profileModal.favorite') : i18n.t('sidebar.ungrouped')}</span>
   {:else}
     {#each crumbs as crumb, index (crumb.path)}

@@ -36,7 +36,7 @@
 </div>
 <style>
   .panel { height:100%; min-height:0; display:flex; flex-direction:column; } .panel :global(.workspace) { flex:1; }
-  .remark { border-top:1px solid var(--border,#414656); padding:10px; flex-shrink:0; max-height:35%; overflow:auto; }
+  .remark { border-top:1px solid var(--color-border); padding:10px; flex-shrink:0; max-height:35%; overflow:auto; }
   summary { cursor:pointer; } label { display:flex; flex-direction:column; gap:6px; margin:8px 0; }
-  textarea,button { color:inherit; background:var(--bg-secondary,#202330); border:1px solid var(--border,#414656); border-radius:5px; padding:6px; } textarea { min-height:70px; resize:vertical; }
+  textarea,button { color:inherit; background:var(--color-panel-2); border:1px solid var(--color-border); border-radius:5px; padding:6px; } textarea { min-height:70px; resize:vertical; }
 </style>

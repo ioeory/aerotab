@@ -6,7 +6,7 @@ import { createServer } from 'vite';
 const server = await createServer({ configFile: false, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } });
 const { NativeTerminalController } = await server.ssrLoadModule('/src/lib/termgrid/controller.ts');
 const { createPasteRequestGate, preparePasteText } = await server.ssrLoadModule('/src/lib/nativePasteBridge.ts');
-const { createNativeViewHost } = await server.ssrLoadModule('/src/lib/nativeViewHost.ts');
+const { createNativeViewHost, nativeViewGeometryEquals } = await server.ssrLoadModule('/src/lib/nativeViewHost.ts');
 const { tracePaste } = await server.ssrLoadModule('/src/lib/nativePasteTrace.ts');
 const { MODE_BRACKETED_PASTE } = await server.ssrLoadModule('/src/lib/termgrid/frame.ts');
 await server.close();
@@ -160,8 +160,8 @@ test('modal close tick marks busy production sync dirty while canPaste waits old
  let f,sync;const entered=deferred();
  const state={busy:false,dirty:false,disposed:false,surfaceError:'',surface:{getBoundingClientRect:()=>({left:0,top:0,width:640,height:480})},
   visible:true,occluded:false,globalOccluded:false,stagingWebview:false,committedWebview:false,stagingNative:false,
-  started:true,lastGeometry:geometry,lastConfig:'',inputAcknowledged:false,surfaceReady:true,focusRestored:false,
-  nativeViewGeometry:r=>({x:r.left,y:r.top,width:r.width,height:r.height}),viewConfig:()=>cfg,
+  started:true,lastGeometry:geometry,lastConfig:'',lastUpdate:'',ackRecovering:false,inputAcknowledged:false,surfaceReady:true,focusRestored:false,
+  nativeViewGeometry:r=>({x:r.left,y:r.top,width:r.width,height:r.height}),nativeViewGeometryEquals,viewConfig:()=>cfg,
   canFocusSurface:()=>!state.occluded,document:{hidden:false},window:{innerWidth:1000,innerHeight:1000,devicePixelRatio:1},
   controller:null,onReady:()=>{},fail:e=>{throw e;}};
  f=await fixture({delayHide:true,afterTick:async()=>{sync();},confirm:async()=>{

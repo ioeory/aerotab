@@ -10,8 +10,8 @@ function fixture({drawError=false,late=false,onDrawReceipt}={}){
  globalThis.window={devicePixelRatio:1,removeEventListener(){},clearTimeout(){}};
  globalThis.requestAnimationFrame=fn=>(cb=fn,1);globalThis.cancelAnimationFrame=()=>{};
  const rpc={call:async(method)=>{calls.push(method);if(method==='terminal.snapshotEnvelope'){if(late)await new Promise(r=>complete=r);return {version:1,frameVersion:1,outputSeq:'9007199254740993',bytes:frame()};}}};
- const ctl=new NativeTerminalController({sessionId:'same-core',rpc,canvas:{removeEventListener(){}},cursorBlink:false,onDrawReceipt});
- let draws=0;ctl.renderer={kind:'canvas2d',resize(){},dispose(){},render(){draws++;if(drawError)throw new Error('GPU draw failed');}};
+ const ctl=new NativeTerminalController({sessionId:'same-core',rpc,canvas:{parentElement:{clientWidth:0,clientHeight:0},removeEventListener(){}},cursorBlink:false,onDrawReceipt});
+ let draws=0;ctl.renderer={kind:'canvas2d',resize(){},setFont(){},dispose(){},render(){draws++;if(drawError)throw new Error('GPU draw failed');}};
  return {ctl,calls,draw:()=>cb?.(),draws:()=>draws,finish:()=>complete?.()};
 }
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
@@ -44,5 +44,37 @@ test('real controller applies envelope but readiness waits until renderer.render
 test('actual render exception rejects readiness',async()=>{const f=fixture({drawError:true});const wait=f.ctl.waitForDraw();await flush();f.draw();await assert.rejects(wait,/GPU draw failed/);await f.ctl.dispose();});
 test('configuration supersession and timeout revoke late snapshot draw',async()=>{
  for(const action of ['config','timeout']) {const f=fixture({late:true});const wait=f.ctl.waitForDraw(action==='timeout'?5:1000);await flush();if(action==='config')f.ctl.setTheme({});await assert.rejects(wait,/superseded|timeout/);f.finish();await flush();f.draw();assert.equal(f.draws(),action==='config'?1:0);await f.ctl.dispose();}
+});
+test('unchanged effective font must not cancel an in-flight WebView draw', async () => {
+ const f=fixture({late:true});
+ f.ctl.applyFontFromOpts();
+ const wait=f.ctl.waitForDraw();await flush();
+ f.ctl.setFont({family:f.ctl.spec.family,size:f.ctl.spec.size,weight:f.ctl.spec.weight,weightBold:f.ctl.spec.weightBold,linePadding:f.ctl.spec.linePadding});
+ f.finish();await flush();f.draw();await wait;
+ assert.equal(f.draws(),1);await f.ctl.dispose();
+});
+test('unchanged theme values must not cancel an in-flight WebView draw', async () => {
+ const f=fixture({late:true});f.ctl.setTheme({background:'#112233'});
+ const wait=f.ctl.waitForDraw();await flush();
+ f.ctl.setTheme({background:'#112233'});
+ f.finish();await flush();f.draw();await wait;
+ assert.equal(f.draws(),1);await f.ctl.dispose();
+});
+test('initial readiness follows sidebar resize supersession instead of permanently failing the view', async () => {
+ const f=fixture();
+ let ready=false;
+ const wait=f.ctl.waitForInitialDraw().then(()=>{ready=true;});
+ await flush();
+ f.ctl.invalidateDraw('fit');
+ await flush();
+ assert.equal(ready,false,'a cancelled capture is not readiness');
+ f.draw();await wait;
+ assert.equal(ready,true);assert.equal(f.calls.filter(m=>m==='terminal.snapshotEnvelope').length,2);
+ await f.ctl.dispose();
+});
+test('initial readiness propagates genuine draw failure rather than retrying',async()=>{
+ const f=fixture({drawError:true});const wait=f.ctl.waitForInitialDraw();await flush();f.draw();
+ await assert.rejects(wait,/GPU draw failed/);
+ assert.equal(f.calls.filter(m=>m==='terminal.snapshotEnvelope').length,1);await f.ctl.dispose();
 });
 test('late envelope after dispose cannot draw or become ready',async()=>{const f=fixture({late:true});const wait=f.ctl.waitForDraw();await flush();await f.ctl.dispose();await assert.rejects(wait,/disposed/);f.finish();await flush();f.draw();assert.equal(f.draws(),0);});

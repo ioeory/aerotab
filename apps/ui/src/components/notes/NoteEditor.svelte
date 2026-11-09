@@ -57,7 +57,7 @@
   button,input,textarea { color:inherit; background:var(--color-bg-soft); border:1px solid var(--color-border); border-radius:5px; padding:6px 9px; }
   button { cursor:pointer; font-size:12px; } button:disabled { opacity:.45; }
   .title { font-size:20px; font-weight:600; } textarea { resize:vertical; flex:1; min-height:220px; font-family:monospace; line-height:1.65; }
-  .hint { opacity:.65; font-size:12px; } .error { color:#f59e8b; } .host { display:flex; gap:8px; padding:4px; }
+  .hint { opacity:.65; font-size:12px; } .error { color:var(--color-danger); } .host { display:flex; gap:8px; padding:4px; }
   .preview :global(table) { border-collapse:collapse; display:block; overflow:auto; } .preview :global(th), .preview :global(td) { border:1px solid var(--color-border); padding:6px 10px; } .preview :global(ul), .preview :global(ol) { padding-left:24px; } .preview :global(ul) { list-style:disc; } .preview :global(ol) { list-style:decimal; } .preview :global(a) { color:var(--color-accent-text); text-decoration:underline; } .preview :global(h1), .preview :global(h2), .preview :global(h3) { font-weight:600; margin:12px 0; } .preview :global(h1) { font-size:1.6em; } .preview :global(h2) { font-size:1.35em; }
-  .preview { flex:1; line-height:1.7; overflow-wrap:anywhere; } .preview :global(pre) { overflow:auto; padding:12px; background:#0002; } .preview :global(blockquote) { border-left:3px solid currentColor; padding-left:12px; opacity:.8; }
+  .preview { flex:1; line-height:1.7; overflow-wrap:anywhere; } .preview :global(pre) { overflow:auto; padding:12px; background:var(--color-panel-2); } .preview :global(blockquote) { border-left:3px solid currentColor; padding-left:12px; opacity:.8; }
 </style>

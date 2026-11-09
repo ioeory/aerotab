@@ -27,7 +27,8 @@
   let renderedPreferences: AppearancePreferences | null = null;
   let draft: ReturnType<typeof createAppearanceDraft> | null = null;
   const paletteIsDark = $derived(preferences.mode === 'system' ? systemDark : preferences.mode === 'dark');
-  const visiblePalettes = $derived(BUILTIN_THEMES.filter(p => isLightPalette(p) !== paletteIsDark));
+  let paletteQuery = $state('');
+  const visiblePalettes = $derived(BUILTIN_THEMES.filter(p => isLightPalette(p) !== paletteIsDark && `${p.label} ${p.name}`.toLowerCase().includes(paletteQuery.trim().toLowerCase())));
 
   function renderPreferences(value: AppearancePreferences) {
     renderedPreferences = { ...value };
@@ -155,6 +156,7 @@
 
   function selectPalette(name: string) {
     preferences = paletteIsDark ? { ...preferences, darkPalette: name } : { ...preferences, lightPalette: name };
+    draft?.preview(preferences);
     markDirty();
   }
 
@@ -199,13 +201,14 @@
     </div>
     <div class="section-h">{text('settings.appearance.palette')}</div>
     <p class="help">{text('settings.appearance.independent')}</p>
+    <input type="search" class="input" aria-label={text('settings.appearance.filter')} placeholder={text('settings.appearance.filter')} bind:value={paletteQuery} />
     <div class="palette-grid">
       {#each visiblePalettes as theme (theme.name)}
         <button type="button" class="theme-card" class:selected={resolveAppearancePalette(preferences, systemDark) === theme.name}
           aria-pressed={resolveAppearancePalette(preferences, systemDark) === theme.name} onclick={() => selectPalette(theme.name)}>
           <div class="theme-strip" style="background:{UI_PALETTES[theme.name]?.bg ?? theme.bg}" aria-hidden="true">
-            <div class="theme-dot" style="background:{UI_PALETTES[theme.name]?.accent ?? theme.accent}"></div>
-            <div class="theme-dot" style="background:{UI_PALETTES[theme.name]?.fg ?? theme.fg}"></div>
+            <div class="mini-nav" style="background:{UI_PALETTES[theme.name]?.panel ?? theme.panel}; border-color:{UI_PALETTES[theme.name]?.border ?? theme.border}"></div>
+            <div class="mini-content" style="color:{UI_PALETTES[theme.name]?.fg ?? theme.fg}"><strong style="color:{UI_PALETTES[theme.name]?.accent ?? theme.accent}">AeroTab</strong><span style="background:{UI_PALETTES[theme.name]?.panel2 ?? theme.panel2}">Host · SSH</span></div>
           </div>
           <span>{theme.label}</span>
         </button>
@@ -312,11 +315,10 @@
     justify-content: center;
     gap: 6px;
   }
-  .theme-dot {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-  }
+  .mini-nav { width: 24%; height: 100%; border-right: 1px solid; }
+  .mini-content { flex: 1; display: flex; flex-direction: column; text-align: left; padding: 8px; gap: 8px; font-size: 12px; }
+  .mini-content span { margin: 0; padding: 5px; font-size: 11px; }
+  .theme-strip { height: 90px; overflow: hidden; gap: 0; justify-content: flex-start; }
   .css-area {
     font-family: var(--font-mono);
     resize: vertical;

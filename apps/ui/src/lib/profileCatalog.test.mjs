@@ -93,6 +93,39 @@ test('selection reconciliation removes hidden/deleted ids without changing input
   assert.deepEqual([...api.reconcileCatalogSelection(selected, [profiles[0]])], ['a']);
   assert.equal(selected.size, 3);
 });
+test('directory browsing distinguishes All, root, direct children and empty folders', () => {
+  assert.deepEqual(api.catalogDirectory(profiles, ['prod/empty/deep', 'vacant'], 'prod'), { profiles: [profiles[0]], folders: [{ name: 'empty', path: 'prod/empty' }, { name: 'web', path: 'prod/web' }] });
+  assert.deepEqual(api.catalogDirectory(profiles, ['vacant'], '').profiles, [profiles[3]]);
+  assert.equal(api.catalogDirectory(profiles, [], null).profiles.length, 4);
+  assert.deepEqual(api.catalogDirectory(profiles, ['vacant'], 'vacant'), { profiles: [], folders: [] });
+});
+
+test('directory scope excludes unrelated tree groups and root includes only descendants of root', () => {
+  assert.deepEqual(api.catalogGroupPaths(['prod', 'prod/web', 'vacant', 'other/empty'], 'prod', ''), ['prod', 'prod/web']);
+  assert.deepEqual(api.catalogGroupPaths(['prod', 'vacant'], '', ''), ['prod', 'vacant']);
+  assert.deepEqual(api.catalogGroupPaths(['prod', 'vacant'], null, 'vac'), ['vacant']);
+  assert.deepEqual(api.catalogDirectory(profiles, ['vacant', 'prod/empty'], null, 'vac').folders, [{ name: 'vacant', path: 'vacant' }]);
+  assert.deepEqual(api.catalogDirectory(profiles, ['prod/vacant', 'other/vacant'], 'prod', 'vac').folders, [{ name: 'vacant', path: 'prod/vacant' }]);
+});
+
+test('root and scoped tree match grid directory entries and retain expandable descendants', () => {
+  const all = [{ id: 'root', name: 'Root', group: null }, { id: 'direct', name: 'Direct', group: 'prod' }, { id: 'nested', name: 'Nested', group: 'prod/web' }, { id: 'unrelated', name: 'Other', group: 'other' }];
+  const groups = ['prod/empty/deep', 'vacant'];
+  for (const scope of ['', 'prod', 'prod/web', 'vacant']) {
+    const grid = api.catalogDirectory(all, groups, scope);
+    const tree = api.buildCatalogTree(all, groups, scope);
+    assert.deepEqual(tree.folders.map(f => f.path), grid.folders.map(f => f.path), scope);
+    assert.deepEqual(tree.profiles.map(p => p.id), grid.profiles.map(p => p.id), scope);
+  }
+  const root = api.buildCatalogTree(all, groups, '');
+  assert.deepEqual(root.profiles.map(p => p.id), ['root']);
+  const prod = root.folders.find(f => f.path === 'prod');
+  assert.deepEqual(prod.profiles.map(p => p.id), ['direct']);
+  assert.equal(prod.folders.find(f => f.path === 'prod/web').profiles[0].id, 'nested');
+  assert.equal(prod.folders.find(f => f.path === 'prod/empty').folders[0].path, 'prod/empty/deep');
+  assert.deepEqual(api.buildCatalogTree(all, groups, 'vacant').folders, []);
+});
+
 test('unknown view preferences fall back safely', () => {
   assert.equal(api.normalizeResourceView('grid'), 'grid');
   assert.equal(api.normalizeResourceView('list'), 'list');

@@ -66,9 +66,8 @@
   import { clearSidebarProfileHandlers, registerSidebarProfileHandlers } from '../lib/sidebarProfileBridge';
   import logoUrl from '../assets/logo.png';
   import { getProfileCatalog, normalizeCatalogGroups } from '../lib/profileCatalog.svelte';
-  import { profileInScope, reconcileCatalogSelection } from '../lib/profileCatalogHelpers';
+  import { profileInScope, reconcileCatalogSelection, catalogDirectory, catalogGroupPaths, buildCatalogTree } from '../lib/profileCatalogHelpers';
   import ResourceViews from './hosts/ResourceViews.svelte';
-  import ResourceNavigation from './hosts/ResourceNavigation.svelte';
   import ResourceViewSwitcher from './hosts/ResourceViewSwitcher.svelte';
   import ResourceBreadcrumbs from './hosts/ResourceBreadcrumbs.svelte';
   import { sortProfiles } from '../lib/profileMeta';
@@ -107,11 +106,19 @@
   const profileQuery = $derived(catalog.query);
   let collapsedPaths = $state<Set<string>>(loadCollapsedPaths());
   const explicitGroupPaths = $derived(catalog.groups);
-  let showGroups = $state(true);
+  function enterDirectory(group: string | null) { catalog.group = group; catalog.favoritesOnly = false; catalog.recentOnly = false; catalog.query = ''; }
+  const directoryMode = $derived(variant === 'workspace' && catalog.view !== 'tree' && !catalog.favoritesOnly && !catalog.recentOnly && !profileQuery.trim());
+  const directory = $derived(catalogDirectory(profiles, explicitGroupPaths, catalog.group, profileQuery));
+  const directoryFolders = $derived.by(() => {
+    if (variant !== 'workspace' || catalog.view === 'tree' || catalog.favoritesOnly || catalog.recentOnly) return [];
+    const tree = buildProfileTree(profiles, explicitGroupPaths);
+    const find = (node: ProfileTreeFolder, path: string): ProfileTreeFolder | undefined => node.path === path ? node : node.folders.map(child => find(child, path)).find(Boolean);
+    return directory.folders.map(item => find(tree, item.path)!);
+  });
 
   const filteredProfiles = $derived(sortProfiles(
-    profiles.filter((p) => matchesProfileQuery(p, profileQuery)
-      && (variant !== 'workspace' || (profileInScope(p, catalog.group, catalog.favoritesOnly)
+    (directoryMode ? directory.profiles : profiles).filter((p) => matchesProfileQuery(p, profileQuery)
+      && (variant !== 'workspace' || (profileInScope(p, catalog.view === 'tree' && catalog.group === '' ? null : catalog.group, catalog.favoritesOnly)
         && (!catalog.recentOnly || catalog.recentIds.includes(p.id))))),
   ));
 
@@ -126,18 +133,24 @@
     return [...groups].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   });
   const visibleExplicitGroupPaths = $derived.by(() => {
-    const query = profileQuery.trim().toLowerCase();
-    if (!query) return explicitGroupPaths;
-    return explicitGroupPaths.filter((group) => group.toLowerCase().includes(query));
+    return catalogGroupPaths(explicitGroupPaths, variant === 'workspace' ? catalog.group : null, profileQuery);
   });
-  const profileTree = $derived(buildProfileTree(filteredProfiles, visibleExplicitGroupPaths));
+  const profileTree = $derived.by(() => {
+    if (variant !== 'workspace') return buildProfileTree(filteredProfiles, visibleExplicitGroupPaths);
+    // Root tree still needs grouped descendants to populate expandable folders.
+    // Flat root results intentionally contain only ungrouped/direct hosts.
+    const treeProfiles = sortProfiles(profiles.filter(profile => matchesProfileQuery(profile, profileQuery)
+      && (!catalog.favoritesOnly || profile.favorite)
+      && (!catalog.recentOnly || catalog.recentIds.includes(profile.id))));
+    return buildCatalogTree(treeProfiles, visibleExplicitGroupPaths, catalog.group);
+  });
   const forceExpandedPaths = $derived(
     profileQuery.trim()
       ? expandPathsForMatches(profiles, (p) => matchesProfileQuery(p, profileQuery))
       : new Set<string>(),
   );
   const hasVisibleProfiles = $derived(
-    filteredProfiles.length > 0 || ((variant !== 'workspace' || catalog.view === 'tree') && profileTree.folders.length > 0),
+    filteredProfiles.length > 0 || directoryFolders.length > 0 || ((variant !== 'workspace' || catalog.view === 'tree') && profileTree.folders.length > 0),
   );
 
   async function saveExplicitGroups(paths: string[]) {
@@ -220,6 +233,7 @@
       await saveExplicitGroups(nextGroups);
       await profileVisualsStore.renameGroupPaths(rpc, source, target);
       migrateCollapsedGroupPaths(source, target);
+      if (catalog.group === source || catalog.group?.startsWith(`${source}/`)) catalog.group = replaceGroupPathPrefix(catalog.group, source, target);
       expandFoldersForGroup(target);
       notifyProfilesChanged({ group: target });
       await refresh();
@@ -230,6 +244,23 @@
     } finally {
       bulkBusy = false;
     }
+  }
+
+  async function deleteGroup(groupPath: string) {
+    closeMenu();
+    if (!(await appConfirm(i18n.t('hosts.deleteGroupConfirm'), { danger: true, confirmLabel: i18n.t('common.delete') }))) return;
+    bulkBusy = true;
+    try {
+      const parent = groupPath.split('/').slice(0, -1).join('/');
+      for (const profile of profilesUnderGroupPath(profiles, groupPath)) {
+        await rpc.call('profile.upsert', { ...profile, group: parent || null });
+      }
+      await saveExplicitGroups(explicitGroupPaths.filter(path => path !== groupPath && !path.startsWith(`${groupPath}/`)));
+      if (catalog.group === groupPath || catalog.group?.startsWith(`${groupPath}/`)) enterDirectory(parent);
+      notifyProfilesChanged();
+      await refresh();
+    } catch (error) { onError((error as Error).message); await refresh(); }
+    finally { bulkBusy = false; }
   }
 
   async function renameGroup(groupPath: string) {
@@ -1255,7 +1286,7 @@
   }
 
   function onRootDrop(ev: DragEvent) {
-    void handleDropToGroup(null, ev);
+    void handleDropToGroup(variant === 'workspace' ? catalog.group || null : null, ev);
   }
 
   function shortcutKbd(key: ProfileSidebarActionKey): string {
@@ -1337,10 +1368,14 @@
   <div class="catalog-toolbar px-2 pt-2 pb-1 flex flex-col gap-1.5">
     {#if variant === 'workspace'}
       <div class="resource-toolbar">
-        <button type="button" class="btn-secondary" aria-pressed={showGroups} title={hostLabel('toggleGroups')} onclick={() => { showGroups = !showGroups; }}>{hostLabel('groups')}</button>
+        <button type="button" class="btn-secondary" aria-pressed={catalog.group === null && !catalog.favoritesOnly && !catalog.recentOnly} onclick={() => enterDirectory(null)}>{hostLabel('all')}</button>
+        <button type="button" class="btn-secondary" aria-pressed={catalog.group === '' && !catalog.favoritesOnly && !catalog.recentOnly} onclick={() => enterDirectory('')}>{i18n.t('hosts.root')}</button>
+        <button type="button" class="btn-secondary" aria-pressed={catalog.favoritesOnly} onclick={() => { catalog.group = null; catalog.favoritesOnly = true; catalog.recentOnly = false; }}>{i18n.t('profileModal.favorite')}</button>
+        <button type="button" class="btn-secondary" aria-pressed={catalog.recentOnly} onclick={() => { catalog.group = null; catalog.recentOnly = true; catalog.favoritesOnly = false; }}>{i18n.t('picker.recent')}</button>
+        {#if catalog.group}<button type="button" class="btn-secondary" onclick={() => enterDirectory(catalog.group?.split('/').slice(0, -1).join('/') ?? '')}>{i18n.t('hosts.up')}</button>{/if}
         <ResourceViewSwitcher value={catalog.view} onChange={(value) => catalog.setView(value)} />
         <ResourceBreadcrumbs group={catalog.group} favorites={catalog.favoritesOnly} recent={catalog.recentOnly}
-          onSelect={(group) => { catalog.group = group; catalog.favoritesOnly = false; catalog.recentOnly = false; }} />
+          onSelect={enterDirectory} />
       </div>
     {/if}
     <div class="px-1 flex items-center gap-1 min-h-[22px]">
@@ -1350,7 +1385,7 @@
         class="btn-ghost p-1 shrink-0 text-[var(--color-fg-muted)] hover:text-[var(--color-accent)]"
         title={i18n.t('sidebar.createGroup')}
         aria-label={i18n.t('sidebar.createGroup')}
-        onclick={() => menuCreateGroup(null)}
+        onclick={() => menuCreateGroup(variant === 'workspace' ? catalog.group : null)}
       >
         <Plus size={13} />
       </button>
@@ -1457,15 +1492,7 @@
       </div>
     {/if}
   </div>
-  <div class="catalog-content" class:with-groups={variant === 'workspace' && showGroups}>
-    {#if variant === 'workspace' && showGroups}
-      <ResourceNavigation groups={buildProfileTree(profiles, explicitGroupPaths)} {profiles} group={catalog.group} favorites={catalog.favoritesOnly} recent={catalog.recentOnly}
-        onRecent={() => { catalog.recentOnly = !catalog.recentOnly; catalog.favoritesOnly = false; catalog.group = null; }}
-        onSelect={(group) => { catalog.group = group; catalog.favoritesOnly = false; catalog.recentOnly = false; }} onFavorites={() => { catalog.favoritesOnly = !catalog.favoritesOnly; catalog.group = null; catalog.recentOnly = false; }}
-        onMenu={showFolderMenu} onDragStart={onFolderDragStart} onDragOver={onFolderDragOver} onDrop={onFolderDrop}
-        renaming={inlineEditGroupPath} renameDraft={inlineEditGroupDraft} onRenameDraft={(value) => { inlineEditGroupDraft = value; }}
-        onRenameCommit={(path) => { void commitInlineGroupRename(path); }} onRenameCancel={cancelInlineGroupRename} />
-    {/if}
+  <div class="catalog-content">
   <div role="presentation" class="catalog-results flex-1 overflow-y-auto px-2 pb-3 flex flex-col gap-0.5 min-h-0" data-aerotab-sidebar-profiles="" ondragover={onRootDragOver} ondrop={onRootDrop}>
     {#if !hasVisibleProfiles}
       <div class="px-3 py-2 text-[14px] text-[var(--color-fg-muted)]">
@@ -1475,19 +1502,21 @@
             <button type="button" class="btn-secondary text-[12px] py-0.5 px-2" onclick={clearProfileSearch}>
               {i18n.t('sidebar.clearSearch')}
             </button>
-            <button type="button" class="btn-secondary text-[12px] py-0.5 px-2" onclick={() => openProfileModal()}>
+            <button type="button" class="btn-secondary text-[12px] py-0.5 px-2" onclick={() => openProfileModal(undefined, { group: variant === 'workspace' ? catalog.group ?? undefined : undefined })}>
               {i18n.t('sidebar.newProfileEmpty')}
             </button>
           </div>
         {:else}
           <p class="italic mb-2">{i18n.t('sidebar.noProfiles')}</p>
-          <button type="button" class="btn-secondary text-[12px] py-0.5 px-2 not-italic" onclick={() => openProfileModal()}>
+          <button type="button" class="btn-secondary text-[12px] py-0.5 px-2 not-italic" onclick={() => openProfileModal(undefined, { group: variant === 'workspace' ? catalog.group ?? undefined : undefined })}>
             {i18n.t('sidebar.newProfileEmpty')}
           </button>
         {/if}
       </div>
     {:else if variant === 'workspace' && catalog.view !== 'tree'}
-      <ResourceViews profiles={filteredProfiles} view={catalog.view} selectedIds={selectedProfileIds} focusedId={sidebarFocus.focusedProfileId}
+      <ResourceViews folders={directoryFolders} onEnterFolder={(folder) => enterDirectory(folder.path)} onFolderMenu={showFolderMenu} onFolderDrag={onFolderDragStart} onFolderOver={onFolderDragOver} onFolderDrop={onFolderDrop}
+        folderRenaming={inlineEditGroupPath} folderRenameDraft={inlineEditGroupDraft} onFolderRenameDraft={(value) => { inlineEditGroupDraft = value; }} onFolderRenameCommit={(path) => { void commitInlineGroupRename(path); }} onFolderRenameCancel={cancelInlineGroupRename}
+        profiles={filteredProfiles} view={catalog.view} selectedIds={selectedProfileIds} focusedId={sidebarFocus.focusedProfileId}
         health={profileHealth} onOpen={(p) => { void openProfilesForAction(p, 'new-tab'); }} onSelect={onProfileRowClick}
         onCheck={toggleProfileCheckbox} onMenu={showProfileMenu} onDrag={onProfileDragStart} onKeydown={onProfileKeydown} onQuickAction={onProfileQuickAction}
         renaming={inlineEditProfileId} renameDraft={inlineEditProfileDraft} onRenameDraft={(value) => { inlineEditProfileDraft = value; }}
@@ -1515,7 +1544,7 @@
         onFolderDragOver={onFolderDragOver}
         onFolderDrop={onFolderDrop}
         showUngroupedLabel={profileTree.folders.length > 0}
-        inlineEditGroupPath={variant === 'workspace' && showGroups ? null : inlineEditGroupPath}
+        inlineEditGroupPath={inlineEditGroupPath}
         inlineEditGroupDraft={inlineEditGroupDraft}
         onInlineGroupDraftChange={(value) => { inlineEditGroupDraft = value; }}
         onInlineGroupRenameCommit={(path) => { void commitInlineGroupRename(path); }}
@@ -1602,6 +1631,7 @@
         <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
         <button type="button" class="menu-item" onclick={() => menuCreateGroup(groupPath)}>{i18n.t('sidebar.createSubgroup')}</button>
         <button type="button" class="menu-item" onclick={() => menuRenameGroup(groupPath)}>{i18n.t('sidebar.renameGroup')}</button>
+        <button type="button" class="menu-item text-[var(--color-danger)]" disabled={bulkBusy} onclick={() => { void deleteGroup(groupPath); }}>{i18n.t('common.delete')}</button>
         <button type="button" class="menu-item" onclick={() => menuNewProfileInGroup(groupPath)}>
           {i18n.t('sidebar.newProfileInGroup')}
         </button>
@@ -1779,7 +1809,6 @@
   .host-catalog :global(button), .host-catalog :global(input) { font-size: 14px; }
   .host-catalog :global(.help) { font-size: 12px; }
   .catalog-content { flex: 1; min-height: 0; display: flex; min-width: 0; }
-  .catalog-content.with-groups { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); }
   .catalog-results { min-width: 0; }
   .resource-workspace { background: var(--color-bg); }
   .resource-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; padding: 24px 28px 16px; }
@@ -1794,7 +1823,6 @@
   .resource-workspace :global(button) { min-height: 34px; }
   .resource-workspace :global(.btn-primary), .resource-workspace :global(.btn-secondary) { min-height: 40px; font-size: 14px; }
   @media (max-width: 760px) {
-    .catalog-content.with-groups { grid-template-columns: 150px minmax(0, 1fr); }
     .resource-heading, .resource-workspace .catalog-toolbar { padding: 16px; }
     .resource-workspace .catalog-results { padding: 12px; }
   }

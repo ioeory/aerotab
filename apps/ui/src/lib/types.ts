@@ -1,4 +1,7 @@
 // Shared data types mirroring the Rust IPC surface.
+export type { SyncGroup } from './syncConfig';
+export type { Note, NoteFolder, NotesSnapshot } from './notesCore';
+export type { AiConfig, AiContext, AiMessage, AiToolCall, AiEvent, McpClientConfig, McpClientEntry, McpCatalog } from './ai';
 
 /** Atomic read-only canonical snapshot. Decimal u64 is never a JSON number. */
 export interface TerminalSnapshotEnvelope {

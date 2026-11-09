@@ -4,6 +4,7 @@
  */
 
 import { tracePaste } from '../nativePasteTrace';
+import { recordTerminalGeometry } from './resizeDiagnostics';
 import type { RpcClient } from '../rpc';
 import type { TerminalSnapshotEnvelope } from '../types';
 import { createWebviewDrawBarrier, type WebviewDrawTicket } from './webviewDrawBarrier';
@@ -92,6 +93,10 @@ export interface NativeTerminalOptions {
   onClipboard?: (bytes: Uint8Array) => void;
 }
 
+class DrawConfigurationSuperseded extends Error {
+  constructor() { super('WebView draw configuration superseded'); }
+}
+
 export class NativeTerminalController {
   private opts: NativeTerminalOptions;
   private rpc: RpcClient;
@@ -131,6 +136,8 @@ export class NativeTerminalController {
     if (this.composing) throw new Error('WebView handoff unavailable during IME composition');
     this.inputPaused = true;
     await Promise.all([...this.inputWrites]);
+    // Native ownership must not race a previous WebView engine/PTY resize.
+    while (this.resizeTask) await this.resizeTask;
   }
 
   resumeWebviewInput() { this.flushPausedWrites(); }
@@ -179,6 +186,7 @@ export class NativeTerminalController {
     this.webviewHandoff = false;
     this.flushPausedWrites();
     this.requestedGeometry = '';
+    this.completedGeometry = '';
     this.observeResize();
     this.fit();
   }
@@ -237,6 +245,40 @@ export class NativeTerminalController {
   };
   private resizeObs: ResizeObserver | null = null;
   private requestedGeometry = '';
+  private completedGeometry = '';
+  private pendingResize: { key: string; cols: number; rows: number; cellWidth: number; cellHeight: number } | null = null;
+  private resizeTask: Promise<void> | null = null;
+
+  private startResize() {
+    if (this.resizeTask) return;
+    this.resizeTask = this.drainResize().finally(() => {
+      this.resizeTask = null;
+      if (this.pendingResize && !this.disposed && !this.opts.nativeSurface) this.startResize();
+    });
+  }
+
+  /** One engine/PTY transaction at a time; retain only the latest desired host size. */
+  private async drainResize() {
+    while (this.pendingResize && !this.disposed && !this.opts.nativeSurface) {
+      const next = this.pendingResize;
+      this.pendingResize = null;
+      if (next.key === this.completedGeometry) continue;
+      try {
+        await this.rpc.call('terminal.resize', {
+          id: this.sessionId, cols: next.cols, rows: next.rows,
+          cellWidth: next.cellWidth, cellHeight: next.cellHeight,
+        });
+        this.completedGeometry = next.key;
+      } catch (error) {
+        // Do not acknowledge a failed size or spin on an unavailable session.
+        // A subsequent fit can retry; a newer queued host size still wins.
+        this.completedGeometry = '';
+        if (this.requestedGeometry === next.key) this.requestedGeometry = '';
+        console.warn('[termgrid] resize failed', error);
+      }
+    }
+    this.pendingResize = null;
+  }
   private boundKey = (e: KeyboardEvent) => { void this.onKey(e).catch(() => {}); };
   private boundPaste = (e: ClipboardEvent) => this.onPaste(e);
   private boundWinKey = (e: KeyboardEvent) => {
@@ -284,12 +326,27 @@ export class NativeTerminalController {
     }
   }
 
+  /** Initial view readiness follows real layout revisions; transitions keep a fixed capture. */
+  async waitForInitialDraw(timeoutMs = 3000): Promise<void> {
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      try { await this.waitForDraw(Math.max(1, deadline - performance.now())); return; }
+      catch (error) {
+        if (!(error instanceof DrawConfigurationSuperseded) || this.disposed || this.opts.nativeSurface) throw error;
+        if (performance.now() >= deadline) throw new Error('WebView draw timeout');
+        // A concrete configuration revision invalidated the old ticket. Capture
+        // the new revision, never treat cancelled output as a successful draw.
+      }
+    }
+  }
+
   /** Fixed capture target; stream frames cannot substitute for its actual draw. */
   async waitForDraw(timeoutMs = 3000): Promise<void> {
     if (this.opts.nativeSurface && !this.stagingWebview) throw new Error('WebView draw gate cannot acknowledge native surface');
     if (this.captureInFlight) throw new Error('WebView draw capture already in progress');
     this.captureInFlight = true;
     const revision = ++this.configRevision;
+    this.geometryDiagnostic('capture');
     const drawn = this.drawBarrier.begin(revision);
     // Attach rejection handlers immediately, including while RPC is pending.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -326,22 +383,49 @@ export class NativeTerminalController {
     }
   }
 
-  private invalidateDraw() {
+  private canvasResets = 0;
+  private geometryDiagnostic(reason: 'fit' | 'font' | 'theme' | 'dpr' | 'draw' | 'capture' | 'cancel', target = [this.cols, this.rows]) {
+    const canvas = this.opts.canvas, host = canvas.parentElement;
+    const rect = host?.getBoundingClientRect?.();
+    const nav = typeof document !== 'undefined' ? document.querySelector('.primary-nav') : null;
+    const navRect = nav?.getBoundingClientRect();
+    const bench = host?.closest?.('.workbench') as HTMLElement | null;
+    recordTerminalGeometry({ reason, backend: this.opts.nativeSurface ? 'native-surface' : this.renderer?.kind ?? 'uninitialized',
+      revision: this.configRevision, rect: rect ? [rect.x, rect.y, rect.width, rect.height] : [],
+      client: host ? [host.clientWidth, host.clientHeight] : [], scroll: host ? [host.scrollWidth, host.scrollHeight] : [],
+      target, applied: [this.grid.cols, this.grid.rows], dpr: this.spec.dpr,
+      canvas: [canvas.width, canvas.height], resets: this.canvasResets,
+      navigation: navRect ? [navRect.width, nav?.classList.contains('collapsed') ? 1 : 0] : [],
+      workbench: bench ? [bench.clientWidth, bench.clientHeight, bench.scrollWidth, bench.scrollHeight] : [] });
+  }
+
+  private invalidateDraw(reason: 'fit' | 'font' | 'theme' | 'dpr' = 'fit') {
+    this.geometryDiagnostic(reason);
     if (this.captureInFlight) {
       ++this.configRevision;
+      this.geometryDiagnostic('cancel');
       this.pendingDraw = null;
-      this.drawBarrier.fail(new Error('WebView draw configuration superseded'));
+      this.drawBarrier.fail(new DrawConfigurationSuperseded());
     }
   }
 
   setTheme(theme: ThemeColors) {
-    this.invalidateDraw();
+    const previous = this.opts.theme;
+    if (previous && Object.keys({ ...previous, ...theme }).every(key => previous[key] === theme[key])) return;
+    this.opts.theme = { ...theme };
+    this.invalidateDraw('theme');
     this.palette.setTheme(theme);
     this.schedulePaint();
   }
 
   setFont(partial: Partial<FontSpec> & { family?: string; size?: number }) {
-    this.invalidateDraw();
+    if ((partial.family ?? this.opts.fontFamily ?? 'JetBrains Mono, Menlo, monospace') === this.spec.family
+      && (partial.size ?? this.opts.fontSize ?? 15) === this.spec.size
+      && (partial.weight ?? this.opts.fontWeight ?? 400) === this.spec.weight
+      && (partial.weightBold ?? this.opts.fontWeightBold ?? 700) === this.spec.weightBold
+      && (partial.linePadding ?? this.opts.linePadding ?? 0) === this.spec.linePadding
+      && (window.devicePixelRatio || 1) === this.spec.dpr) return;
+    this.invalidateDraw('font');
     Object.assign(this.opts, {
       fontFamily: partial.family ?? this.opts.fontFamily,
       fontSize: partial.size ?? this.opts.fontSize,
@@ -614,7 +698,12 @@ export class NativeTerminalController {
       try {
         // Resize and draw the received grid in the same RAF. Never expose an
         // erased backing store while waiting for the backend's resized frame.
+        const beforeWidth = this.opts.canvas.width, beforeHeight = this.opts.canvas.height;
         this.renderer.resize(this.grid.cols, this.grid.rows, this.metrics, this.spec.dpr);
+        if (beforeWidth !== this.opts.canvas.width || beforeHeight !== this.opts.canvas.height) {
+          this.canvasResets += Number(beforeWidth !== this.opts.canvas.width) + Number(beforeHeight !== this.opts.canvas.height);
+          this.geometryDiagnostic('draw');
+        }
         this.renderer.render({
           grid: this.grid,
           palette: this.palette,
@@ -699,7 +788,7 @@ export class NativeTerminalController {
     if (host.clientWidth < 2 || host.clientHeight < 2) return;
     const dpr = window.devicePixelRatio || 1;
     if (dpr !== this.spec.dpr) {
-      this.invalidateDraw();
+      this.invalidateDraw('dpr');
       this.spec = { ...this.spec, dpr };
       this.metrics = measureCell(this.spec);
       this.renderer?.setFont(this.spec, this.metrics);
@@ -710,15 +799,14 @@ export class NativeTerminalController {
     if (geometry !== this.requestedGeometry) {
       this.invalidateDraw();
       this.requestedGeometry = geometry;
+      this.geometryDiagnostic('fit', [cols, rows]);
       // cols/rows and grid describe received output, not an in-flight request.
       // Keeping them intact avoids blank frames and stale-frame resize loops.
-      void this.rpc.call('terminal.resize', {
-        id: this.sessionId,
-        cols,
-        rows,
-        cellWidth: this.metrics.deviceWidth,
-        cellHeight: this.metrics.deviceHeight,
-      });
+      this.pendingResize = {
+        key: geometry, cols, rows,
+        cellWidth: this.metrics.deviceWidth, cellHeight: this.metrics.deviceHeight,
+      };
+      this.startResize();
     }
     this.schedulePaint();
   }

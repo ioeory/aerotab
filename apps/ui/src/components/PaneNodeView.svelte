@@ -1,5 +1,6 @@
 <script lang="ts">
   import PaneNodeView from './PaneNodeView.svelte';
+  import Splitter from './Splitter.svelte';
   import { tabs, type PaneNode, type Tab } from '../lib/tabs.svelte';
   import { isPaneDragActive } from '../lib/paneDrag';
   import { i18n } from '../lib/i18n.svelte';
@@ -122,13 +123,8 @@
         />
       </div>
       {#if idx < node.children.length - 1 && !maximized}
-        <button
-          type="button"
-          aria-label={i18n.t('pane.resizePane')}
-          onpointerdown={(e) => onResize(idx, e)}
-          class="pointer-events-auto z-20 bg-[var(--color-border-soft)] hover:bg-[var(--color-accent)] transition-colors
-                 {node.direction === 'col' ? 'h-[3px] w-full cursor-row-resize' : 'w-[3px] h-full cursor-col-resize'}"
-        ></button>
+        {@const pair = (node.ratios[idx] ?? 0) + (node.ratios[idx+1] ?? 0)}
+        <Splitter unitsPerPixel={1000/Math.max(1,host ? (node.direction==='col'?host.clientHeight:host.clientWidth) : 1000)} axis={node.direction==='col'?'y':'x'} value={(node.ratios[idx]??0)*1000} min={60} max={Math.max(60,pair*1000-60)} label={i18n.t('pane.resizePane')} onChange={v=>{if(node.type!=='split')return;const next=node.ratios.slice();next[idx]=v/1000;next[idx+1]=pair-v/1000;tabs.resizeSplit(tab.id,node.id,next);}} />
       {/if}
     {/each}
   </div>

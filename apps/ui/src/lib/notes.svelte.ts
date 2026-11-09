@@ -7,7 +7,24 @@ export class NotesStore {
   profileRemarks = $state<Record<string, { value: string; base: string; dirty: boolean }>>({});
   private loading: Promise<void> | null = null;
   private mutation = 0;
-  constructor(public rpc: RpcClient) {}
+  private editorOwner = `notes-${Math.random().toString(36).slice(2)}`;
+  private editStatePending: Promise<unknown> = Promise.resolve();
+  private heartbeat?: ReturnType<typeof setInterval>;
+  private syncPoll?: ReturnType<typeof setInterval>;
+  constructor(public rpc: RpcClient) {
+    if (typeof window !== 'undefined') {
+      this.syncPoll = setInterval(() => { if (!this.dirty) void this.refresh().catch(() => {}); }, 3000);
+    }
+  }
+  private reportEditState(): Promise<unknown> {
+    const dirty = Object.values(this.drafts).some(d => d.queue.dirty || d.status === 'error');
+    // Serialize transitions so an older clean acknowledgement cannot clear a
+    // newer dirty owner. Backend ownership does not expire on network failure.
+    this.editStatePending = this.editStatePending.catch(() => {}).then(() => this.rpc.call('notes.editState', { owner: this.editorOwner, dirty }));
+    if (dirty && !this.heartbeat) { this.heartbeat = setInterval(() => { void this.reportEditState().catch(() => {}); }, 5000); (this.heartbeat as unknown as {unref?: () => void}).unref?.(); }
+    if (!dirty && this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
+    return this.editStatePending;
+  }
   get dirty(): boolean { return Object.values(this.drafts).some(d => d.status !== 'saved') || Object.values(this.profileRemarks).some(d => d.dirty); }
   refresh(): Promise<void> {
     if (this.loading) return this.loading;
@@ -35,17 +52,19 @@ export class NotesStore {
       this.drafts[note.id] = { value, queue, status: 'saved' };
     }
     const draft = this.drafts[note.id]!;
+    if (draft.queue.dirty && draft.value.version !== note.version) { draft.status = 'error'; void this.reportEditState().catch(() => {}); }
     if (!draft.queue.dirty && draft.value.version !== note.version) { draft.value = JSON.parse(JSON.stringify(note)); draft.queue.version = note.version; }
     return draft;
   }
   edit(id: string): void {
     const draft = this.drafts[id]; if (!draft) return; draft.queue.update(JSON.parse(JSON.stringify(draft.value))); draft.status = 'dirty';
+    void this.reportEditState().catch(() => {});
     clearTimeout(draft.timer); draft.timer = setTimeout(() => { void this.save(id).catch(() => {}); }, 650);
   }
   async save(id: string): Promise<void> {
     const draft = this.drafts[id]; if (!draft) return;
     clearTimeout(draft.timer); draft.status = 'saving';
-    try { await draft.queue.flush(); draft.status = draft.queue.dirty ? 'dirty' : 'saved'; } catch { draft.status = 'error'; throw Error('Note save failed; draft retained. Retry or export the draft before closing.'); }
+    try { await this.reportEditState(); await draft.queue.flush(); draft.status = draft.queue.dirty ? 'dirty' : 'saved'; await this.reportEditState(); } catch { draft.status = 'error'; void this.reportEditState().catch(() => {}); throw Error('Note save failed; draft retained. Retry or export the draft before closing.'); }
   }
   async flush(): Promise<void> { await Promise.all(Object.keys(this.drafts).map(id => this.save(id))); }
   /** Parent Tauri onCloseRequested must await this and preventDefault on rejection. */
@@ -80,6 +99,15 @@ export function getNotesStore(rpc: RpcClient): NotesStore {
   let store = stores.get(rpc);
   if (!store) {
     store = new NotesStore(rpc); stores.set(rpc, store);
+    const call = rpc.call.bind(rpc);
+    // All manual sync entry points share this client (settings and palette).
+    // A failed save aborts preview/apply; drafts remain available for retry/export.
+    rpc.call = async <T = unknown>(method: string, params?: unknown): Promise<T> => {
+      if (method === 'sync.now' || method === 'sync.preview') await store!.flush();
+      const result = await call<T>(method, params);
+      if (method === 'sync.now') await store!.refresh();
+      return result;
+    };
     if (typeof window !== 'undefined') window.addEventListener('beforeunload', event => { if (store!.dirty) { event.preventDefault(); event.returnValue = ''; } });
   }
   return store;

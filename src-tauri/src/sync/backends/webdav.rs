@@ -40,6 +40,8 @@ impl WebDavBackend {
         password: Option<String>,
     ) -> Self {
         let client = Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("aerotab-core/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -103,6 +105,7 @@ fn group_segment(group: Group) -> &'static str {
         Group::Shortcuts => "shortcuts",
         Group::PluginCfg => "plugincfg",
         Group::Credentials => "credentials",
+        Group::Notes => "notes",
     }
 }
 
@@ -414,6 +417,16 @@ fn parse_propfind_ids(body: &str) -> Vec<RecordId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_is_rejected_before_credentials_can_leave_process() {
+        let backend = WebDavBackend::with_auth(
+            "http://127.0.0.1:9/",
+            Some("user".into()),
+            Some("secret".into()),
+        );
+        assert!(backend.list_blobs("").await.is_err());
+    }
 
     #[test]
     fn parse_propfind_extracts_uuid_filenames() {
