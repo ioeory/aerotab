@@ -12,6 +12,19 @@ const rule = (ast, selector) => {
   return Object.fromEntries(node.block.children.filter(child => child.type === 'Declaration').map(child => [child.property, child.value.trim()]));
 };
 
+test('profile drawer is mounted outside the scaled application shell', () => {
+  const source = read('../components/ProfileModal.svelte');
+  assert.match(source, /use:mountOutsideShell/);
+  assert.match(source, /document\.body\.appendChild\(node\)/);
+});
+
+test('profile drawer provides a viewport height fallback for older WebView2', () => {
+  const declarations = modal.css.children.find(node => node.type === 'Rule').block.children;
+  for (const property of ['height', 'max-height']) {
+    assert.deepEqual(declarations.filter(node => node.property === property).map(node => node.value.trim()), ['100vh', '100dvh']);
+  }
+});
+
 test('profile drawer constrains the form instead of scrolling the entire dialog', () => {
   assert.equal(rule(modal, 'dialog.profile-drawer').overflow, 'hidden');
   const form = rule(editor, 'form');

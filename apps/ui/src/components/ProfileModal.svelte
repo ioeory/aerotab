@@ -46,9 +46,17 @@
   }
   function saved() { onSaved(); dialog?.close(); }
   function openVault() { close(); onOpenVault?.(); }
+
+  // Native top-layer dialogs still inherit CSS zoom from their DOM ancestors.
+  // Mount outside #root (and the settings overlay's counter-zoom) so viewport
+  // dimensions and compact typography use the same unscaled coordinate space.
+  function mountOutsideShell(node: HTMLDialogElement) {
+    document.body.appendChild(node);
+    return { destroy() { node.remove(); } };
+  }
 </script>
 
-<dialog bind:this={dialog} class="profile-drawer" aria-labelledby="profile-modal-title" aria-modal="true" onclose={closed} oncancel={(event) => { if (saving) event.preventDefault(); }}>
+<dialog bind:this={dialog} use:mountOutsideShell class="profile-drawer" aria-labelledby="profile-modal-title" aria-modal="true" onclose={closed} oncancel={(event) => { if (saving) event.preventDefault(); }}>
   <ProfileEditorForm bind:this={editor} {rpc} {onError} onSaved={saved} onCancel={close} onOpenVault={onOpenVault ? openVault : undefined} bind:saving>
     {#snippet header()}
       <header>
@@ -60,7 +68,7 @@
 </dialog>
 
 <style>
-  dialog.profile-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(620px, 100vw); min-width: 0; max-width: 100vw; height: 100dvh; max-height: 100dvh; padding: 0; border: 0; border-left: 1px solid var(--color-border); border-radius: 0; background: var(--color-panel); color: var(--color-fg); overflow: hidden; font-size: var(--text-compact); line-height: var(--leading-ui); }
+  dialog.profile-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(620px, 100vw); min-width: 0; max-width: 100vw; height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh; padding: 0; border: 0; border-left: 1px solid var(--color-border); border-radius: 0; background: var(--color-panel); color: var(--color-fg); overflow: hidden; font-size: var(--text-compact); line-height: var(--leading-ui); }
   .profile-drawer::backdrop { background: rgb(0 0 0 / 0.3); }
   header { flex-shrink: 0; padding: 12px 20px; background: var(--color-panel); border-bottom: 1px solid var(--color-border-soft); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   h2 { font-size: var(--text-ui); line-height: var(--leading-ui); font-weight: 600; }
