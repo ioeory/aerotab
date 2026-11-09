@@ -95,7 +95,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.1-ui-20261109';
+  const buildId = '0.3.2-ui-20261109';
   type SettingsSectionId =
     | 'application'
     | 'appearance'

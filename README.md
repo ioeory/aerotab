@@ -28,6 +28,11 @@
 - **Host stats** — CPU/memory/disk in the status area (separate exec channel)
 - **Connection import** — Settings → Profiles → **Import connections…** (or command palette). Sources: WindTerm, Termius, OpenSSH config, CSV, PuTTY `.reg`, MobaXterm, Xshell, SecureCRT, Tabby/AeroTab export. Preview step supports **search**, grouped folders (expand/collapse), select all/invert, **batch auth** (username, password, key, agent, Vault — applied on import), match auth from existing profiles, and **overwrite** confirmation for duplicates.
 
+## What's new in v0.3.2
+
+- **Profile drawer scaling isolation** — render the profile editor outside the scaled application shell so its header, scrollable form, and Cancel / Save footer stay within the viewport across UI scale settings.
+- **Older WebView2 viewport fallback** — provide a `vh` fallback when dynamic viewport units are unavailable. Layout checks were performed in embedded Chromium at 800×480, device scale 1.5, and UI scales 0.6 / 1 / 1.25 / 1.4; the target Windows 10 WebView2 environment has not yet been manually verified.
+
 ## What's new in v0.3.1
 
 - **Persistent SSH group defaults** — share username, port, authentication, proxy, and jump-chain settings across nested groups. Hosts opt in per field; explicit host settings override group defaults, and legacy profiles keep their existing settings. Group authentication uses SSH agent, Vault references, or key paths without plaintext passphrases.
