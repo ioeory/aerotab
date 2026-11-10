@@ -151,13 +151,12 @@
   let lastSelectedRemoteName = $state<string | null>(null);
   let renamingName = $state<string | null>(null);
   let renameDraft = $state('');
-  let localPaneCollapsed = $state(false);
   let downloadBannerDismissed = $state(false);
 
   let sharedTasks = $state<import('../lib/transferQueue').TransferTask[]>([]);
   const activeTransferCount = $derived(sharedTasks.filter(t => ['queued', 'running', 'canceling'].includes(t.status)).length);
   const transferQueueItems = $derived(sharedTasks.map(task => ({ id: task.id, name: task.name, status: task.status === 'canceling' ? 'running' as const : task.status === 'interrupted' ? 'error' as const : task.status, percent: task.size ? Math.min(100, Math.round(task.transferred / task.size * 100)) : 0, summary: task.message ?? `${task.transferred} / ${task.size} B` })));
-  const showLocalPaneEffective = $derived(showLocalPane && localCwd && !localPaneCollapsed);
+  const showLocalPaneEffective = $derived(mode === 'modal' && showLocalPane && Boolean(localCwd));
 
   let reportedTransferCount = -1;
 
@@ -167,12 +166,6 @@
     reportedTransferCount = count;
     const report = untrack(() => onActiveTransferCountChange);
     report?.(count);
-  });
-
-  $effect(() => {
-    if (mode === 'dock' && dockWidthPx < 420) {
-      localPaneCollapsed = true;
-    }
   });
 
   let selectedTransferIds = $state<Set<string>>(new Set());
@@ -240,6 +233,8 @@
   }
 
   async function initLocalPane() {
+    // Dock browsers manage only their remote host; do not probe local directories.
+    if (mode !== 'modal' || !showLocalPane) return;
     if (defaultDownloadDir) {
       localCwd = defaultDownloadDir;
     } else {
@@ -1729,15 +1724,6 @@
             <div class="text-[12px] font-mono text-[var(--color-fg-muted)] truncate">{profileEndpointLabel({ name: target.name, kind: 'ssh', ssh: target.ssh } as StoredProfile)}</div>
           {/if}
         </div>
-        {#if mode === 'dock' && showLocalPane}
-          <button
-            type="button"
-            class="px-2 py-0.5 rounded text-[12px] border {localPaneCollapsed ? 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)]' : 'border-[var(--color-accent)] text-[var(--color-accent)]'}"
-            onclick={() => { localPaneCollapsed = !localPaneCollapsed; }}
-          >
-            {i18n.t('sftp.toggleLocalPane')}
-          </button>
-        {/if}
         <button
           type="button"
           class="px-2 py-0.5 rounded text-[12px] border {sudoMode ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'border-[var(--color-border-soft)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'}"
@@ -1989,7 +1975,7 @@
       </div>
     </div>
 
-    {#if !defaultDownloadDir && !downloadBannerDismissed && showLocalPane}
+    {#if mode === 'modal' && showLocalPane && !defaultDownloadDir && !downloadBannerDismissed}
       <div class="mx-3 mb-1 px-3 py-2 rounded border border-[var(--color-border-soft)] bg-[var(--color-panel-2)] text-[14px] flex items-center gap-2">
         <span class="min-w-0 flex-1">{i18n.t('sftp.downloadDirBanner')}</span>
         <button type="button" class="btn-secondary text-[14px] px-2 py-0.5 shrink-0" onclick={() => { void chooseDownloadDir(); }}>

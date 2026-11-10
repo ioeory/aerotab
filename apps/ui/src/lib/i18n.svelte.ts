@@ -1017,6 +1017,11 @@ const en: Messages = {
   'picker.builtInShells': 'Built-in shells',
   'picker.importedSshConfig': 'Imported from .ssh/config',
   'picker.connectTo': 'Connect to {address}',
+  'picker.splitRight': 'Open in split to the right',
+  'picker.splitDown': 'Open in split below',
+  'picker.splitMenu': 'Open profile in current tab',
+  'picker.connecting': 'Connecting…',
+  'picker.splitTargetGone': 'The target pane is no longer available. Please try again.',
 
   'sftp.aria': 'SFTP browser',
   'sftp.sshSession': 'SSH session',
@@ -2136,6 +2141,11 @@ const zhCN: Messages = {
   'picker.builtInShells': '内置 Shell',
   'picker.importedSshConfig': '从 .ssh/config 导入',
   'picker.connectTo': '连接到 {address}',
+  'picker.splitRight': '在当前标签页向右分屏打开',
+  'picker.splitDown': '在当前标签页向下分屏打开',
+  'picker.splitMenu': '在当前标签页打开 Profile',
+  'picker.connecting': '正在连接…',
+  'picker.splitTargetGone': '目标窗格已不存在，请重试。',
 
   'sftp.aria': 'SFTP 浏览器',
   'sftp.sshSession': 'SSH 会话',

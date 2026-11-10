@@ -28,6 +28,13 @@
 - **Host stats** — CPU/memory/disk in the status area (separate exec channel)
 - **Connection import** — Settings → Profiles → **Import connections…** (or command palette). Sources: WindTerm, Termius, OpenSSH config, CSV, PuTTY `.reg`, MobaXterm, Xshell, SecureCRT, Tabby/AeroTab export. Preview step supports **search**, grouped folders (expand/collapse), select all/invert, **batch auth** (username, password, key, agent, Vault — applied on import), match auth from existing profiles, and **overwrite** confirmation for duplicates.
 
+## What's new in v0.3.3
+
+- **Profile picker splits** — right-click an SSH profile (or use the keyboard context menu) to open it to the right or below the active pane in the current terminal tab. Connections use backend-resolved profile settings; if the target pane disappears while connecting, the unattached session is closed.
+- **Focused SFTP dock** — docked file browsers show only the remote host and skip local-directory initialization; the modal browser retains its local / remote dual-pane layout.
+- **Netcatty-style system details** — CPU, memory, root-disk capacity, and network metric cards with recent sampled trends, per-core usage, grouped mount capacity, interface counters, and disk I/O. Network overview excludes loopback and common virtual / duplicate interfaces; it shows sampled throughput, not bandwidth utilization. Sampling uses a separate SSH exec channel and monotonic intervals; failures, pauses, reboots, and endpoint changes break trend / counter continuity instead of inventing rates. Missing values stay unavailable, and failures retain the last good sample. Process memory rankings are not implemented.
+- **Validation boundary** — automated helper / static-layout tests and successful builds do not establish real Windows WebView2 behavior; the target Windows environment still needs manual verification.
+
 ## What's new in v0.3.2
 
 - **Profile drawer scaling isolation** — render the profile editor outside the scaled application shell so its header, scrollable form, and Cancel / Save footer stay within the viewport across UI scale settings.

@@ -17,6 +17,8 @@
   import { i18n } from '../lib/i18n.svelte';
   import { getProfileCatalog } from '../lib/profileCatalog.svelte';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
+  import { clampMenuToViewport } from '../lib/contextMenuPosition';
+  import type { SplitDir } from '../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, displayGroupName, isUngroupedGroupKey, UNGROUPED_GROUP_KEY } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
   import ProfileKindBadge from './ProfileKindBadge.svelte';
@@ -55,8 +57,67 @@
     rpc: RpcClient;
     onClose: () => void;
     onOpen: (item: PickerItem) => void;
+    onSplit: (profile: StoredProfile, direction: SplitDir) => Promise<boolean>;
+    canSplit?: boolean;
+    busy?: boolean;
   }
-  let { rpc, onClose, onOpen }: Props = $props();
+  let { rpc, onClose, onOpen, onSplit, canSplit = false, busy = false }: Props = $props();
+
+  let menuEl = $state<HTMLDialogElement | null>(null);
+  let menuProfile = $state<StoredProfile | null>(null);
+  let menuX = $state(0);
+  let menuY = $state(0);
+  let menuReturnFocus: HTMLElement | null = null;
+
+  async function showProfileMenu(profile: StoredProfile, ev: MouseEvent | KeyboardEvent) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (busy) return;
+    if (profile.kind === 'rdp' || profile.kind === 'vnc') return;
+    menuReturnFocus = ev.currentTarget instanceof HTMLElement ? ev.currentTarget : inputEl;
+    const rect = menuReturnFocus?.getBoundingClientRect();
+    menuX = ev instanceof MouseEvent && ev.button === 2 ? ev.clientX : (rect?.left ?? 8);
+    menuY = ev instanceof MouseEvent && ev.button === 2 ? ev.clientY : (rect?.bottom ?? 8);
+    menuProfile = profile;
+    await tick();
+    if (!menuEl) return;
+    if (!menuEl.open) menuEl.showModal();
+    const position = clampMenuToViewport(menuX, menuY, menuEl);
+    menuX = position.x;
+    menuY = position.y;
+    menuEl.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }
+
+  function closeMenu() {
+    menuEl?.close();
+    menuProfile = null;
+    menuReturnFocus?.focus();
+  }
+
+  async function splitProfile(direction: SplitDir) {
+    if (busy || !canSplit || !menuProfile) return;
+    const profile = menuProfile;
+    closeMenu();
+    if (await onSplit(profile, direction)) pushRecent(profile.id);
+  }
+
+  function onMenuKey(ev: KeyboardEvent) {
+    ev.stopPropagation();
+    if (ev.key === 'Escape' || ev.key === 'Tab') {
+      ev.preventDefault(); closeMenu(); return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(ev.key)) return;
+    ev.preventDefault();
+    const buttons = Array.from(menuEl?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const next = ev.key === 'Home' ? 0 : ev.key === 'End' ? buttons.length - 1
+      : (index + (ev.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  }
+
+  function onProfileKey(profile: StoredProfile, ev: KeyboardEvent) {
+    if (ev.key === 'ContextMenu' || (ev.shiftKey && ev.key === 'F10')) void showProfileMenu(profile, ev);
+  }
 
   let profiles = $state<StoredProfile[]>([]);
   let shells = $state<ShellEntry[]>([]);
@@ -195,6 +256,7 @@
 
   // ----- actions -----
   async function chooseRecord(item: PickerItem) {
+    if (busy) return;
     if (item.kind === 'profile') {
       pushRecent(item.profile.id);
     }
@@ -207,10 +269,12 @@
       .catch(() => {}); // best-effort
   }
   function clearRecent() {
+    if (busy) return;
     recentIds = [];
     void rpc.call('settings.set', { key: 'recentProfiles', value: [] }).catch(() => {});
   }
   function submitAddress() {
+    if (busy) return;
     const addr = query.trim();
     if (!addr) return;
     onOpen({ kind: 'address', address: addr });
@@ -220,7 +284,13 @@
     return Math.max(0, Math.min(navItems.length - 1, next));
   }
   function onKey(ev: KeyboardEvent) {
-    if (ev.key === 'Escape') { ev.preventDefault(); onClose(); return; }
+    if (busy) { ev.preventDefault(); return; }
+    if (ev.key === 'ContextMenu' || (ev.shiftKey && ev.key === 'F10')) {
+      const item = navItems[hover];
+      if (item?.kind === 'profile') void showProfileMenu(item.profile, ev);
+      return;
+    }
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); onClose(); return; }
     if (ev.key === 'ArrowDown') {
       ev.preventDefault();
       hover = clampHover(hover + 1);
@@ -299,6 +369,8 @@
             class="picker-row"
             class:active={hover === block.navIndex}
             onclick={() => chooseRecord(block.item)}
+            oncontextmenu={(ev) => showProfileMenu(p, ev)}
+            onkeydown={(ev) => onProfileKey(p, ev)}
             onmouseenter={() => { hover = block.navIndex; }}
           >
             <ProfileIcon icon={p.icon} name={p.name} kind={p.kind} size={13} />
@@ -364,10 +436,58 @@
         </button>
       {/if}
     </div>
+    {#if busy}<div class="picker-progress" role="status">{i18n.t('picker.connecting')}</div>{/if}
   </div>
 </div>
 
+<dialog
+  bind:this={menuEl}
+  class="picker-menu"
+  style:left="{menuX}px"
+  style:top="{menuY}px"
+  aria-label={i18n.t('picker.splitMenu')}
+  oncancel={(ev) => { ev.preventDefault(); closeMenu(); }}
+  onclick={(ev) => { if (ev.target === menuEl) closeMenu(); }}
+  onkeydown={onMenuKey}
+>
+  <div role="menu" aria-label={i18n.t('picker.splitMenu')}>
+    <button type="button" role="menuitem" disabled={!canSplit || busy} onclick={() => splitProfile('row')}>{i18n.t('picker.splitRight')}</button>
+    <button type="button" role="menuitem" disabled={!canSplit || busy} onclick={() => splitProfile('col')}>{i18n.t('picker.splitDown')}</button>
+  </div>
+</dialog>
+
 <style>
+  .picker-menu {
+    position: fixed;
+    margin: 0;
+    padding: 4px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    background: var(--color-panel);
+    color: var(--color-fg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-panel);
+    font-family: var(--font-sans, system-ui, sans-serif);
+  }
+  .picker-menu::backdrop { background: transparent; }
+  .picker-menu button {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .picker-menu button:disabled { opacity: 0.45; cursor: default; }
+  .picker-menu button:not(:disabled):hover, .picker-menu button:focus-visible {
+    background: var(--color-panel-2);
+    outline: 1px solid var(--color-accent);
+  }
+  .picker-progress { padding: 8px 14px; color: var(--color-fg-muted); }
   .picker-shell {
     width: min(720px, calc(100vw - 24px));
     font-family: var(--font-sans, system-ui, sans-serif);

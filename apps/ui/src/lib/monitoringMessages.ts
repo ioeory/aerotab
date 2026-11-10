@@ -18,6 +18,9 @@ export const en = {
   minutes: 'min', seconds: 's', paused: 'Paused by window policy', actualRange: 'Actual sampled interval',
   cpuHistory: 'CPU history', memoryHistory: 'Memory history', diskHistory: 'Disk capacity history', networkHistory: 'Network throughput history',
   editHosts: 'Choose hosts', keepRunning: 'Running panels continue sampling when you leave this page.',
+  trendWaiting: 'Awaiting trend samples', rootDisk: 'Root filesystem /', virtualMounts: 'Virtual filesystems',
+  stale: 'Last good sample retained', networkScope: 'Overview excludes loopback and common virtual / duplicate interfaces. All interfaces below; not bandwidth utilization.',
+  coreCount: 'cores',
 } as const;
 export const zh: Record<keyof typeof en, string> = {
   title: '主机监控', newPanel: '新建面板', addHosts: '添加主机', rename: '重命名', delete: '删除面板',
@@ -34,6 +37,9 @@ export const zh: Record<keyof typeof en, string> = {
   lastSample: '最后采样', persistenceError: '面板偏好无法保存到此设备，请检查本地存储后重试。', retry: '重试', minutes: '分钟', seconds: '秒',
   paused: '已按窗口策略暂停', actualRange: '实际采样区间', cpuHistory: 'CPU 历史', memoryHistory: '内存历史', diskHistory: '磁盘容量历史', networkHistory: '网络速率历史',
   editHosts: '选择主机', keepRunning: '离开此页面后，已启动的面板仍会继续采样。',
+  trendWaiting: '等待更多趋势样本', rootDisk: '根文件系统 /', virtualMounts: '虚拟文件系统',
+  stale: '已保留最后成功样本', networkScope: '概览排除回环及常见虚拟 / 重复接口；所有接口列于下方，不代表带宽使用率。',
+  coreCount: '核',
 };
 export function monitoringMessage(key: keyof typeof en): string { return i18n.resolvedLocale === 'zh-CN' ? zh[key] : en[key]; }
 export function monitoringNumber(value: number | null | undefined, suffix = ''): string {

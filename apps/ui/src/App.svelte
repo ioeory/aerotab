@@ -95,7 +95,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.2-ui-20261109';
+  const buildId = '0.3.3-ui-20261110';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -147,6 +147,8 @@
   let batchCommandOpen = $state(false);
   let importWizardOpen = $state(false);
   let pickerOpen = $state(false);
+  let pickerConnecting = $state(false);
+  type ProfileSplitTarget = { tabId: string; paneId: string; direction: SplitDir };
   const sharedCatalog = getProfileCatalog(rpc);
   let savedProfiles = $derived(sharedCatalog.profiles);
   $effect(() => { getHostMonitoring(rpc).setProfiles(savedProfiles); });
@@ -1460,26 +1462,62 @@
     return `${ssh.user}@${ssh.host}${port}`;
   }
 
-  async function connectProfile(p: StoredProfile) {
+  async function connectProfile(p: StoredProfile, target?: ProfileSplitTarget): Promise<boolean> {
     try {
       if (p.kind === 'rdp' || p.kind === 'vnc') {
+        if (target) return false;
         await rpc.call('remote.openProfile', { profile_id: p.id });
-        return;
+        return true;
       }
       const meta = await rpc.call<{ id: string; kind: string; title: string }>(
         'session.openSshProfile', { profile_id: p.id },
       );
-      tabs.add({ id: meta.id, kind: meta.kind, title: meta.title, profileId: p.id, sshProfile: p.ssh });
+      // Saved profiles are resolved by the backend (including group inheritance
+      // and Vault auth); do not carry the picker's stale SSH snapshot forward.
+      const session = { id: meta.id, kind: meta.kind, title: meta.title, profileId: p.id };
+      if (target) {
+        let attached = false;
+        try {
+          attached = tabs.addPane(target.tabId, session, target.direction, 'after', target.paneId);
+        } finally {
+          if (!attached) await rpc.call('session.close', { id: meta.id });
+        }
+        if (!attached) throw new Error(i18n.t('picker.splitTargetGone'));
+      } else {
+        tabs.add(session);
+      }
       recordRestore(meta.id, { kind: 'ssh-profile', id: p.id });
       requestAnimationFrame(() => focusActivePane());
+      return true;
     } catch (e) {
       onError(`connect ${p.name} (${profileEndpointLabel(p)}): ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  async function onPickerSplit(profile: StoredProfile, direction: SplitDir): Promise<boolean> {
+    if (pickerConnecting) return false;
+    const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
+    const pane = tab?.kind === 'terminal' ? tabs.activePane(tab) : undefined;
+    if (!tab || !pane || profile.kind === 'rdp' || profile.kind === 'vnc') return false;
+    const target = { tabId: tab.id, paneId: pane.id, direction };
+    pickerConnecting = true;
+    try {
+      const opened = await connectProfile(profile, target);
+      if (opened) {
+        pickerOpen = false;
+        requestAnimationFrame(() => focusActivePane());
+      }
+      return opened;
+    } finally {
+      pickerConnecting = false;
     }
   }
 
   // M2 — open a chosen profile-picker item (user profile, built-in shell,
   // ~/.ssh/config entry, or quick-connect address).
   async function onPickerItem(item: PickerItem) {
+    if (pickerConnecting) return;
     pickerOpen = false;
     if (item.kind === 'profile') {
       await connectProfile(item.profile);
@@ -1623,7 +1661,7 @@
         title: i18n.t('action.connectProfile', { name: p.name }),
         subtitle: profileCommandSubtitle(p),
         keywords: profileCommandKeywords(p),
-        run: () => connectProfile(p),
+        run: async () => { await connectProfile(p); },
       });
       if (p.kind === 'ssh') {
         acts.push({
@@ -2384,7 +2422,11 @@
 {#if pickerOpen}
   <ProfileSelector
     {rpc}
+    busy={pickerConnecting}
+    canSplit={tabs.tabs.some((tab) => tab.id === tabs.activeId && tab.kind === 'terminal' && !!tabs.activePane(tab))}
+    onSplit={onPickerSplit}
     onClose={() => {
+      if (pickerConnecting) return;
       pickerOpen = false;
       requestAnimationFrame(() => focusActivePane());
     }}

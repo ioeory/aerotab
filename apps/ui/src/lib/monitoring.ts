@@ -3,7 +3,7 @@ import type { StoredProfile } from './types';
 import type { MonitoringHostStats, MonitoringSample, MonitoringSnapshot, NetworkRate, DiskRate, MonitoringPanel } from './monitoringTypes';
 
 export function networkRates(stats: MonitoringHostStats, previous: MonitoringSample | undefined, at: number): NetworkRate[] {
-  const seconds = previous ? (at - previous.at) / 1000 : 0;
+  const seconds = previous ? (at - (previous.monotonicAt ?? previous.at)) / 1000 : 0;
   const valid = !!previous && seconds > 0 && (stats.uptime_seconds == null || previous.stats.uptime_seconds == null || stats.uptime_seconds >= previous.stats.uptime_seconds);
   return (stats.network_interfaces ?? []).map(row => {
     const old = valid ? previous?.stats.network_interfaces?.find(item => item.name === row.name) : undefined;
@@ -14,7 +14,7 @@ function counterRate(value: number, old: number | undefined, seconds: number): n
   return old != null && Number.isFinite(value) && Number.isFinite(old) && value >= old && old >= 0 && seconds > 0 ? (value - old) / seconds : null;
 }
 function diskRates(stats: MonitoringHostStats, previous: MonitoringSample | undefined, at: number): DiskRate[] {
-  const seconds = previous ? (at - previous.at) / 1000 : 0;
+  const seconds = previous ? (at - (previous.monotonicAt ?? previous.at)) / 1000 : 0;
   const valid = !!previous && (stats.uptime_seconds == null || previous.stats.uptime_seconds == null || stats.uptime_seconds >= previous.stats.uptime_seconds);
   return (stats.disk_io ?? []).map(row => {
     const old = valid ? previous?.stats.disk_io?.find(item => item.name === row.name) : undefined;
@@ -32,12 +32,15 @@ export function normalizePanels(value: unknown): MonitoringPanel[] {
     view: p.view === 'chart' ? 'chart' : 'list', sort: ['cpu', 'memory'].includes(p.sort) ? p.sort : 'name', search: typeof p.search === 'string' ? p.search.slice(0, 200) : '',
   }));
 }
+function endpoint(ssh: Extract<StoredProfile, { kind: 'ssh' }>['ssh']): unknown {
+  return [ssh.host, ssh.port, ssh.user, ssh.proxy_id, ssh.jump_profile_ids, ssh.jump_via?.map(endpoint)];
+}
 interface Entry {
   leases: Map<symbol, number>; snapshot: MonitoringSnapshot; generation: number; inFlight: boolean;
   timer?: ReturnType<typeof setTimeout>; due: boolean; continuous: boolean;
 }
 interface Options {
-  now?: () => number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout;
+  now?: () => number; monotonicNow?: () => number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout;
   maxConcurrent?: number; maxSamples?: number; maxAgeMs?: number;
 }
 /** A single queue per RPC client; independent UI leases never stop each other. */
@@ -47,6 +50,7 @@ export class MonitoringService {
   private listeners = new Set<() => void>();
   private active = 0;
   private now: () => number;
+  private monotonicNow: () => number;
   private timer: typeof setTimeout;
   private clear: typeof clearTimeout;
   private maxConcurrent: number;
@@ -54,11 +58,27 @@ export class MonitoringService {
   private maxAgeMs: number;
   private paused = false;
   constructor(private rpc: RpcClient, options: Options = {}) {
+    this.monotonicNow = options.monotonicNow ?? (options.now ? options.now : () => performance.now());
     this.now = options.now ?? Date.now; this.timer = options.setTimer ?? setTimeout; this.clear = options.clearTimer ?? clearTimeout;
     this.maxConcurrent = Math.max(1, options.maxConcurrent ?? 4); this.maxSamples = Math.max(1, options.maxSamples ?? 3600); this.maxAgeMs = options.maxAgeMs ?? 3600000;
   }
-  setProfiles(profiles: StoredProfile[]): void { this.profiles = new Map(profiles.map(p => [p.id, p])); }
-  invalidateProfiles(): void { this.profiles.clear(); }
+  setProfiles(profiles: StoredProfile[]): void {
+    const identity = (p: StoredProfile | undefined) => p?.kind === 'ssh' ? JSON.stringify(endpoint(p.ssh)) : null;
+    for (const [id, entry] of this.entries) {
+      if (this.profiles.has(id) && identity(this.profiles.get(id)) !== identity(profiles.find(p => p.id === id))) this.resetEntry(entry);
+    }
+    this.profiles = new Map(profiles.map(p => [p.id, p])); this.emit(); this.drain();
+  }
+  invalidateProfiles(): void {
+    this.profiles.clear();
+    for (const entry of this.entries.values()) this.resetEntry(entry);
+    this.emit(); this.drain();
+  }
+  private resetEntry(entry: Entry): void {
+    if (entry.timer) this.clear(entry.timer); entry.timer = undefined;
+    entry.generation++; entry.continuous = false; entry.due = entry.leases.size > 0;
+    entry.snapshot = { history: [], sampling: false, failures: 0 };
+  }
   watch(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   private emit(): void { for (const listener of this.listeners) listener(); }
   snapshot(id: string): MonitoringSnapshot {
@@ -112,7 +132,7 @@ export class MonitoringService {
     }
   }
   private async probe(id: string, entry: Entry): Promise<void> {
-    const generation = entry.generation; const start = this.now();
+    const generation = entry.generation; const start = this.monotonicNow();
     const accept = () => generation === entry.generation && entry.leases.size > 0 && !this.paused;
     entry.snapshot = { ...entry.snapshot, sampling: true }; this.emit();
     try {
@@ -123,12 +143,15 @@ export class MonitoringService {
       // profile_id accompanies the legacy profile payload for a seamless backend migration.
       const stats = await this.rpc.call<MonitoringHostStats>('ssh.hostStats', { profile_id: id, profile: profile.ssh });
       if (!accept()) return;
-      const at = this.now();
+      const at = this.now(), monotonicAt = this.monotonicNow();
       // A failed probe breaks counter continuity; reboot is checked by rate helpers.
-      const previous = entry.snapshot.failures || !entry.continuous ? undefined : entry.snapshot.latest;
+      const latest = entry.snapshot.latest;
+      const changedHost = !!latest?.stats.hostname && !!stats.hostname && latest.stats.hostname !== stats.hostname;
+      const previous = changedHost || entry.snapshot.failures || !entry.continuous ? undefined : latest;
       entry.continuous = true;
-      const sample: MonitoringSample = { at, stats, probeMs: at - start, network_rates: networkRates(stats, previous, at), disk_rates: diskRates(stats, previous, at) };
-      const history = [...entry.snapshot.history, sample].filter(s => at - s.at <= this.maxAgeMs).slice(-this.maxSamples);
+      const reboot = previous?.stats.uptime_seconds != null && stats.uptime_seconds != null && stats.uptime_seconds < previous.stats.uptime_seconds;
+      const sample: MonitoringSample = { at, monotonicAt, breakBefore: !previous || reboot, stats, probeMs: Math.max(0, monotonicAt - start), network_rates: networkRates(stats, previous, monotonicAt), disk_rates: diskRates(stats, previous, monotonicAt) };
+      const history = [...(changedHost ? [] : entry.snapshot.history), sample].filter(s => monotonicAt - (s.monotonicAt ?? s.at) <= this.maxAgeMs).slice(-this.maxSamples);
       entry.snapshot = { history, latest: sample, sampling: false, failures: 0 };
     } catch {
       // Never expose server errors: authentication failures can contain sensitive payloads.

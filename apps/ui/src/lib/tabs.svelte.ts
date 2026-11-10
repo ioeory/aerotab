@@ -376,10 +376,11 @@ class TabStore {
   }
 
   /** Split the active pane in an existing tab and focus the new pane. */
-  addPane(tabId: string, session: SessionMeta, direction: SplitDir = 'row', side: SplitSide = 'after'): boolean {
+  addPane(tabId: string, session: SessionMeta, direction: SplitDir = 'row', side: SplitSide = 'after', targetPaneId?: string): boolean {
     const tab = this.tabs.find((candidate) => candidate.id === tabId);
     if (!tab || tab.kind !== 'terminal') return false;
-    const target = tab.activePaneId || tab.panes[0]?.id;
+    // Explicit anchors never fall back after asynchronous connection/focus changes.
+    const target = targetPaneId ?? (tab.activePaneId || tab.panes[0]?.id);
     if (!target) return false;
     const result = insertRelative(tab.layout, target, session, direction, side);
     if (!result.inserted) return false;

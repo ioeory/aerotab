@@ -16,7 +16,7 @@ export interface MonitoringHostStats extends HostStats {
 }
 export interface NetworkRate extends NetworkInterface { rx_bytes_per_second: number | null; tx_bytes_per_second: number | null }
 export interface DiskRate extends DiskIo { read_bytes_per_second: number | null; write_bytes_per_second: number | null }
-export interface MonitoringSample { at: number; stats: MonitoringHostStats; probeMs: number; network_rates: NetworkRate[]; disk_rates: DiskRate[] }
+export interface MonitoringSample { at: number; monotonicAt?: number; breakBefore?: boolean; stats: MonitoringHostStats; probeMs: number; network_rates: NetworkRate[]; disk_rates: DiskRate[] }
 export interface MonitoringSnapshot { history: MonitoringSample[]; latest?: MonitoringSample; error?: string; sampling: boolean; failures: number }
 export interface MonitoringPanel { id: string; name: string; profileIds: string[]; intervalMs: number; rangeMinutes: number; view: 'list' | 'chart'; sort: 'name' | 'cpu' | 'memory'; search: string }
 export type MonitoringProfile = Extract<StoredProfile, { kind: 'ssh' }>;
