@@ -49,7 +49,7 @@ const modalScript = script(sources.modal);
 const modalAst = ts.createSourceFile('modal.ts', modalScript, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const withoutImports = modalAst.statements.filter(node => !ts.isImportDeclaration(node)).map(node => node.getText(modalAst)).join('\n');
 const instrumented = sources.modal.replace(modalScript, `
-  const { normalizeGroupPath, i18n, onDestroy, capture, fakeDialog } = globalThis[Symbol.for('aerotab.inheritance.test')];
+  const { normalizeGroupPath, resolveGroupDefaults, i18n, onDestroy, capture, fakeDialog } = globalThis[Symbol.for('aerotab.inheritance.test')];
   ${withoutImports}
   dialog = fakeDialog;
   capture({ open, save, parentValue, invalidate,
@@ -63,6 +63,8 @@ const instrumented = sources.modal.replace(modalScript, `
       if ('passphraseEntry' in values) passphraseEntry = values.passphraseEntry;
       if ('proxyId' in values) proxyId = values.proxyId;
       if ('jumpIds' in values) jumpIds = values.jumpIds;
+      if ('forceSubgroups' in values) forceSubgroups = values.forceSubgroups;
+      if ('forceHosts' in values) forceHosts = values.forceHosts;
     },
     snapshot: () => ({ loaded, loading, saving, error, parent, sources, overrides })
   });
@@ -82,7 +84,7 @@ function modalHarness(initial = {}) {
     throw Error(`Unexpected RPC: ${method}`);
   } };
   const key = Symbol.for('aerotab.inheritance.test');
-  globalThis[key] = { normalizeGroupPath: tree.normalizeGroupPath, i18n: { t: key => key }, onDestroy() {}, capture(value) { api = value; }, fakeDialog: dialog };
+  globalThis[key] = { normalizeGroupPath: tree.normalizeGroupPath, resolveGroupDefaults: helpers.resolveGroupDefaults, i18n: { t: key => key }, onDestroy() {}, capture(value) { api = value; }, fakeDialog: dialog };
   let body;
   try { body = render(Modal, { props: { rpc } }).body; } finally { delete globalThis[key]; }
   return { api, body, calls, saved, dialog, submit: () => api.save({ preventDefault() {} }),
@@ -136,6 +138,44 @@ test('each host field opts in independently, preserves fallback and never mutate
   }
 });
 
+test('force policies are independent, ancestor-first, explicit-field-only and reversible', () => {
+  const original = host(['user', 'port']);
+  const groups = { prod: { user: 'root', force_subgroups: true }, 'prod/web': { user: 'child', port: 2223 } };
+  assert.equal(helpers.previewProfileInheritance(original, groups).profile.ssh.user, 'root');
+  assert.equal(helpers.previewProfileInheritance(original, groups).profile.ssh.port, 2223);
+  assert.equal(helpers.previewProfileInheritance(host(), groups).profile.ssh.user, 'local');
+  groups.prod.force_hosts = true;
+  groups['prod/web'].force_hosts = true;
+  const forced = helpers.previewProfileInheritance(host(), groups);
+  assert.equal(forced.profile.ssh.user, 'root');
+  assert.equal(forced.forced.user, 'prod');
+  assert.equal(forced.profile.ssh.port, 2223);
+  assert.equal(forced.forced.port, 'prod/web');
+  assert.equal(host().ssh.user, 'local');
+  assert.equal(helpers.previewProfileInheritance(host(), {}).profile.ssh.user, 'local');
+});
+
+test('force matrix separates subgroup locking from host policy and ignores inherited fields', () => {
+  for (const force_subgroups of [false, true]) for (const force_hosts of [false, true]) {
+    const groups = { prod: { user: 'root', force_subgroups, force_hosts }, 'prod/web': { user: 'child' } };
+    assert.equal(helpers.previewProfileInheritance(host(['user']), groups).profile.ssh.user, force_subgroups || force_hosts ? 'root' : 'child');
+    assert.equal(helpers.previewProfileInheritance(host(), groups).profile.ssh.user, force_hosts ? 'root' : 'local');
+  }
+  const onlyInherited = { prod: { user: 'root' }, 'prod/web': { force_hosts: true, force_subgroups: true } };
+  assert.equal(helpers.previewProfileInheritance(host(), onlyInherited).profile.ssh.user, 'local');
+  assert.equal(helpers.previewProfileInheritance(host(['user']), onlyInherited).profile.ssh.user, 'root');
+});
+
+test('host force does not become inherited group policy and direct routes remain explicit', () => {
+  const groups = { prod: { proxy_id: null, jump_profile_ids: [], force_hosts: true }, 'prod/web': { proxy_id: 'child', jump_profile_ids: ['child'], force_hosts: true } };
+  const forced = helpers.previewProfileInheritance(host(), groups);
+  assert.equal(forced.profile.ssh.proxy_id, null);
+  assert.deepEqual(forced.profile.ssh.jump_profile_ids, []);
+  assert.deepEqual(forced.profile.ssh.jump_via, []);
+  assert.equal(forced.sources.proxy_id, 'prod');
+  assert.equal(forced.forced.jump, 'prod');
+});
+
 test('legacy hosts stay explicit while newly grouped hosts opt in and choices round trip', () => {
   const legacy = host(); delete legacy.ssh.inherit;
   assert.deepEqual(helpers.profileToEditorDraft(legacy).inherit, []);
@@ -148,6 +188,24 @@ test('legacy hosts stay explicit while newly grouped hosts opt in and choices ro
   toggle('port', true); toggle('port', true); toggle('auth', false);
   assert.deepEqual(draft.inherit, ['user', 'port']);
   assert.match(sources.editor, /checked=\{draft\.inherit\.includes\(field\)\}/);
+});
+
+test('disabling modal force restores saved subgroup values without rewriting descendants', async () => {
+  const h = modalHarness({ prod: { user: 'root', force_subgroups: true, force_hosts: true }, 'prod/web': { user: 'child' } });
+  await h.api.open('prod');
+  h.api.edit({ forceSubgroups: false, forceHosts: false });
+  await h.submit();
+  assert.deepEqual(h.map(), { prod: { user: 'root' }, 'prod/web': { user: 'child' } });
+  assert.equal(helpers.previewProfileInheritance(host(['user']), h.map()).profile.ssh.user, 'child');
+});
+
+test('modal persists both force switches independently without copying inherited fields', async () => {
+  const h = modalHarness({ prod: { user: 'root', force_subgroups: true }, 'prod/web': { user: 'local' } });
+  await h.api.open('prod/web/eu');
+  assert.equal(h.api.parentValue('user'), 'root');
+  h.api.edit({ overrides: { port: true }, port: 2201, forceSubgroups: true, forceHosts: true });
+  await h.submit();
+  assert.deepEqual(h.map()['prod/web/eu'], { port: 2201, force_subgroups: true, force_hosts: true });
 });
 
 test('modal saves against the latest settings map and retains unrelated concurrent edits', async () => {

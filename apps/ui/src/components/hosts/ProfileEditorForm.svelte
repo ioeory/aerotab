@@ -50,7 +50,7 @@
     draft.inherit = checked ? [...new Set([...draft.inherit, field])] : draft.inherit.filter(value => value !== field);
   }
   function inherited(field: SshInheritField): boolean {
-    return draft.inherit.includes(field) && !!inheritedPreview.sources[field];
+    return !!inheritedPreview.forced?.[field] || (draft.inherit.includes(field) && !!inheritedPreview.sources[field]);
   }
   function previewValue(field: SshInheritField): string {
     if (inheritedPreview.profile.kind !== 'ssh') return '';
@@ -177,7 +177,8 @@
         <p>{i18n.t('groupDefaults.hostHint')}</p>
         {#each inheritanceFields as field (field)}
           <label class="inherit-row"><input type="checkbox" checked={draft.inherit.includes(field)} onchange={event => toggleInheritance(field, event.currentTarget.checked)} />{i18n.t('groupDefaults.inheritField', { field: i18n.t(inheritanceLabels[field]) })}</label>
-          {#if draft.inherit.includes(field)}<p>{i18n.t('groupDefaults.effectiveValue')}: {inheritanceLoaded ? previewValue(field) : '…'} · {i18n.t('groupDefaults.source')}: {inheritanceLoaded ? inheritedPreview.sources[field] ?? i18n.t('groupDefaults.fallback') : '…'}</p>{/if}
+          {#if inheritedPreview.forced[field]}<p>{i18n.t('groupDefaults.forcedBy', { source: inheritedPreview.forced[field] })}</p>{/if}
+          {#if draft.inherit.includes(field) || inheritedPreview.forced[field]}<p>{i18n.t('groupDefaults.effectiveValue')}: {inheritanceLoaded ? previewValue(field) : '…'} · {i18n.t('groupDefaults.source')}: {inheritanceLoaded ? inheritedPreview.sources[field] ?? i18n.t('groupDefaults.fallback') : '…'}</p>{/if}
         {/each}
       </div>
     </details>

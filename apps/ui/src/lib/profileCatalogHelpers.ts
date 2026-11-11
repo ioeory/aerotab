@@ -1,27 +1,51 @@
 import type { SshAuth, SshProfileSpec, StoredProfile, ProfileIcon, SshInheritField, ProfileGroupDefaults } from './types';
 
-/** UI preview only; backend independently resolves saved profiles at connection time. */
-export function previewProfileInheritance(profile: StoredProfile, groups: ProfileGroupDefaults): { profile: StoredProfile; sources: Partial<Record<SshInheritField, string>> } {
-  const copy = JSON.parse(JSON.stringify(profile)) as StoredProfile;
+/** Shared group resolver: flags affect only fields explicitly present in that entry. */
+export function resolveGroupDefaults(group: string | null, groups: ProfileGroupDefaults) {
+  const values: import('./types').GroupSshDefaults = {};
   const sources: Partial<Record<SshInheritField, string>> = {};
-  if (copy.kind !== 'ssh') return { profile: copy, sources };
-  for (const { path } of profileGroupBreadcrumbs(copy.group ?? null)) {
-    const defaults = groups[path];
-    if (!defaults) continue;
-    for (const field of copy.ssh.inherit ?? []) {
-      if (field === 'jump') {
-        if (defaults.jump_profile_ids !== undefined) {
-          copy.ssh.jump_via = [];
-          copy.ssh.jump_profile_ids = [...defaults.jump_profile_ids];
-          sources.jump = path;
-        }
-      } else if (field === 'user' && defaults.user !== undefined) { copy.ssh.user = defaults.user; sources.user = path; }
-      else if (field === 'port' && defaults.port !== undefined) { copy.ssh.port = defaults.port; sources.port = path; }
-      else if (field === 'auth' && defaults.auth !== undefined) { copy.ssh.auth = JSON.parse(JSON.stringify(defaults.auth)); sources.auth = path; }
-      else if (field === 'proxy_id' && defaults.proxy_id !== undefined) { copy.ssh.proxy_id = defaults.proxy_id; sources.proxy_id = path; }
+  const locked: Partial<Record<SshInheritField, string>> = {};
+  const forced: Partial<Record<SshInheritField, string>> = {};
+  const hostValues: import('./types').GroupSshDefaults = {};
+  const fields: SshInheritField[] = ['user', 'port', 'auth', 'proxy_id', 'jump'];
+  for (const { path } of profileGroupBreadcrumbs(group)) {
+    const own = groups[path];
+    if (!own) continue;
+    for (const field of fields) {
+      const key = field === 'jump' ? 'jump_profile_ids' : field;
+      if (own[key] === undefined) continue;
+      if (!locked[field]) {
+        Object.assign(values, { [key]: JSON.parse(JSON.stringify(own[key])) });
+        sources[field] = path;
+        if (own.force_subgroups === true) locked[field] = path;
+      }
+      if (own.force_hosts === true && !forced[field]) {
+        Object.assign(hostValues, { [key]: values[key] });
+        forced[field] = sources[field];
+      }
     }
   }
-  return { profile: copy, sources };
+  return { values, sources, locked, forced, hostValues };
+}
+
+/** UI preview only; backend independently resolves saved profiles at connection time. */
+export function previewProfileInheritance(profile: StoredProfile, groups: ProfileGroupDefaults) {
+  const copy = JSON.parse(JSON.stringify(profile)) as StoredProfile;
+  const sources: Partial<Record<SshInheritField, string>> = {};
+  const forced: Partial<Record<SshInheritField, string>> = {};
+  if (copy.kind !== 'ssh') return { profile: copy, sources, forced };
+  const group = resolveGroupDefaults(copy.group ?? null, groups);
+  const fields = new Set<SshInheritField>([...(copy.ssh.inherit ?? []), ...Object.keys(group.forced) as SshInheritField[]]);
+  for (const field of fields) {
+    const key = field === 'jump' ? 'jump_profile_ids' : field;
+    const value = (group.forced[field] ? group.hostValues : group.values)[key];
+    if (value === undefined) continue;
+    if (field === 'jump') { copy.ssh.jump_via = []; copy.ssh.jump_profile_ids = [...value as string[]]; }
+    else Object.assign(copy.ssh, { [field]: JSON.parse(JSON.stringify(value)) });
+    sources[field] = group.forced[field] ?? group.sources[field];
+    if (group.forced[field]) forced[field] = group.forced[field];
+  }
+  return { profile: copy, sources, forced };
 }
 
 export function profileGroupBreadcrumbs(group: string | null): Array<{ name: string; path: string }> {

@@ -75,6 +75,28 @@ test('paused windows release timers and resume without fabricating counter rates
   h.calls[1].resolve({ cpu_percent: 7 }); await flush();
   assert.equal(h.service.snapshot('a').history.length, 1); stop();
 });
+test('diagnostic callbacks are bounded and continuity reasons survive failures, restarts and reboot', async () => {
+  const events = []; const h = harness({ onDiagnostic: (snapshot, stream) => events.push({ snapshot, stream }) });
+  const stop = h.service.subscribe('a', 1000);
+  const sample = (rx, uptime = 100) => ({ uptime_seconds: uptime, network_interfaces: [{ name: 'eth0', rx_bytes: rx, tx_bytes: rx }] });
+  h.calls[0].resolve(sample(100)); await flush();
+  assert.equal(h.service.snapshot('a').latest.continuityReason, 'firstSample');
+  h.advance(); h.calls[1].resolve(sample(200)); await flush();
+  assert.equal(h.service.snapshot('a').latest.continuityReason, undefined);
+  h.advance(); h.calls[2].reject(Error('password=SECRET host=10.1.2.3')); await flush();
+  h.advance(); h.calls[3].resolve(sample(400)); await flush();
+  assert.equal(h.service.snapshot('a').latest.continuityReason, 'probeFailed');
+  h.advance(); h.calls[4].resolve(sample(500, 1)); await flush();
+  assert.equal(h.service.snapshot('a').latest.continuityReason, 'reboot');
+  for (let i = 5; i < 35; i++) { h.advance(); h.calls[i].resolve(sample(500 + i, 2)); await flush(); }
+  assert.equal(events.length, 1, 'never emit diagnostics at every sampling tick');
+  h.advance(60000); h.calls.at(-1).resolve(sample(1000, 3)); await flush();
+  assert.equal(events.length, 2);
+  assert.equal(typeof events[0].stream, 'number');
+  stop(); const stop2 = h.service.subscribe('a', 1000); h.calls.at(-1).resolve(sample(2000, 4)); await flush();
+  assert.equal(h.service.snapshot('a').latest.continuityReason, 'subscriptionRestart');
+  stop2();
+});
 test('panel persistence includes definitions only, validates preferences and strips credentials', () => {
   const panels = api.normalizePanels([{ id: 'p', name: 'Prod', profileIds: ['a', 'a'], running: true, history: [1], auth: 'secret', intervalMs: 2, rangeMinutes: 15, view: 'chart' }]);
   assert.deepEqual(panels[0].profileIds, ['a']);
@@ -82,6 +104,13 @@ test('panel persistence includes definitions only, validates preferences and str
   assert.equal(JSON.stringify(panels).includes('secret'), false);
   assert.equal('running' in panels[0], false);
   assert.equal('history' in panels[0], false);
+});
+test('interface diagnostics distinguish new interfaces, reset counters and invalid counters without exposing names', () => {
+  const previous = { at: 1000, stats: { network_interfaces: [{ name: 'eth0', rx_bytes: 100, tx_bytes: 100 }] } };
+  const rows = api.networkRates({ network_interfaces: [{ name: 'eth0', rx_bytes: 1, tx_bytes: 200 }, { name: 'eth1', rx_bytes: 10, tx_bytes: 10 }, { name: 'bad', rx_bytes: NaN, tx_bytes: 10 }] }, previous, 2000);
+  assert.equal(rows[0].unavailableReason, 'counterReset');
+  assert.equal(rows[1].unavailableReason, 'newInterface');
+  assert.equal(rows[2].unavailableReason, 'invalidCounter');
 });
 test('rate calculation rejects reboot, invalid counters, and first samples', () => {
   const prev = { at: 1000, stats: { uptime_seconds: 100, network_interfaces: [{ name: 'e', rx_bytes: 5, tx_bytes: 10 }] } };

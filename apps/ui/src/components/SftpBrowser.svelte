@@ -1800,7 +1800,7 @@
     </div>
 
     {#if listError}
-      <div class="mx-3 mt-2 px-3 py-2 rounded border border-[var(--color-danger)]/40 bg-[var(--color-danger)]/10
+      <div class="sftp-list-error mx-3 mt-2 px-3 py-2 rounded border border-[var(--color-danger)]/40 bg-[var(--color-danger)]/10
                   text-[14px] text-[var(--color-fg)] flex items-center gap-2">
         <span role="alert" class="min-w-0 break-words">{i18n.t('sftp.listFailed', { message: listError })}</span>
         <button type="button" class="btn-secondary shrink-0 text-[14px] px-2 py-0.5" onclick={retryRemoteList}>
@@ -2126,6 +2126,7 @@
   .sftp-browser-surface { background: var(--color-bg-soft) !important; color: var(--color-fg); isolation: isolate; font-size: var(--text-compact, 14px); line-height: 1.5; container-type: inline-size; }
   .sftp-browser-surface > header { background: var(--color-surface-raised); gap: 6px; }
   .sftp-browser-surface > header button { min-height: 30px; font-size: var(--text-compact, 14px); }
+  .sftp-list-error { min-width: 0; min-height: 0; max-height: 30%; flex-shrink: 0; align-items: flex-start; overflow-y: auto; overflow-wrap: anywhere; }
   .sftp-path-toolbar { flex-wrap: wrap; gap: 4px; background: var(--color-bg-soft); }
   .sftp-path-toolbar .toolbtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 5px; }
   .sftp-breadcrumbs { flex: 1 1 140px; overflow-x: auto; scrollbar-width: thin; padding: 6px 0; font-size: var(--text-compact, 14px); font-family: var(--font-mono); }

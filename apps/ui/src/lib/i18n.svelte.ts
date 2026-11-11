@@ -14,7 +14,11 @@ export type ResolvedLocale = 'en' | 'zh-CN';
 type Messages = Record<string, string>;
 
 const en: Messages = {
-  'groupDefaults.hostHint': 'Enable inheritance per field. Disable it to use this host’s independent setting below. Changes apply to new connections only.',
+  'groupDefaults.forceSubgroups': 'Force overrides on descendant groups',
+  'groupDefaults.forceHosts': 'Force overrides on hosts',
+  'groupDefaults.forceHint': 'Persistent and independent switches, affecting only fields explicitly configured in this group. Highest ancestor force wins. Independent values are preserved and restored when force is disabled.',
+  'groupDefaults.forcedBy': 'Forced by {source}; independent value retained',
+  'groupDefaults.hostHint': 'Enable inheritance per field. Disable it to use this host’s independent setting below, unless a group forces the field. Changes apply to new connections only.',
   'groupDefaults.inheritField': 'Inherit {field}',
   'groupDefaults.effectiveValue': 'Effective value',
   'groupDefaults.source': 'Source',
@@ -366,13 +370,13 @@ const en: Messages = {
   'sync.gitSshPortHelp':
     'Non-default SSH port (not 22). Configure builds ssh://git@host:PORT/path. You can also put the port in the remote URL as git@host:PORT/group/repo.git or ssh://git@host:PORT/group/repo.git.',
   'sync.vaultSectionTitle': 'Vault (credential sync)',
-  'sync.vaultSectionHelp': 'Unlock the vault here so Credentials can export/import during sync. Optional: save the password to the OS credential store for automatic unlock.',
+  'sync.vaultSectionHelp': 'Manually unlock the vault for this app process to sync Credentials. Restarting or locking the vault requires entering the password again.',
   'sync.vaultStatusUnlocked': 'unlocked',
   'sync.vaultStatusLocked': 'locked',
   'sync.vaultStatusNotInitialized': 'not initialized',
   'sync.vaultPassword': 'Vault master password',
   'sync.vaultPasswordConfirm': 'Confirm password',
-  'sync.vaultPasswordPlaceholder': 'Unlock for this session or save to keyring',
+  'sync.vaultPasswordPlaceholder': 'Enter password to unlock for this app process',
   'sync.vaultKeyringAccount': 'Vault credential account (optional)',
   'sync.vaultUnlock': 'Unlock vault',
   'sync.vaultLock': 'Lock vault',
@@ -385,7 +389,7 @@ const en: Messages = {
   'sync.vaultUnlocked': 'Vault unlocked',
   'sync.vaultLocked': 'Vault locked',
   'sync.vaultUnlockFailed': 'Could not unlock vault (wrong password or not saved to OS store)',
-  'sync.vaultUnlockRequired': 'Unlock the vault in the section above, or save the vault password to the OS credential store.',
+  'sync.vaultUnlockRequired': 'Manually unlock the vault above before syncing Credentials. Saved OS passwords are not used.',
   'sync.vaultNotInitialized': 'Initialize the vault in the section above before syncing credentials.',
   'sync.vaultPasswordRequired': 'Enter the vault master password',
   'sync.vaultPasswordMismatch': 'Passwords do not match',
@@ -983,6 +987,8 @@ const en: Messages = {
   'pane.resizePane': 'Resize pane',
   'pane.movePane': 'Move pane',
 
+  'terminal.connecting': 'Connecting…',
+  'terminal.connectionFailed': 'Connection failed',
   'terminal.sessionEnded': 'Session ended',
   'terminal.reconnect': 'Reconnect',
   'terminal.reconnecting': 'Reconnecting…',
@@ -1139,7 +1145,11 @@ const en: Messages = {
 };
 
 const zhCN: Messages = {
-  'groupDefaults.hostHint': '按字段启用继承；取消勾选后使用下方的主机独立设置。修改仅在下次连接时生效。',
+  'groupDefaults.forceSubgroups': '持续覆盖下级组',
+  'groupDefaults.forceHosts': '持续覆盖主机',
+  'groupDefaults.forceHint': '两个开关独立生效，仅作用于本组显式配置字段；多层冲突时上级强制优先。独立值不会被改写，取消强制后恢复。',
+  'groupDefaults.forcedBy': '由 {source} 强制覆盖；独立值已保留',
+  'groupDefaults.hostHint': '按字段启用继承；取消勾选后使用下方的主机独立设置，但分组强制覆盖时除外。修改仅在下次连接时生效。',
   'groupDefaults.inheritField': '继承{field}',
   'groupDefaults.effectiveValue': '有效值',
   'groupDefaults.source': '来源',
@@ -1491,13 +1501,13 @@ const zhCN: Messages = {
   'sync.gitSshPortHelp':
     '非 22 端口时填写。Configure 会生成 ssh://git@主机:端口/路径。也可在远程 URL 中写 git@主机:端口/组/仓库.git 或 ssh://git@主机:端口/组/仓库.git。',
   'sync.vaultSectionTitle': '凭据库（同步用）',
-  'sync.vaultSectionHelp': '在此解锁凭据库，同步时才能导出/导入 Credentials。可将密码保存到系统凭据库以实现自动解锁。',
+  'sync.vaultSectionHelp': '手动解锁后，本次应用进程才能同步 Credentials。重启或手动锁定后，必须重新输入密码；最小化到托盘不会锁定。',
   'sync.vaultStatusUnlocked': '已解锁',
   'sync.vaultStatusLocked': '已锁定',
   'sync.vaultStatusNotInitialized': '未初始化',
   'sync.vaultPassword': '凭据库主密码',
   'sync.vaultPasswordConfirm': '确认密码',
-  'sync.vaultPasswordPlaceholder': '本次解锁用，或保存到凭据库后自动解锁',
+  'sync.vaultPasswordPlaceholder': '输入密码，仅解锁本次应用进程',
   'sync.vaultKeyringAccount': '凭据库账号名（可选）',
   'sync.vaultUnlock': '解锁凭据库',
   'sync.vaultLock': '锁定凭据库',
@@ -1510,7 +1520,7 @@ const zhCN: Messages = {
   'sync.vaultUnlocked': '凭据库已解锁',
   'sync.vaultLocked': '凭据库已锁定',
   'sync.vaultUnlockFailed': '解锁失败（密码错误或尚未保存到系统凭据库）',
-  'sync.vaultUnlockRequired': '请先在下方解锁凭据库，或将凭据库密码保存到系统凭据库。',
+  'sync.vaultUnlockRequired': '请先手动解锁凭据库再同步 Credentials。不会读取系统中历史保存的凭据库密码。',
   'sync.vaultNotInitialized': '请先在下方初始化凭据库，再同步 Credentials。',
   'sync.vaultPasswordRequired': '请输入凭据库主密码',
   'sync.vaultPasswordMismatch': '两次输入的密码不一致',
@@ -2107,6 +2117,8 @@ const zhCN: Messages = {
   'pane.resizePane': '调整窗格大小',
   'pane.movePane': '移动窗格',
 
+  'terminal.connecting': '正在连接…',
+  'terminal.connectionFailed': '连接失败',
   'terminal.sessionEnded': '会话已结束',
   'terminal.reconnect': '重新连接',
   'terminal.reconnecting': '正在连接…',

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
+  import { diagnostics } from '../lib/diagnostics.svelte';
   import { createFloatFallback } from '../lib/nativeFloatFallback';
   import { i18n } from '../lib/i18n.svelte';
   import { settlePaneLayout } from '../lib/paneLayoutBarrier';
@@ -376,18 +377,24 @@
     traceLayout('capture', surface);
     stagingNative = true;
     stagingError = null;
+    let currentStatus = 'current';
     const current = () => {
       const bounds = surface?.getBoundingClientRect() ?? null;
       const status = disposed || transitionClosing ? 'disposed' : stagingError ? 'target-error' : controller !== source ? 'controller'
         : sourceConfig !== JSON.stringify(viewConfig()) ? 'config'
         : !nativeViewGeometryEquals(sourceBounds, bounds) ? 'geometry'
         : !visible || occluded || globalOccluded || document.hidden ? 'visibility' : 'current';
+      currentStatus = status;
       traceView({ stage: 'transaction.current', status });
       traceLayout('current', surface);
       return status === 'current';
     };
     await runNativeViewTransaction({
       current,
+      diagnostic: {
+        direction: 'webview-to-native', reason: () => stagingError ? 'target-error' : currentStatus,
+        report: event => diagnostics.record('app', 'terminal.view-switch', JSON.stringify(event)),
+      },
       prepare: async () => {
         // Host attach captures the actual canonical target before source release.
         // It never changes the existing terminal_frames sink.
@@ -468,10 +475,15 @@
     const generation = host.generation(), epoch = ++reverseEpoch;
     const config = JSON.stringify(viewConfig());
     const sourceBounds = surface?.getBoundingClientRect() ?? null;
-    const current = () => !disposed && reverseEpoch === epoch && controller === source && hostAdapter === host
-      && host.generation() === generation && JSON.stringify(viewConfig()) === config
-      && nativeViewGeometryEquals(sourceBounds, surface?.getBoundingClientRect() ?? null)
-      && visible && !occluded && !globalOccluded && !document.hidden;
+    let currentStatus = 'current';
+    const current = () => {
+      currentStatus = disposed ? 'disposed' : reverseEpoch !== epoch ? 'epoch'
+        : controller !== source ? 'controller' : hostAdapter !== host ? 'host'
+        : host.generation() !== generation ? 'generation' : JSON.stringify(viewConfig()) !== config ? 'config'
+        : !nativeViewGeometryEquals(sourceBounds, surface?.getBoundingClientRect() ?? null) ? 'geometry'
+        : !visible || occluded || globalOccluded || document.hidden ? 'visibility' : 'current';
+      return currentStatus === 'current';
+    };
     stagingWebview = true;
     let suspended = false;
     let drainTarget: number | null = null;
@@ -482,6 +494,10 @@
     const drainSource = () => quiesceAndDrainNativeInput(cut, queue);
     await runNativeViewTransaction({
       current,
+      diagnostic: {
+        direction: 'native-to-webview', reason: () => currentStatus,
+        report: event => diagnostics.record('app', 'terminal.view-switch', JSON.stringify(event)),
+      },
       prepare: async () => {
         await source.prepareWebviewSurface();
         await source.waitForDraw();

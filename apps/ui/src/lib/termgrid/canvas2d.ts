@@ -146,9 +146,19 @@ export class Canvas2DRenderer implements GridRenderer {
       if (!runText) return;
       ctx.fillStyle = rgbToCss(runFg);
       ctx.font = fontString(this.spec, runBold, runItalic);
-      ctx.fillText(runText, runStart * cssCw, y * cssCh + this.metrics.baseline);
+      // Shaping uses the font's natural advance, but cells are snapped to
+      // device pixels. Keep each run within its occupied cells; otherwise
+      // fractional advances accumulate over long prompts and overlap the
+      // next style run or the cursor. Scale in both directions (maxWidth
+      // alone only shrinks), preserving ligatures within the run.
+      const naturalWidth = ctx.measureText(runText).width;
+      const cellWidth = (end - runStart) * cssCw;
+      ctx.save();
+      ctx.translate(runStart * cssCw, 0);
+      if (naturalWidth > 0) ctx.scale(cellWidth / naturalWidth, 1);
+      ctx.fillText(runText, 0, y * cssCh + this.metrics.baseline);
+      ctx.restore();
       runText = '';
-      void end;
     };
 
     for (let x = 0; x < grid.cols; x++) {

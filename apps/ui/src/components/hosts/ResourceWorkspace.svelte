@@ -5,10 +5,11 @@
   import type { ProfileModalOpenOptions } from '../ProfileModal.svelte';
 
   /** Keep mounted alongside session workspace; active controls global profile shortcut ownership. */
-  let { rpc, onError, openProfileModal, openSerialModal, openSftp, openSettings, onShowTransfer, onImportProfiles, active = true }: {
+  let { rpc, onError, openProfileModal, connectProfile, openSerialModal, openSftp, openSettings, onShowTransfer, onImportProfiles, active = true }: {
     rpc: RpcClient;
     onError: (message: string) => void;
     openProfileModal: (existing?: StoredProfile, options?: ProfileModalOpenOptions) => void;
+    connectProfile: (profile: StoredProfile, target?: import('../../lib/profileConnection').ProfileSplitTarget) => Promise<boolean>;
     openSerialModal: () => void;
     openSftp: (profile: StoredProfile) => void;
     openSettings: () => void;
@@ -19,4 +20,4 @@
   let sidebar: Sidebar | undefined;
   export async function refresh() { await sidebar?.refresh(); }
 </script>
-<Sidebar bind:this={sidebar} variant="workspace" {rpc} {onError} {openProfileModal} {openSerialModal} {openSftp} {openSettings} {onShowTransfer} {onImportProfiles} {active} />
+<Sidebar bind:this={sidebar} variant="workspace" {rpc} {onError} {openProfileModal} {connectProfile} {openSerialModal} {openSftp} {openSettings} {onShowTransfer} {onImportProfiles} {active} />

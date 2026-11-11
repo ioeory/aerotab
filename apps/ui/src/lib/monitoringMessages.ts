@@ -20,6 +20,9 @@ export const en = {
   editHosts: 'Choose hosts', keepRunning: 'Running panels continue sampling when you leave this page.',
   trendWaiting: 'Awaiting trend samples', rootDisk: 'Root filesystem /', virtualMounts: 'Virtual filesystems',
   stale: 'Last good sample retained', networkScope: 'Overview excludes loopback and common virtual / duplicate interfaces. All interfaces below; not bandwidth utilization.',
+  networkWaitingSecond: 'Waiting for a second consecutive sample', networkInterfacesUnavailable: 'Platform unsupported or no interfaces returned',
+  networkNoEligible: 'No interfaces eligible for overview', networkIncomplete: 'Incomplete interface rates; inspect interfaces below',
+  networkInvalidCounters: 'No comparable counters (reset, new interface or invalid interval)', networkReady: 'Consecutive interface samples available',
   coreCount: 'cores',
 } as const;
 export const zh: Record<keyof typeof en, string> = {
@@ -39,6 +42,9 @@ export const zh: Record<keyof typeof en, string> = {
   editHosts: '选择主机', keepRunning: '离开此页面后，已启动的面板仍会继续采样。',
   trendWaiting: '等待更多趋势样本', rootDisk: '根文件系统 /', virtualMounts: '虚拟文件系统',
   stale: '已保留最后成功样本', networkScope: '概览排除回环及常见虚拟 / 重复接口；所有接口列于下方，不代表带宽使用率。',
+  networkWaitingSecond: '等待第二个连续样本', networkInterfacesUnavailable: '平台不支持或未返回网络接口',
+  networkNoEligible: '无可汇总的网络接口', networkIncomplete: '接口速率不完整，请查看下方接口',
+  networkInvalidCounters: '无可比较的计数器（重置、新接口或无效采样间隔）', networkReady: '已取得连续接口样本',
   coreCount: '核',
 };
 export function monitoringMessage(key: keyof typeof en): string { return i18n.resolvedLocale === 'zh-CN' ? zh[key] : en[key]; }

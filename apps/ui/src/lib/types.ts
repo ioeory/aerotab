@@ -15,6 +15,8 @@ export interface SessionMeta {
   id: string;
   kind: 'LocalShell' | 'Ssh' | 'Serial' | string;
   title: string;
+  /** Frontend-only connection placeholder; never a backend session id. */
+  connection?: { status: 'connecting' | 'failed'; error?: string };
   /** Frontend-only source profile id for reopening/splitting SSH panes. */
   profileId?: string;
   /** Frontend-only inline SSH profile for quick-connect / ssh_config panes. */
@@ -55,6 +57,10 @@ export interface ProfileIcon {
 
 export type SshInheritField = 'user' | 'port' | 'auth' | 'proxy_id' | 'jump';
 export interface GroupSshDefaults {
+  /** Lock this entry's explicit fields against descendant group overrides. */
+  force_subgroups?: boolean;
+  /** Override host opt-outs for this entry's explicit fields; highest ancestor wins. */
+  force_hosts?: boolean;
   user?: string;
   port?: number;
   auth?: SshAuth;

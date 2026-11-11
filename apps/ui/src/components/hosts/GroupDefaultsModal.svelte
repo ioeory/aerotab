@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { RpcClient } from '../../lib/rpc';
-  import type { SshAuth, StoredProfile } from '../../lib/types';
+  import type { StoredProfile, GroupSshDefaults } from '../../lib/types';
+  import { resolveGroupDefaults } from '../../lib/profileCatalogHelpers';
   import { normalizeGroupPath } from '../../lib/profileTree';
   import { i18n } from '../../lib/i18n.svelte';
 
-  type Defaults = { user?: string; port?: number; auth?: SshAuth; proxy_id?: string | null; jump_profile_ids?: string[] };
-  type Field = keyof Defaults;
+  type Defaults = GroupSshDefaults;
+  type Field = Exclude<keyof Defaults, 'force_subgroups' | 'force_hosts'>;
   type DefaultsMap = Record<string, Defaults>;
   type VaultMeta = { id: string; label: string; kind: string };
   let { rpc, onSaved }: { rpc: RpcClient; onSaved?: (path: string) => void } = $props();
@@ -18,6 +19,9 @@
   let error = $state('');
   let revision = 0;
   let initialOwnSnapshot: string | undefined;
+  let forceSubgroups = $state(false);
+  let forceHosts = $state(false);
+  let parentForced = $state<Partial<Record<Field, string>>>({});
   let parent = $state<Defaults>({});
   let sources = $state<Partial<Record<Field, string>>>({});
   let overrides = $state<Record<Field, boolean>>({ user: false, port: false, auth: false, proxy_id: false, jump_profile_ids: false });
@@ -76,23 +80,20 @@
       vaultUnlocked = status.initialized && status.unlocked;
       vaultEntries = entries;
       const parts = normalized.split('/');
-      const effective: Defaults = {};
-      const inheritedSources: Partial<Record<Field, string>> = {};
-      for (let depth = 1; depth < parts.length; depth++) {
-        const ancestor = parts.slice(0, depth).join('/');
-        const entry = map[ancestor];
-        if (!entry) continue;
-        for (const field of fields) {
-          if (entry[field] !== undefined) {
-            Object.assign(effective, { [field]: entry[field] });
-            inheritedSources[field] = ancestor;
-          }
-        }
-      }
+      const resolved = resolveGroupDefaults(parts.slice(0, -1).join('/'), map);
+      const effective = resolved.values;
       parent = effective;
-      sources = inheritedSources;
+      sources = {};
+      parentForced = {};
+      for (const field of fields) {
+        const key = field === 'jump_profile_ids' ? 'jump' : field;
+        sources[field] = resolved.sources[key];
+        parentForced[field] = resolved.locked[key];
+      }
       initialOwnSnapshot = JSON.stringify(map[normalized]);
       const own = map[normalized] ?? {};
+      forceSubgroups = own.force_subgroups ?? false;
+      forceHosts = own.force_hosts ?? false;
       overrides = Object.fromEntries(fields.map(field => [field, own[field] !== undefined])) as Record<Field, boolean>;
       user = own.user ?? effective.user ?? '';
       port = own.port ?? effective.port ?? 22;
@@ -128,6 +129,12 @@
     return String(value);
   }
 
+  // Top-layer dialogs still inherit shell zoom; keep viewport sizing unscaled.
+  function mountOutsideShell(node: HTMLDialogElement) {
+    document.body.appendChild(node);
+    return { destroy() { node.remove(); } };
+  }
+
   function close() { if (!saving) dialog.close(); }
   function invalidate() { revision++; loaded = false; loading = false; }
   onDestroy(invalidate);
@@ -155,6 +162,8 @@
     }
     if (overrides.proxy_id) value.proxy_id = proxyId || null;
     if (overrides.jump_profile_ids) value.jump_profile_ids = [...jumpIds];
+    if (forceSubgroups) value.force_subgroups = true;
+    if (forceHosts) value.force_hosts = true;
     saving = true;
     try {
       // Read immediately before writing; never persist the map captured when opening.
@@ -180,14 +189,18 @@
   }
 </script>
 
-<dialog bind:this={dialog} aria-label={i18n.t('groupDefaults.title')} onclose={invalidate} oncancel={(event) => { if (saving) event.preventDefault(); }}>
-  <form onsubmit={save}>
+<dialog bind:this={dialog} use:mountOutsideShell class="group-defaults-dialog" aria-label={i18n.t('groupDefaults.title')} onclose={invalidate} oncancel={(event) => { if (saving) event.preventDefault(); }}>
+  <form class="group-defaults-form" onsubmit={save}>
+    <div class="group-defaults-body">
     <h2>{i18n.t('groupDefaults.title')}</h2>
     <p class="path">{path}</p>
     <p class="hint">{i18n.t('groupDefaults.hint')}</p>
     {#if loading}<p role="status">{i18n.t('common.loading')}</p>{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <fieldset disabled={!loaded || loading || saving}>
+      <label class="force"><input type="checkbox" bind:checked={forceSubgroups} />{i18n.t('groupDefaults.forceSubgroups')}</label>
+      <label class="force"><input type="checkbox" bind:checked={forceHosts} />{i18n.t('groupDefaults.forceHosts')}</label>
+      <p class="hint">{i18n.t('groupDefaults.forceHint')}</p>
       {#each fields as field (field)}
         <section>
           <label class="mode"><span>{i18n.t(fieldLabels[field])}</span>
@@ -197,6 +210,7 @@
             </select>
           </label>
           <p class="hint">{i18n.t('groupDefaults.parentValue', { source: sources[field] ?? i18n.t('groupDefaults.notSet'), value: parentValue(field) })}</p>
+          {#if parentForced[field]}<p class="hint">{i18n.t('groupDefaults.forcedBy', { source: parentForced[field] })}</p>{/if}
           {#if overrides[field]}
             {#if field === 'user'}
               <input aria-label={i18n.t('profileModal.user')} bind:value={user} required autocomplete="off" />
@@ -250,7 +264,8 @@
         </section>
       {/each}
     </fieldset>
-    <footer>
+    </div>
+    <footer class="group-defaults-footer">
       {#if !loaded && !loading}<button type="button" onclick={() => open(path)}>{i18n.t('groupDefaults.retry')}</button>{/if}
       <button type="button" disabled={saving} onclick={close}>{i18n.t('common.cancel')}</button>
       <button type="submit" class="btn-primary" disabled={!loaded || loading || saving}>{i18n.t('common.save')}</button>
@@ -259,8 +274,9 @@
 </dialog>
 
 <style>
-  dialog { width: min(660px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; color: var(--color-fg); background: var(--color-panel); }
-  form { padding: 24px; }
+  dialog.group-defaults-dialog { box-sizing: border-box; width: min(660px, calc(100vw - 32px)); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; color: var(--color-fg); background: var(--color-panel); }
+  .group-defaults-form { box-sizing: border-box; display: flex; flex-direction: column; min-height: 0; max-height: inherit; padding: 0; margin: 0; overflow: hidden; }
+  .group-defaults-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px 24px 0; }
   h2 { font-size: 20px; font-weight: 600; }
   .path { overflow-wrap: anywhere; margin: 6px 0 12px; }
   .hint { color: var(--color-fg-muted); font-size: 12px; margin: 6px 0 10px; overflow-wrap: anywhere; }
@@ -271,8 +287,10 @@
   .mode { flex-direction: row; justify-content: space-between; align-items: center; gap: 16px; }
   input, select { border: 1px solid var(--color-border); border-radius: 6px; padding: 8px; color: var(--color-fg); background: var(--color-panel-2); width: 100%; min-width: 0; }
   .mode select { width: auto; }
+  .force { flex-direction: row; align-items: center; }
+  .force input { width: auto; }
   .jump, .actions, footer { display: flex; gap: 8px; margin-top: 8px; }
   button { padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 6px; white-space: nowrap; }
   button:disabled { opacity: .5; }
-  footer { justify-content: flex-end; margin-top: 20px; }
+  .group-defaults-footer { flex-shrink: 0; justify-content: flex-end; margin: 0; padding: 20px 24px 24px; }
 </style>

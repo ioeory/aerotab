@@ -63,8 +63,8 @@
   .tab-heading.active { background:var(--color-accent-soft); color:var(--color-accent); }
   .tab-heading button { padding:7px; text-align:left; min-width:28px; }
   .tab-heading span { display:block; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--text-meta); color:var(--color-fg-muted); }
-  .file-tab-panel { display:flex; flex:1; min-height:0; flex-direction:column; }
+  .file-tab-panel { display:flex; flex:1; min-width:0; min-height:0; flex-direction:column; }
   .file-tab-panel[hidden] { display:none; }
-  .file-tab-body { flex:1; min-height:0; overflow:hidden; }
+  .file-tab-body { flex:1; min-width:0; min-height:0; overflow:hidden; }
   button:focus-visible { outline:2px solid var(--color-accent); outline-offset:-2px; }
 </style>

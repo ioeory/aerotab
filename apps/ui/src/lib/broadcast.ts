@@ -3,6 +3,7 @@ import type { Tab } from './tabs.svelte';
 
 /** True when the pane can receive SSH broadcast input. */
 export function isSshPane(p: SessionMeta): boolean {
+  if (p.connection) return false;
   return p.kind === 'Ssh' || !!p.profileId || !!p.sshProfile;
 }
 

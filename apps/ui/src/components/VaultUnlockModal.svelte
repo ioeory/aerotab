@@ -2,11 +2,7 @@
   import { X } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import { i18n } from '../lib/i18n.svelte';
-  import {
-    hasVaultKeyringSecret,
-    loadVaultKeyringAccount,
-    unlockVaultWithOptions,
-  } from '../lib/vaultBootstrap';
+  import { unlockVaultWithOptions } from '../lib/vaultBootstrap';
 
   interface Props {
     rpc: RpcClient;
@@ -18,20 +14,10 @@
 
   let dialog: HTMLDialogElement | null = null;
   let password = $state('');
-  let saveToKeyring = $state(true);
   let busy = $state(false);
-  let keyringAlreadySaved = $state(false);
 
   export async function open() {
     password = '';
-    try {
-      const account = await loadVaultKeyringAccount(rpc);
-      keyringAlreadySaved = await hasVaultKeyringSecret(rpc, account);
-      saveToKeyring = !keyringAlreadySaved;
-    } catch {
-      keyringAlreadySaved = false;
-      saveToKeyring = true;
-    }
     dialog?.showModal();
     requestAnimationFrame(() => {
       document.getElementById('vum-password')?.focus();
@@ -39,6 +25,7 @@
   }
 
   function close() {
+    password = '';
     dialog?.close();
   }
 
@@ -55,11 +42,7 @@
     }
     busy = true;
     try {
-      const account = await loadVaultKeyringAccount(rpc);
-      const ok = await unlockVaultWithOptions(rpc, password, {
-        saveToKeyring: saveToKeyring && !keyringAlreadySaved,
-        account,
-      });
+      const ok = await unlockVaultWithOptions(rpc, password);
       if (!ok) {
         onError(i18n.t('vault.unlockPromptFailed'));
         return;
@@ -75,7 +58,7 @@
   }
 </script>
 
-<dialog bind:this={dialog} aria-labelledby="vault-unlock-title" class="w-[min(520px,calc(100vw-32px))] min-w-0 max-h-[calc(100vh-32px)] overflow-y-auto" onclose={() => onSkip?.()}>
+<dialog bind:this={dialog} aria-labelledby="vault-unlock-title" class="w-[min(520px,calc(100vw-32px))] min-w-0 max-h-[calc(100vh-32px)] overflow-y-auto" onclose={() => { password = ''; onSkip?.(); }}>
   <form onsubmit={submit} class="p-5">
     <div class="flex items-center justify-between mb-2">
       <h2 id="vault-unlock-title" class="text-[length:var(--text-section,20px)] font-semibold text-[var(--color-accent)]">
@@ -103,16 +86,6 @@
       class="input w-full mb-3"
       autocomplete="current-password"
     />
-    {#if !keyringAlreadySaved}
-      <label class="flex items-center gap-2 text-[length:var(--text-ui,16px)] text-[var(--color-fg)] mb-4">
-        <input type="checkbox" bind:checked={saveToKeyring} />
-        {i18n.t('vault.saveToKeyringOnUnlock')}
-      </label>
-    {:else}
-      <p class="text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] mb-4">
-        {i18n.t('vault.keyringAlreadySavedHint')}
-      </p>
-    {/if}
     <div class="flex flex-wrap justify-end gap-2">
       <button type="button" class="btn-secondary" disabled={busy} onclick={skip}>
         {i18n.t('vault.unlockPromptSkip')}

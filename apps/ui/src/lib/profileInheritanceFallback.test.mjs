@@ -19,6 +19,11 @@ test('inheriting without a group source leaves each fallback editable', () => {
   draft.inherit = [];
   assert.equal(inherited('auth'), false);
 });
+test('forced fields disable local controls even when a legacy host opted out', () => {
+  const inherited = new Function('draft', 'inheritedPreview', `${extract('inherited')}; return inherited;`)({ inherit: [] }, { sources: { user: 'prod' }, forced: { user: 'prod' } });
+  assert.equal(inherited('user'), true);
+  assert.equal(inherited('port'), false);
+});
 test('submit never resolves a hidden jump draft while the group provides a route', async () => {
   const submit = new Function('inherited', 'joinJumpLines', 'draft', 'saving', 'onError', 'profileFromEditorDraft', 'getProfileCatalog', 'rpc', 'editingId', 'uuidv4', 'onSaved', 'iconKind', 'initialIconKind', 'iconValue', 'initialIconValue', 'jumps', 'originalLines', `${extract('submit')}; return submit;`)(
     field => field === 'jump', () => { throw Error('hidden jump draft must not be read'); },

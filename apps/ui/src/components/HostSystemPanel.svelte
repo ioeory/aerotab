@@ -3,7 +3,7 @@
   import type { RpcClient } from '../lib/rpc';
   import type { MountUsage } from '../lib/monitoringTypes';
   import { getHostMonitoring } from '../lib/hostMonitoring.svelte';
-  import { capacityTone, isVirtualMount, networkSummary } from '../lib/systemDetails';
+  import { capacityTone, isVirtualMount, networkSummary, networkState } from '../lib/systemDetails';
   import SystemMetricCard from './SystemMetricCard.svelte';
   import { monitoringMessage as m, monitoringNumber as number, monitoringBytes as bytes } from '../lib/monitoringMessages';
   let { rpc, profileId, onError }: { rpc: RpcClient; profileId: string | null | undefined; onError: (message: string) => void } = $props();
@@ -12,7 +12,8 @@
   const sample = $derived(snapshot.latest);
   const stats = $derived(sample?.stats);
   const network = $derived(sample?.network_rates ?? []);
-  const throughput = $derived(networkSummary(network));
+  const throughput = $derived(networkState(snapshot));
+  const networkStatus = $derived(m(({ waitingFirst: 'waiting', waitingSecond: 'networkWaitingSecond', interfacesUnavailable: 'networkInterfacesUnavailable', noEligibleInterfaces: 'networkNoEligible', incomplete: 'networkIncomplete', invalidCounters: 'networkInvalidCounters', probeFailed: 'probeFailed', ready: 'networkReady' } as const)[throughput.status]));
   const physicalMounts = $derived((stats?.mounts ?? []).filter(row => !isVirtualMount(row)));
   const virtualMounts = $derived((stats?.mounts ?? []).filter(isVirtualMount));
   const recent = $derived(snapshot.history.slice(-60));
@@ -47,8 +48,9 @@
         <div class="host-line"><h3 title={stats?.hostname ?? profileId}>{stats?.hostname ?? profileId}</h3><time datetime={new Date(sample.at).toISOString()} title={m('lastSample')}>{new Date(sample.at).toLocaleTimeString()}</time></div>
         <div class="metric-grid">
           {#each metrics as metric (metric.kind)}<SystemMetricCard {...metric} value={number(metric.percent, '%')} />{/each}
-          <SystemMetricCard kind="network" label={m('network')} value={bytes(throughput.rx != null && throughput.tx != null ? throughput.rx + throughput.tx : null, true)} subtitle={`↓ ${bytes(throughput.rx, true)} · ↑ ${bytes(throughput.tx, true)}`} points={networkPoints} />
+          <SystemMetricCard kind="network" label={m('network')} value={bytes(throughput.rx != null && throughput.tx != null ? throughput.rx + throughput.tx : null, true)} subtitle={throughput.status === 'ready' ? `↓ ${bytes(throughput.rx, true)} · ↑ ${bytes(throughput.tx, true)}` : networkStatus} trendStatus={networkStatus} points={networkPoints} />
         </div>
+        <p class="scope" role="status">{networkStatus} · {throughput.readyCount}/{throughput.eligibleCount} {m('interfaces')}</p>
         <p class="scope">{m('networkScope')}</p>
         <dl class="info-grid">
           {#each info as item (item.label)}<div><dt>{item.label}</dt><dd title={item.value}>{item.value}</dd></div>{/each}
@@ -70,7 +72,7 @@
           <summary><Network size={15} /><span>{m('interfaces')}</span><small>{network.length}</small></summary>
           {#each network as row (row.name)}
             <div class="interface"><strong title={row.name}>{row.name}</strong><div><span>↓ {bytes(row.rx_bytes)} · ↑ {bytes(row.tx_bytes)}</span><small>↓ {bytes(row.rx_bytes_per_second, true)} · ↑ {bytes(row.tx_bytes_per_second, true)}</small></div></div>
-          {:else}<p class="muted">{m('unavailable')}</p>{/each}
+          {:else}<p class="muted">{m('networkInterfacesUnavailable')}</p>{/each}
         </details>
         <details class="section">
           <summary><Activity size={15} /><span>{m('diskIo')}</span></summary>

@@ -2832,6 +2832,8 @@ fn main() {
             if matches!(event, tauri::RunEvent::Exit) {
                 let state = app.state::<AppRpc>().state.clone();
                 tauri::async_runtime::block_on(async {
+                    // Exit (not tray minimize/hide) ends the manually unlocked session.
+                    if let Some(vault) = state.vault.lock().await.clone() { vault.lock().await; }
                     if let Some(service) = state.scripts.lock().await.clone() { service.shutdown().await; }
                 });
             }

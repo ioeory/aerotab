@@ -95,7 +95,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.3-ui-20261110';
+  const buildId = '0.3.4-ui-20261111';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -148,7 +148,7 @@
   let importWizardOpen = $state(false);
   let pickerOpen = $state(false);
   let pickerConnecting = $state(false);
-  type ProfileSplitTarget = { tabId: string; paneId: string; direction: SplitDir };
+  import { openProfileConnection, retryProfileConnection, type ProfileSplitTarget } from './lib/profileConnection';
   const sharedCatalog = getProfileCatalog(rpc);
   let savedProfiles = $derived(sharedCatalog.profiles);
   $effect(() => { getHostMonitoring(rpc).setProfiles(savedProfiles); });
@@ -1462,37 +1462,24 @@
     return `${ssh.user}@${ssh.host}${port}`;
   }
 
+  function profileConnectionDeps() {
+    return {
+      rpc, tabs, uuid: uuidv4,
+      onStart: () => { pickerOpen = false; workspacePage = 'sessions'; },
+      onError,
+      onConnected: (session: SessionMeta) => {
+        recordRestore(session.id, { kind: 'ssh-profile', id: session.profileId! });
+        requestAnimationFrame(() => focusActivePane());
+      },
+    };
+  }
+
   async function connectProfile(p: StoredProfile, target?: ProfileSplitTarget): Promise<boolean> {
-    try {
-      if (p.kind === 'rdp' || p.kind === 'vnc') {
-        if (target) return false;
-        await rpc.call('remote.openProfile', { profile_id: p.id });
-        return true;
-      }
-      const meta = await rpc.call<{ id: string; kind: string; title: string }>(
-        'session.openSshProfile', { profile_id: p.id },
-      );
-      // Saved profiles are resolved by the backend (including group inheritance
-      // and Vault auth); do not carry the picker's stale SSH snapshot forward.
-      const session = { id: meta.id, kind: meta.kind, title: meta.title, profileId: p.id };
-      if (target) {
-        let attached = false;
-        try {
-          attached = tabs.addPane(target.tabId, session, target.direction, 'after', target.paneId);
-        } finally {
-          if (!attached) await rpc.call('session.close', { id: meta.id });
-        }
-        if (!attached) throw new Error(i18n.t('picker.splitTargetGone'));
-      } else {
-        tabs.add(session);
-      }
-      recordRestore(meta.id, { kind: 'ssh-profile', id: p.id });
-      requestAnimationFrame(() => focusActivePane());
-      return true;
-    } catch (e) {
-      onError(`connect ${p.name} (${profileEndpointLabel(p)}): ${(e as Error).message}`);
-      return false;
-    }
+    return openProfileConnection(p, target, profileConnectionDeps());
+  }
+
+  function retryProfilePane(pane: SessionMeta) {
+    void retryProfileConnection(pane, profileConnectionDeps());
   }
 
   async function onPickerSplit(profile: StoredProfile, direction: SplitDir): Promise<boolean> {
@@ -2093,6 +2080,7 @@
         onImportProfiles={() => { importWizardOpen = true; }}
         {rpc}
         bind:this={sidebar}
+        {connectProfile}
         openProfileModal={(p, opts) => profileModal?.open(p, opts)}
         openSerialModal={() => serialModal?.open()}
         openSftp={(p) => { if (p.kind === 'ssh') { workspacePage = 'sessions'; openSftpDock({ profileId: p.id, name: p.name, ssh: p.ssh }); } }}
@@ -2145,7 +2133,7 @@
         <button class="btn-ghost" disabled={!tabs.activeId} aria-pressed={sessionPanelVisible.notes} onclick={() => toggleSessionAuxiliary('notes')}>{i18n.t('shell.notes')}</button>
         <button class="btn-ghost" aria-pressed={aiVisible} onclick={() => aiVisible = !aiVisible}>{i18n.t('ai.title')}</button>
       </div>
-      {#snippet aiPanel()}<AIChat {rpc} activeSessionId={activePane?.id} onSettings={() => openSettings('ai')} />{/snippet}
+      {#snippet aiPanel()}<AIChat {rpc} activeSessionId={activePane?.connection ? undefined : activePane?.id} onSettings={() => openSettings('ai')} />{/snippet}
       <Workbench extraPanels={[{id:'ai-chat',type:'ai',title:i18n.t('ai.title'),content:aiPanel,visible:aiVisible}]} notesVisible={sessionPanelVisible.notes} systemVisible={sessionPanelVisible.system} sftpVisible={hasOpenSftpDock && !currentSftpCollapsed}>
         {#snippet terminal()}
         <div class="absolute inset-0">
@@ -2158,6 +2146,7 @@
                   settingsRev={settingsRev}
                   {terminalViewChoices}
                   nativeSurfaceOccluded={nativeSurfaceBlocked}
+                  onRetryProfile={retryProfilePane}
                   tabVisible={workspacePage === 'sessions' && tabs.activeId === tab.id}
                   broadcastEnabled={broadcastOn}
                   broadcastTargetIds={broadcastTargets}
@@ -2411,7 +2400,8 @@
     activeTabId={tabs.activeId}
     onSend={async (sessionIds, command) => {
       const data = b64encode(new TextEncoder().encode(command));
-      await rpc.call('session.writeMany', { ids: sessionIds, data });
+      const ids = sessionIds.filter(id => !id.startsWith('pending-profile:'));
+      if (ids.length) await rpc.call('session.writeMany', { ids, data });
     }}
     onClose={() => {
       batchCommandOpen = false;

@@ -5,7 +5,8 @@ import ts from 'typescript';
 import { compileModule } from 'svelte/compiler';
 const core = readFileSync(new URL('./monitoring.ts', import.meta.url), 'utf8');
 const store = readFileSync(new URL('./hostMonitoring.svelte.ts', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
-const source = ts.transpileModule(`${core}\nconst untrack = fn => fn(); const PROFILES_CHANGED = 'aerotab:profiles-changed';\n${store}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+const details = readFileSync(new URL('./systemDetails.ts', import.meta.url), 'utf8');
+const source = ts.transpileModule(`${core}\n${details}\nexport const records = []; const diagnostics = { record: (...args) => records.push(args) };\nconst untrack = fn => fn(); const PROFILES_CHANGED = 'aerotab:profiles-changed';\n${store}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 const compiled = compileModule(source, { filename: 'hostMonitoring.svelte.js', generate: 'server' }).js.code.replaceAll("'svelte/internal/server'", JSON.stringify(import.meta.resolve('svelte/internal/server')));
 const api = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 test('panel CRUD persists only safe definitions and restores without starting connections', () => {
@@ -22,6 +23,21 @@ test('panel CRUD persists only safe definitions and restores without starting co
   assert.equal(restored.panels[0].name, 'Production'); assert.deepEqual(restored.running, []);
   restored.remove(id); assert.deepEqual(restored.references('a'), []);
   store.service.dispose(); restored.service.dispose();
+});
+test('production monitoring callback records only anonymous aggregate evidence in the diagnostics store', async () => {
+  api.records.length = 0;
+  let resolve;
+  const store = new api.HostMonitoring({ call: () => new Promise(r => { resolve = r; }) });
+  store.setProfiles([{ id: 'secret-profile', kind: 'ssh', name: 'SECRET', ssh: { host: '10.1.2.3', password: 'SECRET' } }]);
+  const stop = store.service.subscribe('secret-profile');
+  resolve({ hostname: '10.1.2.3', network_interfaces: [{ name: 'SECRET', rx_bytes: 10, tx_bytes: 20 }] });
+  await new Promise(r => setImmediate(r));
+  assert.equal(api.records.length, 1);
+  const [category, source, message] = api.records[0];
+  assert.equal(category, 'connection'); assert.equal(source, 'monitoring.network');
+  assert.doesNotMatch(message, /SECRET|secret-profile|10\.1\.2\.3/);
+  assert.equal(JSON.parse(message).interfaceCount, 1);
+  stop(); store.service.dispose();
 });
 test('two running panels share one host lease and deleting one preserves the other', async () => {
   globalThis.localStorage = { getItem: () => null, setItem: () => {} };

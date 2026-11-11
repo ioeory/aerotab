@@ -37,6 +37,7 @@
     settingsRev: number;
     terminalViewChoices?: import('../lib/terminalViewChoice').TerminalViewChoices;
     nativeSurfaceOccluded?: boolean;
+    onRetryProfile?: (pane: import('../lib/types').SessionMeta) => void;
     onOpenSftp?: () => void;
     onSplitRight?: () => void;
     onSplitDown?: () => void;
@@ -52,6 +53,7 @@
     settingsRev,
     terminalViewChoices = {},
     nativeSurfaceOccluded = false,
+    onRetryProfile,
     onOpenSftp,
     onSplitRight,
     onSplitDown,
@@ -261,6 +263,17 @@
             <X size={12} />
           </button>
         {/if}
+        {#if pane.connection}
+          <div class="h-full flex flex-col items-center justify-center gap-3 p-6 text-center" role="status">
+            <div class="font-medium">{pane.title}</div>
+            <div class="text-[var(--color-fg-muted)]">{i18n.t(pane.connection.status === 'connecting' ? 'terminal.connecting' : 'terminal.connectionFailed')}</div>
+            {#if pane.connection.error}<p class="text-[var(--color-danger)] text-sm break-all max-w-lg">{pane.connection.error}</p>{/if}
+            <div class="flex gap-2">
+              {#if pane.connection.status === 'failed'}<button class="btn-secondary" onclick={() => onRetryProfile?.(pane)}>{i18n.t('terminal.reconnect')}</button>{/if}
+              <button class="btn-secondary" onclick={(e) => closePane(pane.id, e)}>{i18n.t('pane.closePane')}</button>
+            </div>
+          </div>
+        {:else}
         <TerminalPane
           {rpc}
           session={pane}
@@ -280,6 +293,7 @@
           {broadcastTargetIds}
           {onError}
         />
+        {/if}
         {#if dragHit?.kind === 'pane' && dragHit.paneId === pane.id && !hidden}
           <div class="absolute inset-0 z-20 pointer-events-none border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10">
             <div class="absolute bg-[var(--color-accent)]/25" style={dropBandStyle(dragHit.side)}></div>

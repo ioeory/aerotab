@@ -13,6 +13,33 @@ test('network totals require complete real interface rates and exclude loopback 
   assert.deepEqual(api.networkSummary([row('eth0', null, null)]), { rx: null, tx: null });
   assert.deepEqual(api.networkSummary([]), { rx: null, tx: null });
 });
+test('network state distinguishes unavailable, filtered, warmup, invalid counters and incomplete totals', () => {
+  const row = (name, rx, tx) => ({ name, rx_bytes: 10, tx_bytes: 20, rx_bytes_per_second: rx, tx_bytes_per_second: tx });
+  const snapshot = (rows, extra = {}) => ({ history: [], sampling: false, failures: 0, latest: { stats: {}, network_rates: rows }, ...extra });
+  assert.equal(typeof api.networkState, 'function');
+  assert.equal(api.networkState({ history: [], sampling: true, failures: 0 }).status, 'waitingFirst');
+  assert.equal(api.networkState(snapshot([])).status, 'interfacesUnavailable');
+  assert.equal(api.networkState(snapshot([row('lo', 0, 0)])).status, 'noEligibleInterfaces');
+  assert.equal(api.networkState(snapshot([row('eth0', null, null)], { latest: { stats: {}, network_rates: [row('eth0', null, null)], continuityReason: 'firstSample' } })).status, 'waitingSecond');
+  assert.equal(api.networkState(snapshot([row('eth0', null, null)])).status, 'invalidCounters');
+  const partial = api.networkState(snapshot([row('eth0', 5, 10), row('eth1', null, null), row('lo', 0, 0)]));
+  assert.equal(partial.status, 'incomplete');
+  assert.equal(partial.filteredCount, 1);
+  assert.equal(partial.eligibleCount, 2);
+  assert.equal(partial.readyCount, 1);
+  assert.equal(partial.rx, null, 'strict overview must not silently undercount a missing interface');
+  assert.equal(api.networkState(snapshot([row('eth0', 0, 0)])).status, 'ready');
+  assert.equal(api.networkState(snapshot([], { error: 'probeFailed' })).status, 'probeFailed');
+});
+test('network diagnostic payload contains only bounded counts and enum reasons, not host or interface identities', () => {
+  assert.equal(typeof api.networkDiagnostic, 'function');
+  const snapshot = { sampling: false, failures: 0, history: [{}, {}], latest: { continuityReason: 'probeFailed', stats: { hostname: '10.1.2.3', profile: { password: 'SECRET' } }, network_rates: [{ name: 'secret-interface', rx_bytes_per_second: null, tx_bytes_per_second: null }] } };
+  const diagnostic = api.networkDiagnostic(snapshot);
+  assert.equal(diagnostic.sampleCount, 2);
+  assert.equal(diagnostic.interfaceCount, 1);
+  assert.equal(diagnostic.continuityReason, 'probeFailed');
+  assert.doesNotMatch(JSON.stringify(diagnostic), /SECRET|10\.1\.2\.3|secret-interface|hostname|password/);
+});
 test('sparklines never invent first-sample trends, join missing data, or exceed bounded history', () => {
   assert.equal(typeof api.sparklinePaths, 'function');
   assert.deepEqual(api.sparklinePaths([{ at: 1, value: 50 }], 100), []);

@@ -46,7 +46,7 @@
   </section>
 </div>
 <style>
-  .files-workspace { height:100%; display:flex; flex-direction:column; min-height:0; background:var(--color-bg); color:var(--color-fg); }
+  .files-workspace { flex:1; width:100%; min-width:0; height:100%; display:flex; flex-direction:column; min-height:0; overflow:hidden; background:var(--color-bg); color:var(--color-fg); }
   header { display:flex; gap:16px; padding:12px 16px; align-items:center; border-bottom:1px solid var(--color-border-soft); }
   h1 { font-size:var(--text-section); font-weight:600; } p { color:var(--color-fg-muted); font-size:var(--text-compact); }
   .files-sides { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); flex:1; min-height:0; gap:1px; background:var(--color-border-soft); }

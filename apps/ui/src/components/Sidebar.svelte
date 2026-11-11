@@ -137,6 +137,7 @@
     rpc: RpcClient;
     onError: (msg: string) => void;
     openProfileModal: (existing?: StoredProfile, options?: ProfileModalOpenOptions) => void;
+    connectProfile: (profile: StoredProfile, target?: import('../lib/profileConnection').ProfileSplitTarget) => Promise<boolean>;
     openSerialModal: () => void;
     openSftp: (p: StoredProfile) => void;
     openSettings: () => void;
@@ -151,6 +152,7 @@
     rpc,
     onError,
     openProfileModal,
+    connectProfile,
     openSerialModal,
     openSftp,
     openSettings,
@@ -570,29 +572,12 @@
 
   async function openProfile(p: StoredProfile, mode: 'new-tab' | 'split-right' | 'split-down' = 'new-tab') {
     catalog.recordRecent(p.id);
-    if (p.kind === 'rdp' || p.kind === 'vnc') {
-      try {
-        await rpc.call('remote.openProfile', { profile_id: p.id });
-      } catch (e) {
-        onError(`remote: ${(e as Error).message}`);
-      }
-      return;
-    }
-    try {
-      const meta = await rpc.call<SessionMeta>('session.openSshProfile', {
-        profile_id: p.id,
-        rows: 24,
-        cols: 80,
-      });
-      const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
-      if (mode !== 'new-tab' && activeTab) {
-        tabs.addPane(activeTab.id, { ...meta, profileId: p.id, sshProfile: p.ssh }, mode === 'split-down' ? 'col' : 'row');
-      } else {
-        tabs.add({ ...meta, profileId: p.id, sshProfile: p.ssh });
-      }
-    } catch (e) {
-      onError(`ssh ${p.name} (${profileEndpointLabel(p)}): ${(e as Error).message}`);
-    }
+    const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
+    const pane = activeTab?.kind === 'terminal' ? tabs.activePane(activeTab) : undefined;
+    const target = mode !== 'new-tab' && activeTab && pane && p.kind === 'ssh'
+      ? { tabId: activeTab.id, paneId: pane.id, direction: mode === 'split-down' ? 'col' as const : 'row' as const }
+      : undefined;
+    await connectProfile(p, target);
   }
 
   type SidebarMenu =

@@ -4,6 +4,8 @@ import type { StoredProfile } from './types';
 import type { MonitoringPanel } from './monitoringTypes';
 import { MonitoringService, normalizePanels } from './monitoring';
 import { PROFILES_CHANGED } from './profileEvents';
+import { diagnostics } from './diagnostics.svelte';
+import { networkDiagnostic } from './systemDetails';
 
 const services = new WeakMap<RpcClient, HostMonitoring>();
 const STORAGE_KEY = 'aerotab.monitoring.panels.v1';
@@ -16,7 +18,9 @@ export class HostMonitoring {
   persistenceError = $state(false);
   private releases = new Map<string, (() => void)[]>();
   constructor(rpc: RpcClient) {
-    this.service = new MonitoringService(rpc);
+    this.service = new MonitoringService(rpc, { onDiagnostic: (snapshot, stream, interruptions) => {
+      diagnostics.record('connection', 'monitoring.network', JSON.stringify({ stream, ...networkDiagnostic(snapshot), interruptions }), snapshot.error ? 'warn' : 'info');
+    } });
     this.service.watch(() => untrack(() => { this.revision++; }));
     if (typeof document !== 'undefined') document.addEventListener(PROFILES_CHANGED, () => this.service.invalidateProfiles());
     try {

@@ -18,6 +18,7 @@ pub type GroupDefaults = BTreeMap<String, BTreeMap<String, Value>>;
 pub struct EffectiveProfile {
     pub profile: Profile,
     pub sources: BTreeMap<String, String>,
+    pub forced: BTreeMap<String, String>,
 }
 
 pub fn normalize_group(path: &str) -> String {
@@ -42,6 +43,7 @@ pub fn parse_defaults(value: &Value) -> Result<GroupDefaults, String> {
             .ok_or("group defaults entry must be an object")?;
         for (field, value) in fields {
             let valid = match field.as_str() {
+                "force_subgroups" | "force_hosts" => value.is_boolean(),
                 "user" => value
                     .as_str()
                     .is_some_and(|s| !s.trim().is_empty() && !s.chars().any(char::is_control)),
@@ -132,12 +134,16 @@ fn merge_profile(profile: &Profile, defaults: &GroupDefaults) -> Result<Effectiv
     let mut result = EffectiveProfile {
         profile: profile.clone(),
         sources: BTreeMap::new(),
+        forced: BTreeMap::new(),
     };
     let ProfileKind::Ssh { ssh } = &mut result.profile.spec else {
         return Ok(result);
     };
     let group = normalize_group(profile.group.as_deref().unwrap_or(""));
     let mut path = String::new();
+    let mut values: BTreeMap<String, (Value, String)> = BTreeMap::new();
+    let mut locked = HashSet::new();
+    let mut forced_values: BTreeMap<String, (Value, String)> = BTreeMap::new();
     for segment in group.split('/').filter(|s| !s.is_empty()) {
         if !path.is_empty() {
             path.push('/');
@@ -146,39 +152,59 @@ fn merge_profile(profile: &Profile, defaults: &GroupDefaults) -> Result<Effectiv
         let Some(fields) = defaults.get(&path) else {
             continue;
         };
-        for field in &ssh.inherit.clone() {
+        for field in ["user", "port", "auth", "proxy_id", "jump"] {
             let key = if field == "jump" {
                 "jump_profile_ids"
             } else {
-                field.as_str()
+                field
             };
             let Some(value) = fields.get(key) else {
                 continue;
             };
-            match field.as_str() {
-                "user" => {
-                    ssh.user = serde_json::from_value(value.clone()).map_err(|_| "invalid user")?
+            if !locked.contains(field) {
+                values.insert(field.into(), (value.clone(), path.clone()));
+                if fields.get("force_subgroups").and_then(Value::as_bool) == Some(true) {
+                    locked.insert(field);
                 }
-                "port" => {
-                    ssh.port = serde_json::from_value(value.clone()).map_err(|_| "invalid port")?
-                }
-                "auth" => {
-                    ssh.auth = serde_json::from_value(value.clone()).map_err(|_| "invalid auth")?
-                }
-                "proxy_id" => {
-                    ssh.proxy_id =
-                        serde_json::from_value(value.clone()).map_err(|_| "invalid proxy")?
-                }
-                "jump" => {
-                    ssh.jump_via.clear();
-                    ssh.jump_profile_ids =
-                        serde_json::from_value(value.clone()).map_err(|_| "invalid jump")?;
-                }
-                _ => continue,
             }
-            result.sources.insert(field.clone(), path.clone());
+            if fields.get("force_hosts").and_then(Value::as_bool) == Some(true) {
+                forced_values
+                    .entry(field.into())
+                    .or_insert_with(|| values[field].clone());
+            }
         }
     }
+    for (field, inherited_value) in &values {
+        let (value, source) = forced_values.get(field).unwrap_or(inherited_value);
+        if !ssh.inherit.contains(field) && !forced_values.contains_key(field) {
+            continue;
+        }
+        match field.as_str() {
+            "user" => {
+                ssh.user = serde_json::from_value(value.clone()).map_err(|_| "invalid user")?
+            }
+            "port" => {
+                ssh.port = serde_json::from_value(value.clone()).map_err(|_| "invalid port")?
+            }
+            "auth" => {
+                ssh.auth = serde_json::from_value(value.clone()).map_err(|_| "invalid auth")?
+            }
+            "proxy_id" => {
+                ssh.proxy_id = serde_json::from_value(value.clone()).map_err(|_| "invalid proxy")?
+            }
+            "jump" => {
+                ssh.jump_via.clear();
+                ssh.jump_profile_ids =
+                    serde_json::from_value(value.clone()).map_err(|_| "invalid jump")?;
+            }
+            _ => continue,
+        }
+        result.sources.insert(field.clone(), source.clone());
+    }
+    result.forced = forced_values
+        .into_iter()
+        .map(|(field, (_, source))| (field, source))
+        .collect();
     Ok(result)
 }
 
@@ -385,6 +411,120 @@ mod tests {
 
     fn profile(group: &str, inherit: Vec<&str>) -> Profile {
         serde_json::from_value(json!({"id":Uuid::new_v4(),"name":"target","group":group,"kind":"ssh","ssh":{"host":"host","user":"local","port":22,"auth":"Agent","inherit":inherit}})).unwrap()
+    }
+
+    #[test]
+    fn force_policies_are_independent_explicit_and_ancestor_first() {
+        let defaults = parse_defaults(
+            &json!({"a":{"user":"root","force_subgroups":true},"a/b":{"user":"child","port":2223}}),
+        )
+        .unwrap();
+        let ProfileKind::Ssh { ssh } =
+            effective_profile(&profile("a/b", vec!["user", "port"]), &defaults)
+                .unwrap()
+                .profile
+                .spec
+        else {
+            panic!()
+        };
+        assert_eq!(ssh.user, "root");
+        assert_eq!(ssh.port, 2223);
+        let original = profile("a/b", vec![]);
+        let ProfileKind::Ssh { ssh } = effective_profile(&original, &defaults)
+            .unwrap()
+            .profile
+            .spec
+        else {
+            panic!()
+        };
+        assert_eq!(ssh.user, "local");
+        let forced = parse_defaults(&json!({"a":{"user":"root","force_hosts":true},"a/b":{"user":"child","port":2223,"force_hosts":true}})).unwrap();
+        let result = effective_profile(&original, &forced).unwrap();
+        let ProfileKind::Ssh { ssh } = result.profile.spec else {
+            panic!()
+        };
+        assert_eq!(ssh.user, "root");
+        assert_eq!(ssh.port, 2223);
+        assert_eq!(result.sources["user"], "a");
+        assert_eq!(
+            serde_json::to_value(
+                effective_profile(&original, &GroupDefaults::new())
+                    .unwrap()
+                    .profile
+            )
+            .unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+    }
+
+    #[test]
+    fn force_preserves_explicit_direct_routes_and_rejects_reference_cycles() {
+        let original = profile("a/b", vec![]);
+        let defaults = parse_defaults(&json!({"a":{"proxy_id":null,"jump_profile_ids":[],"force_hosts":true},"a/b":{"proxy_id":Uuid::new_v4(),"jump_profile_ids":[Uuid::new_v4()],"force_hosts":true}})).unwrap();
+        let result = effective_profile(&original, &defaults).unwrap();
+        let ProfileKind::Ssh { ssh } = result.profile.spec else {
+            panic!()
+        };
+        assert!(ssh.proxy_id.is_none());
+        assert!(ssh.jump_profile_ids.is_empty());
+        assert_eq!(result.forced["jump"], "a");
+        let cyclic =
+            parse_defaults(&json!({"a":{"jump_profile_ids":[original.id],"force_hosts":true}}))
+                .unwrap();
+        assert!(effective_catalog(&[original], &cyclic, &[]).is_err());
+    }
+
+    #[test]
+    fn force_matrix_keeps_group_and_host_policies_independent() {
+        for force_subgroups in [false, true] {
+            for force_hosts in [false, true] {
+                let defaults = parse_defaults(&json!({"a":{"user":"root","force_subgroups":force_subgroups,"force_hosts":force_hosts},"a/b":{"user":"child"}})).unwrap();
+                for inherit in [vec![], vec!["user"]] {
+                    let result =
+                        effective_profile(&profile("a/b", inherit.clone()), &defaults).unwrap();
+                    let ProfileKind::Ssh { ssh } = result.profile.spec else {
+                        panic!()
+                    };
+                    assert_eq!(
+                        ssh.user,
+                        if force_hosts || (force_subgroups && !inherit.is_empty()) {
+                            "root"
+                        } else if inherit.is_empty() {
+                            "local"
+                        } else {
+                            "child"
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn force_does_not_promote_inherited_values() {
+        let defaults = parse_defaults(
+            &json!({"a":{"user":"parent"},"a/b":{"force_hosts":true,"force_subgroups":true}}),
+        )
+        .unwrap();
+        let result = effective_profile(&profile("a/b", vec![]), &defaults).unwrap();
+        let ProfileKind::Ssh { ssh } = result.profile.spec else {
+            panic!()
+        };
+        assert_eq!(ssh.user, "local");
+        assert!(result.forced.is_empty());
+    }
+
+    #[test]
+    fn force_flags_are_strict_and_never_weaken_auth_validation() {
+        for invalid in [
+            json!({"force_hosts":1}),
+            json!({"force_subgroups":"true"}),
+            json!({"force_typo":true}),
+            json!({"force_hosts":true,"auth":{"Password":{"secret":"secret"}}}),
+        ] {
+            assert!(parse_defaults(&json!({"a":invalid})).is_err());
+        }
+        assert!(parse_defaults(&json!({"a":{"force_hosts":false,"force_subgroups":true}})).is_ok());
     }
 
     #[test]

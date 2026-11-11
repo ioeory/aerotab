@@ -15,44 +15,26 @@ function functions(source, names, env, extra = '') {
   }).join('\n');
   return new Function(...Object.keys(env), transpile(`${code}\n${extra}\nreturn {${names}}`))(...Object.values(env));
 }
-function harness({ attach = true, fail = false, attachThrows = false } = {}) {
-  const calls = [], added = [], restored = [], errors = [];
-  const env = { rpc: { async call(method, params) { calls.push({ method, params }); if (fail && method === 'session.openSshProfile') throw Error('offline'); return { id: 'new', title: 'Fresh', kind: 'Ssh' }; } },
-    tabs: { add: s => added.push(s), addPane: (...args) => { added.push(args); if (attachThrows) throw Error('attach'); return attach; } },
-    recordRestore: (...args) => restored.push(args), requestAnimationFrame: fn => fn(), focusActivePane() {},
-    onError: e => errors.push(e), profileEndpointLabel: () => 'old endpoint', i18n: { t: key => key } };
-  return { ...functions(app, ['connectProfile'], env), calls, added, restored, errors };
-}
 const profile = { id: 'saved', kind: 'ssh', name: 'Saved', ssh: { host: 'stale', auth: 'Agent' } };
-test('profile split opens by ID, preserves anchor, and records only attached sessions', async () => {
-  const h = harness();
-  assert.equal(await h.connectProfile(profile, { tabId: 'tab', paneId: 'anchor', direction: 'col' }), true);
-  assert.deepEqual(h.calls[0], { method: 'session.openSshProfile', params: { profile_id: 'saved' } });
-  assert.deepEqual(h.added[0].slice(0, 1), ['tab']);
-  assert.deepEqual(h.added[0].slice(2), ['col', 'after', 'anchor']);
-  assert.equal(h.added[0][1].sshProfile, undefined, 'do not retain stale auth or inherited settings');
-  assert.equal(h.restored.length, 1);
+test('App delegates profile opens and captured picker targets to the shared optimistic coordinator', async () => {
+  const calls = [], deps = {};
+  const api = functions(app, ['connectProfile'], { profileConnectionDeps: () => deps,
+    openProfileConnection: (...args) => { calls.push(args); return Promise.resolve(true); } });
+  const target = { tabId: 'tab', paneId: 'anchor', direction: 'col' };
+  assert.equal(await api.connectProfile(profile, target), true);
+  assert.deepEqual(calls, [[profile, target, deps]]);
 });
-test('vanished target or attachment exception closes new session without recording restore', async () => {
-  for (const options of [{ attach: false }, { attachThrows: true }]) {
-    const h = harness(options);
-    assert.equal(await h.connectProfile(profile, { tabId: 'gone', paneId: 'gone', direction: 'row' }), false);
-    assert.deepEqual(h.calls.at(-1), { method: 'session.close', params: { id: 'new' } });
-    assert.equal(h.restored.length, 0);
-    assert.equal(h.errors.length, 1);
-  }
-});
-test('ordinary profile open remains a new tab and failures can retry', async () => {
-  const h = harness(); assert.equal(await h.connectProfile(profile), true); assert.equal(h.added[0].id, 'new');
-  const broken = harness({ fail: true }); assert.equal(await broken.connectProfile(profile), false); assert.equal(broken.added.length, 0);
-});
-test('remote desktops cannot create terminal splits but still open normally', async () => {
-  for (const kind of ['rdp', 'vnc']) {
-    const h = harness(); assert.equal(await h.connectProfile({ ...profile, kind }, { tabId: 'tab', paneId: 'anchor', direction: 'row' }), false);
-    assert.equal(h.calls.length, 0);
-    assert.equal(await h.connectProfile({ ...profile, kind }), true);
-    assert.equal(h.calls[0].method, 'remote.openProfile');
-  }
+test('Sidebar actual host entry delegates immediately, capturing split target without opening a second RPC', async () => {
+  const sidebar = read('../components/Sidebar.svelte');
+  const calls = [], recent = [], tab = { id: 'tab', kind: 'terminal' };
+  const api = functions(sidebar, ['openProfile'], { catalog: { recordRecent: id => recent.push(id) },
+    tabs: { activeId: 'tab', tabs: [tab], activePane: () => ({ id: 'anchor' }) },
+    connectProfile: (...args) => { calls.push(args); return Promise.resolve(true); } });
+  await api.openProfile(profile, 'split-down');
+  assert.deepEqual(calls[0], [profile, { tabId: 'tab', paneId: 'anchor', direction: 'col' }]);
+  await api.openProfile(profile); assert.equal(calls[1][1], undefined); assert.deepEqual(recent, ['saved', 'saved']);
+  assert.match(app, /<ResourceWorkspace[\s\S]*?\{connectProfile\}/);
+  assert.match(read('../components/hosts/ResourceWorkspace.svelte'), /<Sidebar[^>]*\{connectProfile\}/);
 });
 test('pane insertion honors explicit anchor after focus changes with no fallback or tab creation', () => {
   const source = read('./tabs.svelte.ts').replace(/import[^;]+;/g, '').replace('export const tabs', 'const tabs');

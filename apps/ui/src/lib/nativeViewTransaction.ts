@@ -37,6 +37,18 @@ export async function recoverNativeInputRollback(options: {
   }
 }
 
+type ViewFailureStage = 'prepare' | 'drain' | 'commit';
+
+/** Strict allowlists: never serialize caller objects, exception messages or identifiers. */
+export function nativeViewFailureDiagnostic(direction: unknown, stage: unknown, reason: unknown) {
+  return {
+    direction: direction === 'webview-to-native' || direction === 'native-to-webview' ? direction : 'unknown',
+    stage: stage === 'prepare' || stage === 'drain' || stage === 'commit' ? stage : 'unknown',
+    reason: typeof reason === 'string' && ['disposed', 'target-error', 'controller', 'config', 'geometry', 'visibility',
+      'epoch', 'host', 'generation', 'stale-receipt', 'operation-error'].includes(reason) ? reason : 'unknown',
+  };
+}
+
 /** One frame owner survives staging. Source input is quiesced only after target draw. */
 export async function runNativeViewTransaction<T>(options: {
   current: () => boolean;
@@ -45,7 +57,14 @@ export async function runNativeViewTransaction<T>(options: {
   drain: () => Promise<void>;
   commit: () => Promise<void>;
   rollback: () => Promise<void>;
+  diagnostic?: {
+    direction: 'webview-to-native' | 'native-to-webview';
+    reason: () => string;
+    report: (event: ReturnType<typeof nativeViewFailureDiagnostic>) => void;
+  };
 }): Promise<void> {
+  let stage: ViewFailureStage = 'prepare';
+  let receiptInvalid = false;
   const check = () => { if (!options.current()) throw new Error('view transaction superseded or session closed'); };
   try {
     check();
@@ -53,15 +72,26 @@ export async function runNativeViewTransaction<T>(options: {
     const receipt = await options.prepare();
     traceView({ stage: 'transaction.prepared' });
     check();
-    if (!options.validate(receipt)) throw new Error('stale target draw receipt');
+    if (!options.validate(receipt)) { receiptInvalid = true; throw new Error('stale target draw receipt'); }
+    stage = 'drain';
     traceView({ stage: 'transaction.drain' });
     await options.drain();
     traceView({ stage: 'transaction.drained' });
     check();
+    stage = 'commit';
     traceView({ stage: 'transaction.commit' });
     await options.commit();
     traceView({ stage: 'transaction.committed' });
   } catch (error) {
+    // Report once before rollback mutates the retained state. A diagnostic sink
+    // must never change rollback, input ownership, or the propagated exception.
+    try {
+      if (options.diagnostic) {
+        const reason = options.diagnostic.reason();
+        options.diagnostic.report(nativeViewFailureDiagnostic(options.diagnostic.direction, stage,
+          receiptInvalid ? 'stale-receipt' : reason === 'current' ? 'operation-error' : reason));
+      }
+    } catch { /* Best effort diagnostics only. */ }
     traceView({ stage: 'transaction.rollback' });
     await options.rollback();
     traceView({ stage: 'transaction.rolled-back' });

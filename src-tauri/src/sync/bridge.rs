@@ -7,7 +7,6 @@ use uuid::Uuid;
 
 use crate::plugins::wasm_host::PluginInfo;
 use crate::profile::{Profile, ProfileStore};
-use crate::secret;
 use crate::settings::{SettingEntry, SettingsStore};
 use crate::sync::{Group, RecordId, SyncEngine, SyncError};
 use crate::vault::{VaultEntry, VaultError, VaultStore};
@@ -112,30 +111,13 @@ pub struct BridgeNotes {
     pub notes_paused_dirty: bool,
 }
 
-const DEFAULT_VAULT_KEYRING_ACCOUNT: &str = "sync.vault";
-
-/// Keyring account used to auto-unlock the vault before credential sync.
-pub fn vault_keyring_account(settings: Option<&SettingsStore>) -> String {
-    let Some(store) = settings else {
-        return DEFAULT_VAULT_KEYRING_ACCOUNT.into();
-    };
-    let Ok(Some(value)) = store.get("sync") else {
-        return DEFAULT_VAULT_KEYRING_ACCOUNT.into();
-    };
-    value
-        .get("vaultKeyringAccount")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(DEFAULT_VAULT_KEYRING_ACCOUNT)
-        .to_string()
-}
-
-/// Unlock the vault from an explicit password and/or OS keyring (for sync / auto-sync).
+/// Compatibility helper: a locked vault requires an explicit password.
+/// Historical OS vault secrets are deliberately never read or deleted.
 pub async fn try_unlock_vault_for_sync(
     vault: &VaultStore,
-    settings: Option<&SettingsStore>,
+    _settings: Option<&SettingsStore>,
     password: Option<&str>,
-    keyring_account_override: Option<&str>,
+    _keyring_account_override: Option<&str>,
 ) -> Result<bool, VaultError> {
     if !vault.is_initialized()? {
         return Ok(false);
@@ -147,15 +129,7 @@ pub async fn try_unlock_vault_for_sync(
         vault.unlock(pw.as_bytes()).await?;
         return Ok(true);
     }
-    let account = keyring_account_override
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| vault_keyring_account(settings));
-    if let Ok(pw) = secret::get_master(Some(&account)) {
-        vault.unlock(pw.as_bytes()).await?;
-        return Ok(true);
-    }
-    Ok(false)
+    Err(VaultError::Locked)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -740,6 +714,69 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn session_only_unlock_requires_password_after_manual_lock() {
+        let dir = std::env::temp_dir().join(format!("aerotab-session-vault-{}", Uuid::new_v4()));
+        let vault = VaultStore::open_with_params(&dir, KdfParams::test_cheap()).unwrap();
+        vault.initialize(b"password").await.unwrap();
+        vault.lock().await;
+        assert!(matches!(
+            try_unlock_vault_for_sync(&vault, None, None, Some("sync.master")).await,
+            Err(VaultError::Locked)
+        ));
+        assert!(!vault.is_unlocked().await);
+        assert!(
+            try_unlock_vault_for_sync(&vault, None, Some("password"), None)
+                .await
+                .unwrap()
+        );
+        vault.lock().await;
+        assert!(matches!(
+            try_unlock_vault_for_sync(&vault, None, None, None).await,
+            Err(VaultError::Locked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn locked_vault_export_preserves_existing_credential_records() {
+        let dir = std::env::temp_dir().join(format!("aerotab-locked-vault-{}", Uuid::new_v4()));
+        let vault = VaultStore::open_with_params(&dir, KdfParams::test_cheap()).unwrap();
+        vault.initialize(b"pw").await.unwrap();
+        let entry = vault
+            .put(VaultEntry {
+                id: "saved-entry".into(),
+                label: "test".into(),
+                kind: crate::vault::EntryKind::Password,
+                username: None,
+                secret: "secret".into(),
+            })
+            .await
+            .unwrap();
+        let engine = engine();
+        export_credentials(Some(&vault), &engine, &mut BridgeNotes::default())
+            .await
+            .unwrap();
+        let before = engine
+            .get_local(Group::Credentials, credential_record_id(&entry.id))
+            .await;
+        vault.lock().await;
+        let mut notes = BridgeNotes::default();
+        export_credentials(Some(&vault), &engine, &mut notes)
+            .await
+            .unwrap();
+        assert!(notes.credentials_skipped_locked);
+        assert_eq!(
+            engine
+                .get_local(Group::Credentials, credential_record_id(&entry.id))
+                .await,
+            before
+        );
+        drop(vault);
+        let reopened = VaultStore::open_with_params(&dir, KdfParams::test_cheap()).unwrap();
+        assert!(reopened.is_initialized().unwrap());
+        assert!(!reopened.is_unlocked().await);
+    }
 
     struct NullBackend;
 

@@ -1,13 +1,15 @@
 import type { RpcClient } from './rpc';
 import type { StoredProfile } from './types';
-import type { MonitoringHostStats, MonitoringSample, MonitoringSnapshot, NetworkRate, DiskRate, MonitoringPanel } from './monitoringTypes';
+import type { MonitoringHostStats, MonitoringSample, MonitoringSnapshot, NetworkRate, DiskRate, MonitoringPanel, ContinuityReason } from './monitoringTypes';
 
 export function networkRates(stats: MonitoringHostStats, previous: MonitoringSample | undefined, at: number): NetworkRate[] {
   const seconds = previous ? (at - (previous.monotonicAt ?? previous.at)) / 1000 : 0;
   const valid = !!previous && seconds > 0 && (stats.uptime_seconds == null || previous.stats.uptime_seconds == null || stats.uptime_seconds >= previous.stats.uptime_seconds);
   return (stats.network_interfaces ?? []).map(row => {
     const old = valid ? previous?.stats.network_interfaces?.find(item => item.name === row.name) : undefined;
-    return { ...row, rx_bytes_per_second: counterRate(row.rx_bytes, old?.rx_bytes, seconds), tx_bytes_per_second: counterRate(row.tx_bytes, old?.tx_bytes, seconds) };
+    const invalid = [row.rx_bytes, row.tx_bytes, ...(old ? [old.rx_bytes, old.tx_bytes] : [])].some(value => !Number.isFinite(value) || value < 0);
+    const unavailableReason: NetworkRate['unavailableReason'] = invalid ? 'invalidCounter' : !valid ? 'baselineUnavailable' : !old ? 'newInterface' : row.rx_bytes < old.rx_bytes || row.tx_bytes < old.tx_bytes ? 'counterReset' : undefined;
+    return { ...row, unavailableReason, rx_bytes_per_second: counterRate(row.rx_bytes, old?.rx_bytes, seconds), tx_bytes_per_second: counterRate(row.tx_bytes, old?.tx_bytes, seconds) };
   });
 }
 function counterRate(value: number, old: number | undefined, seconds: number): number | null {
@@ -38,10 +40,12 @@ function endpoint(ssh: Extract<StoredProfile, { kind: 'ssh' }>['ssh']): unknown 
 interface Entry {
   leases: Map<symbol, number>; snapshot: MonitoringSnapshot; generation: number; inFlight: boolean;
   timer?: ReturnType<typeof setTimeout>; due: boolean; continuous: boolean;
+  continuityReason?: ContinuityReason; diagnosticAt?: number; stream: number; interruptions: Set<ContinuityReason>;
 }
 interface Options {
   now?: () => number; monotonicNow?: () => number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout;
   maxConcurrent?: number; maxSamples?: number; maxAgeMs?: number;
+  onDiagnostic?: (snapshot: MonitoringSnapshot, stream: number, interruptions: ContinuityReason[]) => void;
 }
 /** A single queue per RPC client; independent UI leases never stop each other. */
 export class MonitoringService {
@@ -57,7 +61,10 @@ export class MonitoringService {
   private maxSamples: number;
   private maxAgeMs: number;
   private paused = false;
+  private nextStream = 0;
+  private onDiagnostic?: Options['onDiagnostic'];
   constructor(private rpc: RpcClient, options: Options = {}) {
+    this.onDiagnostic = options.onDiagnostic;
     this.monotonicNow = options.monotonicNow ?? (options.now ? options.now : () => performance.now());
     this.now = options.now ?? Date.now; this.timer = options.setTimer ?? setTimeout; this.clear = options.clearTimer ?? clearTimeout;
     this.maxConcurrent = Math.max(1, options.maxConcurrent ?? 4); this.maxSamples = Math.max(1, options.maxSamples ?? 3600); this.maxAgeMs = options.maxAgeMs ?? 3600000;
@@ -76,6 +83,7 @@ export class MonitoringService {
   }
   private resetEntry(entry: Entry): void {
     if (entry.timer) this.clear(entry.timer); entry.timer = undefined;
+    entry.continuityReason = 'profileChanged'; entry.interruptions.add('profileChanged');
     entry.generation++; entry.continuous = false; entry.due = entry.leases.size > 0;
     entry.snapshot = { history: [], sampling: false, failures: 0 };
   }
@@ -91,6 +99,7 @@ export class MonitoringService {
     this.paused = paused;
     for (const entry of this.entries.values()) {
       if (entry.timer) this.clear(entry.timer); entry.timer = undefined;
+      entry.continuityReason = 'windowPause'; entry.interruptions.add('windowPause');
       entry.continuous = false; entry.generation++; entry.due = !paused && entry.leases.size > 0;
       entry.snapshot = { ...entry.snapshot, sampling: false };
     }
@@ -99,16 +108,17 @@ export class MonitoringService {
   isPaused(): boolean { return this.paused; }
   subscribe(id: string, intervalMs = 5000): () => void {
     let entry = this.entries.get(id);
-    if (!entry) { entry = { leases: new Map(), snapshot: { history: [], sampling: false, failures: 0 }, generation: 0, inFlight: false, due: false, continuous: false }; this.entries.set(id, entry); }
+    if (!entry) { entry = { leases: new Map(), snapshot: { history: [], sampling: false, failures: 0 }, generation: 0, inFlight: false, due: false, continuous: false, stream: ++this.nextStream, interruptions: new Set() }; this.entries.set(id, entry); }
     const lease = Symbol(id); const first = entry.leases.size === 0;
     entry.leases.set(lease, Math.max(1000, intervalMs));
-    if (first) { entry.continuous = false; entry.generation++; entry.due = true; entry.snapshot = { ...entry.snapshot, error: undefined, failures: 0 }; }
+    if (first) { entry.continuityReason ??= entry.snapshot.latest ? 'subscriptionRestart' : 'firstSample'; entry.continuous = false; entry.generation++; entry.due = true; entry.snapshot = { ...entry.snapshot, error: undefined, failures: 0 }; }
     else if (entry.timer) { this.clear(entry.timer); entry.timer = undefined; this.schedule(entry); }
     this.drain();
     let released = false;
     return () => {
       if (released) return; released = true; entry!.leases.delete(lease);
       if (!entry!.leases.size) {
+        entry!.continuityReason = 'subscriptionRestart'; entry!.interruptions.add('subscriptionRestart');
         entry!.generation++; entry!.due = false;
         if (entry!.timer) this.clear(entry!.timer); entry!.timer = undefined;
         entry!.snapshot = { ...entry!.snapshot, sampling: false };
@@ -150,15 +160,27 @@ export class MonitoringService {
       const previous = changedHost || entry.snapshot.failures || !entry.continuous ? undefined : latest;
       entry.continuous = true;
       const reboot = previous?.stats.uptime_seconds != null && stats.uptime_seconds != null && stats.uptime_seconds < previous.stats.uptime_seconds;
-      const sample: MonitoringSample = { at, monotonicAt, breakBefore: !previous || reboot, stats, probeMs: Math.max(0, monotonicAt - start), network_rates: networkRates(stats, previous, monotonicAt), disk_rates: diskRates(stats, previous, monotonicAt) };
+      const continuityReason: ContinuityReason | undefined = changedHost ? 'hostChanged' : entry.snapshot.failures ? 'probeFailed' : reboot ? 'reboot' : !previous ? entry.continuityReason ?? 'firstSample' : monotonicAt <= (previous.monotonicAt ?? previous.at) ? 'invalidInterval' : undefined;
+      if (continuityReason) entry.interruptions.add(continuityReason);
+      entry.continuityReason = undefined;
+      const sample: MonitoringSample = { continuityReason, at, monotonicAt, breakBefore: !previous || reboot, stats, probeMs: Math.max(0, monotonicAt - start), network_rates: networkRates(stats, previous, monotonicAt), disk_rates: diskRates(stats, previous, monotonicAt) };
       const history = [...(changedHost ? [] : entry.snapshot.history), sample].filter(s => monotonicAt - (s.monotonicAt ?? s.at) <= this.maxAgeMs).slice(-this.maxSamples);
       entry.snapshot = { history, latest: sample, sampling: false, failures: 0 };
     } catch {
       // Never expose server errors: authentication failures can contain sensitive payloads.
-      if (accept()) entry.snapshot = { ...entry.snapshot, error: 'probeFailed', failures: entry.snapshot.failures + 1, sampling: false };
+      if (accept()) { entry.interruptions.add('probeFailed'); entry.snapshot = { ...entry.snapshot, error: 'probeFailed', failures: entry.snapshot.failures + 1, sampling: false }; }
     } finally {
       this.active--; entry.inFlight = false;
-      if (accept()) this.schedule(entry);
+      if (accept()) {
+        this.schedule(entry);
+        const now = this.monotonicNow();
+        // At most one event per minute per anonymous stream; retain intervening breaks.
+        if (this.onDiagnostic && (entry.diagnosticAt == null || now - entry.diagnosticAt >= 60000)) {
+          entry.diagnosticAt = now;
+          try { this.onDiagnostic(entry.snapshot, entry.stream, [...entry.interruptions]); } catch { /* diagnostics must not interrupt sampling */ }
+          entry.interruptions.clear();
+        }
+      }
       this.emit(); this.drain();
     }
   }

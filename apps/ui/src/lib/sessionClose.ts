@@ -32,7 +32,7 @@ function drainCloseQueue(rpc: RpcClient): void {
 
 /** Close sessions in the background without blocking the UI (bounded concurrency). */
 export function closeSessionsInBackground(rpc: RpcClient, sessionIds: string[]): void {
-  const unique = [...new Set(sessionIds.filter((id) => id.length > 0))];
+  const unique = [...new Set(sessionIds.filter((id) => id.length > 0 && !id.startsWith('pending-profile:')))];
   if (unique.length === 0) return;
   for (const id of unique) {
     if (queuedIds.has(id)) continue;

@@ -2,9 +2,9 @@
   import { Cpu, MemoryStick, HardDrive, Network } from '@lucide/svelte';
   import { sparklinePaths } from '../lib/systemDetails';
   import { monitoringMessage as m, monitoringNumber as number } from '../lib/monitoringMessages';
-  let { label, value, percent, subtitle, kind, points = [] }: {
+  let { label, value, percent, subtitle, kind, trendStatus, points = [] }: {
     label: string; value: string; percent?: number | null; subtitle: string;
-    kind: 'cpu' | 'memory' | 'disk' | 'network';
+    kind: 'cpu' | 'memory' | 'disk' | 'network'; trendStatus?: string;
     points?: { at: number; value: number | null | undefined; breakBefore?: boolean }[];
   } = $props();
   const Icon = $derived(({ cpu: Cpu, memory: MemoryStick, disk: HardDrive, network: Network })[kind]);
@@ -29,7 +29,7 @@
       <svg viewBox="0 0 200 34" preserveAspectRatio="none" role="img" aria-label={`${label} · ${m('actualRange')}`}>
         {#each paths as path, index (index)}<path d={path} />{/each}
       </svg>
-    {:else}<span>{m('trendWaiting')}</span>{/if}
+    {:else}<span>{trendStatus ?? m('trendWaiting')}</span>{/if}
   </div>
 </article>
 <style>

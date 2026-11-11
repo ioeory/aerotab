@@ -4495,17 +4495,25 @@ async fn run_sync_now_cycle(
     } else {
         None
     };
-    if groups.contains(&Group::Credentials) {
-        if let Some(vault) = vault.as_ref() {
-            let _ = crate::sync::bridge::try_unlock_vault_for_sync(
-                vault,
-                settings.as_ref(),
-                None,
-                None,
-            )
-            .await;
-        }
-    }
+    // Locked credentials must not enter reconciliation (including previously cached
+    // plaintext records). Other approved groups can continue syncing normally.
+    let credentials_requested = groups.contains(&Group::Credentials);
+    let credentials_initialized = match vault.as_ref() {
+        Some(vault) => vault
+            .is_initialized()
+            .map_err(|e| internal(e.to_string()))?,
+        None => false,
+    };
+    let credentials_unlocked = match vault.as_ref() {
+        Some(vault) => vault.is_unlocked().await,
+        None => false,
+    };
+    let effective: Vec<_> = groups
+        .iter()
+        .copied()
+        .filter(|g| *g != Group::Credentials || (credentials_initialized && credentials_unlocked))
+        .collect();
+    let groups = effective.as_slice();
     let mut bridge_notes = crate::sync::bridge::BridgeNotes::default();
     if let (Some(profiles), Some(settings)) = (&profiles, &settings) {
         bridge_notes = crate::sync::bridge::export_locals(
@@ -4519,6 +4527,10 @@ async fn run_sync_now_cycle(
         .await
         .map_err(|e| internal(e.to_string()))?;
     }
+    bridge_notes.credentials_skipped_locked |=
+        credentials_requested && credentials_initialized && !credentials_unlocked;
+    bridge_notes.credentials_skipped_uninitialized |=
+        credentials_requested && !credentials_initialized;
     let git = st.git_backend.lock().await.clone();
     if let Some(g) = &git {
         let changed = g
@@ -4695,6 +4707,8 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
         dispatcher.register("vault.lock", move |_p| {
             let st = st.clone();
             async move {
+                // Finish an in-flight credential cycle before acknowledging manual lock.
+                let _operation = st.sync_operation.lock().await;
                 let store = require_vault(&st).await?;
                 store.lock().await;
                 Ok(Value::Null)
@@ -5716,6 +5730,78 @@ mod tests {
         );
         assert!(!root.join("v2/snapshots/latest").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn session_only_locked_credentials_skip_cycle_but_other_groups_sync() {
+        let root = std::env::temp_dir().join(format!("aerotab-session-sync-{}", Uuid::new_v4()));
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let vault =
+            crate::vault::VaultStore::open_with_params(root.join("vault"), KdfParams::test_cheap())
+                .unwrap();
+        vault.initialize(b"pw").await.unwrap();
+        *state.vault.lock().await = Some(vault.clone());
+        let configured = d.dispatch(req("sync.configureGit", json!({"repo_path":root.join("git"),"master_password":"sync-password","test_cheap_kdf":true}))).await;
+        assert!(configured.error.is_none(), "{:?}", configured.error);
+        let groups = vec![Group::Appearance, Group::Credentials];
+        let preview = d
+            .dispatch(req("sync.preview", json!({"groups":groups})))
+            .await;
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        let token =
+            serde_json::from_value(preview.result.unwrap()["previewToken"].clone()).unwrap();
+        require_completed_sync_setup(&state, &groups, Some(token))
+            .await
+            .unwrap();
+        assert!(d
+            .dispatch(req("vault.lock", json!({})))
+            .await
+            .error
+            .is_none());
+        let refused = d
+            .dispatch(req(
+                "sync.ensureVaultUnlock",
+                json!({"account":"sync.master"}),
+            ))
+            .await;
+        assert!(
+            refused.error.is_some(),
+            "no-password compatibility RPC must reject locked vault"
+        );
+        let engine = require_engine(&state).await.unwrap();
+        let cached_id = RecordId(Uuid::new_v4());
+        engine
+            .put_local(
+                Group::Credentials,
+                cached_id,
+                b"cached plaintext must not upload".to_vec(),
+            )
+            .await
+            .unwrap();
+        let (results, bridge) = run_sync_now_cycle(&state, &groups, None).await.unwrap();
+        assert!(bridge.credentials_skipped_locked);
+        assert!(engine
+            .snapshot_group(Group::Credentials)
+            .await
+            .iter()
+            .any(|(id, record)| *id == cached_id && !record.tombstone));
+        engine
+            .delete_local(Group::Credentials, cached_id)
+            .await
+            .unwrap();
+        assert!(results.iter().any(|(g, _)| *g == Group::Appearance));
+        assert!(results.iter().all(|(g, _)| *g != Group::Credentials));
+        assert!(!vault.is_unlocked().await);
+        assert!(d
+            .dispatch(req("sync.ensureVaultUnlock", json!({"password":"pw"})))
+            .await
+            .error
+            .is_none());
+        let (results, bridge) = run_sync_now_cycle(&state, &groups, None).await.unwrap();
+        assert!(!bridge.credentials_skipped_locked);
+        assert!(results.iter().any(|(g, _)| *g == Group::Credentials));
     }
 
     #[tokio::test]

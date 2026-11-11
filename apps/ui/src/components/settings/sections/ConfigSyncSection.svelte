@@ -156,7 +156,6 @@
   let vaultPassword = $state('');
   let vaultConfirmPassword = $state('');
   let vaultKeyringAccount = $state('sync.vault');
-  let vaultSecretSaved = $state(false);
   let vaultBusy = $state(false);
   let vaultInfo = $state('');
   let vaultStatus = $state<{ configured: boolean; initialized: boolean; unlocked: boolean }>({
@@ -655,11 +654,6 @@
     }
   }
 
-  function vaultSecretParams(): { account?: string } {
-    const account = vaultKeyringAccount.trim();
-    return account ? { account } : { account: 'sync.vault' };
-  }
-
   async function refreshVaultStatus() {
     try {
       vaultStatus = await rpc.call('vault.status', {});
@@ -668,55 +662,15 @@
     }
   }
 
-  async function refreshVaultSecretStatus() {
-    vaultBusy = true;
-    try {
-      const r = await rpc.call<{ has: boolean }>('secret.hasMaster', vaultSecretParams());
-      vaultSecretSaved = r.has;
-      vaultInfo = r.has ? i18n.t('sync.vaultSecretSaved') : i18n.t('sync.vaultSecretNotSaved');
-    } catch (e) {
-      vaultInfo = '';
-      onError(`vault secret status: ${(e as Error).message}`);
-    } finally {
-      vaultBusy = false;
-    }
-  }
-
-  async function saveVaultSecret() {
+  async function unlockVaultNow() {
     if (!vaultPassword) {
       vaultInfo = i18n.t('sync.vaultPasswordRequired');
       return;
     }
     vaultBusy = true;
     try {
-      await rpc.call('secret.setMaster', { ...vaultSecretParams(), secret: vaultPassword });
-      await refreshVaultSecretStatus();
-    } catch (e) {
-      onError(`vault secret save: ${(e as Error).message}`);
-    } finally {
-      vaultBusy = false;
-    }
-  }
-
-  async function clearVaultSecret() {
-    if (!(await appConfirm(i18n.t('sync.vaultForgetConfirm')))) return;
-    vaultBusy = true;
-    try {
-      await rpc.call('secret.clearMaster', vaultSecretParams());
-      await refreshVaultSecretStatus();
-    } catch (e) {
-      onError(`vault secret clear: ${(e as Error).message}`);
-    } finally {
-      vaultBusy = false;
-    }
-  }
-
-  async function unlockVaultNow() {
-    vaultBusy = true;
-    try {
       const r = await rpc.call<{ unlocked: boolean; initialized: boolean }>('sync.ensureVaultUnlock', {
         password: vaultPassword || undefined,
-        account: vaultKeyringAccount.trim() || undefined,
       });
       if (!r.initialized) {
         vaultInfo = i18n.t('sync.vaultNotInitialized');
@@ -761,6 +715,8 @@
   }
 
   async function lockVaultForSync() {
+    vaultPassword = '';
+    vaultConfirmPassword = '';
     try {
       await rpc.call('vault.lock', {});
       vaultInfo = i18n.t('sync.vaultLocked');
@@ -770,31 +726,13 @@
     }
   }
 
-  /** Unlock vault when Credentials group is enabled (keyring or typed password). */
+  /** Credential sync only uses a vault already manually unlocked this process. */
   async function ensureVaultForSync(): Promise<boolean> {
     if (!enabledGroups.Credentials) return true;
     await refreshVaultStatus();
     if (vaultStatus.unlocked) return true;
-    try {
-      const r = await rpc.call<{ unlocked: boolean; initialized: boolean }>('sync.ensureVaultUnlock', {
-        password: vaultPassword || undefined,
-        account: vaultKeyringAccount.trim() || undefined,
-      });
-      if (r.unlocked) {
-        vaultPassword = '';
-        await refreshVaultStatus();
-        return true;
-      }
-      if (!r.initialized) {
-        setSyncInfo('err', i18n.t('sync.vaultNotInitialized'));
-      } else {
-        setSyncInfo('err', i18n.t('sync.vaultUnlockRequired'));
-      }
-      return false;
-    } catch (e) {
-      setSyncInfo('err', (e as Error).message);
-      return false;
-    }
+    setSyncInfo('err', i18n.t(vaultStatus.initialized ? 'sync.vaultUnlockRequired' : 'sync.vaultNotInitialized'));
+    return false;
   }
 
   async function clearMasterSecret() {
@@ -1130,7 +1068,6 @@
       await loadPersisted();
       await refreshSecretStatus();
       await refreshVaultStatus();
-      await refreshVaultSecretStatus();
       await refreshGitHttpsSecretStatus();
       if (await isSyncEngineConfigured(rpc)) {
         await refreshStatus();
@@ -1503,9 +1440,6 @@
         <label for="cs-vault-pw" class="lbl">{i18n.t('sync.vaultPassword')}</label>
         <input id="cs-vault-pw" type="password" bind:value={vaultPassword} class="input"
           placeholder={i18n.t('sync.vaultPasswordPlaceholder')} />
-        <label for="cs-vault-keyring" class="lbl">{i18n.t('sync.vaultKeyringAccount')}</label>
-        <input id="cs-vault-keyring" bind:value={vaultKeyringAccount} oninput={markDirty} class="input"
-          placeholder="sync.vault" />
         <div class="flex gap-2 items-center pt-2 flex-wrap">
           <button type="button" class="btn-secondary" disabled={vaultBusy}
             onclick={() => void unlockVaultNow()}>
@@ -1515,24 +1449,9 @@
             onclick={() => void lockVaultForSync()}>
             {i18n.t('sync.vaultLock')}
           </button>
-          <button type="button" class="btn-secondary" disabled={vaultBusy || !vaultPassword}
-            onclick={() => void saveVaultSecret()}>
-            {i18n.t('sync.vaultSaveToKeyring')}
-          </button>
-          <button type="button" class="btn-secondary" disabled={vaultBusy}
-            onclick={() => void refreshVaultSecretStatus()}>
-            {i18n.t('sync.vaultCheckKeyring')}
-          </button>
-          <button type="button" class="btn-secondary" disabled={vaultBusy || !vaultSecretSaved}
-            onclick={() => void clearVaultSecret()}>
-            {i18n.t('sync.vaultForgetKeyring')}
-          </button>
         </div>
         {#if vaultInfo}
           <div class="help mt-1">{vaultInfo}</div>
-        {/if}
-        {#if vaultSecretSaved && !vaultPassword}
-          <div class="help">{i18n.t('sync.vaultKeyringAutoHint')}</div>
         {/if}
       {/if}
     </div>
