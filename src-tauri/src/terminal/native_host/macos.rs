@@ -808,6 +808,12 @@ impl Attachment {
             generation: self.generation,
             geometry: self.geometry,
             visible: self.visible,
+            focused: !self.view.isHiddenOrHasHiddenAncestor()
+                && self.view.window().is_some_and(|w| {
+                    w.isKeyWindow()
+                        && w.firstResponder()
+                            .is_some_and(|r| std::ptr::eq(&*r, &*self.view as &NSResponder))
+                }),
             last_draw_seq: self.last_seq,
             revision: self.barrier.revision,
             drawn_revision: self.barrier.drawn.map(|v| v.0),

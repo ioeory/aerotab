@@ -1,4 +1,30 @@
-/** Bounded in-memory geometry only; exported by the existing diagnostics action. */
+/** Bounded in-memory metadata only; never record terminal content or credentials. */
+export interface TerminalPipelineState {
+  receivedFrames: number;
+  paintedFrames: number;
+  lastFrameAt: number;
+  lastPaintAt: number;
+  awaitingFullBase: boolean;
+  captureInFlight: boolean;
+  paintPending: boolean;
+  disposed: boolean;
+  backend: string;
+}
+const pipelines = new Set<() => TerminalPipelineState>();
+export function registerTerminalPipeline(read: () => TerminalPipelineState): () => void {
+  pipelines.add(read);
+  return () => { pipelines.delete(read); };
+}
+export function terminalPipelineSnapshot(): TerminalPipelineState[] {
+  return [...pipelines].slice(-128).map(read => {
+    const state = read();
+    // Explicit allowlist: do not spread objects that may gain sensitive fields.
+    return { receivedFrames: state.receivedFrames, paintedFrames: state.paintedFrames,
+      lastFrameAt: state.lastFrameAt, lastPaintAt: state.lastPaintAt,
+      awaitingFullBase: state.awaitingFullBase, captureInFlight: state.captureInFlight,
+      paintPending: state.paintPending, disposed: state.disposed, backend: state.backend };
+  });
+}
 interface GeometryEvent {
   reason: 'fit' | 'font' | 'theme' | 'dpr' | 'draw' | 'capture' | 'cancel';
   backend: string;

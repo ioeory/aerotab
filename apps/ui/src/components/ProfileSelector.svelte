@@ -131,6 +131,8 @@
 
   // ----- load -----
   onMount(() => {
+    // Focus before the catalog/discover RPCs: typing must work as soon as the picker opens.
+    scheduleModalFieldFocus(() => inputEl?.focus());
     void (async () => {
       try {
         const catalog = getProfileCatalog(rpc);
@@ -150,8 +152,6 @@
         const r = await rpc.call<{ value: unknown }>('settings.get', { key: 'recentProfiles' });
         if (Array.isArray(r.value)) recentIds = r.value.filter((x) => typeof x === 'string') as string[];
       } catch { recentIds = []; }
-      await tick();
-      scheduleModalFieldFocus(() => inputEl?.focus());
     })();
   });
 

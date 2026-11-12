@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["src-tauri", "tools/bench"]
+exclude = ["third_party/tao"]
 
 [workspace.package]
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ioe/aerotab"
@@ -62,6 +63,11 @@ base64 = "0.22"
 
 # WASM plugin host (pure-Rust interpreter — no JIT, cross-compiles cleanly).
 wasmi = "0.40"
+
+[patch.crates-io]
+# Windows keyboard re-entrancy deadlock fix backported to tao 0.35.2.
+# Drop once tauri-runtime-wry depends on tao >= 0.36. See third_party/tao/PATCHES.md.
+tao = { path = "third_party/tao" }
 
 [profile.release]
 lto = "thin"

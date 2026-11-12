@@ -47,7 +47,7 @@ async function fixture({ confirm = async () => true, occluded = false, delayShow
     useNative: true, nativeCtl: ctl, bracketedPaste: false, term: null, sendSessionInput: () => { throw Error('unexpected xterm dispatch'); },
   });
   let blocked = false;
-  const originalCanFocusSurface = production(view.slice(view.indexOf('  function canFocusSurface()'), view.indexOf('  /** Commit this request')) + '\nreturn canFocusSurface;', {
+  const originalCanFocusSurface = production(view.slice(view.indexOf('  function canTakeFocus('), view.indexOf('  /** Commit this request')) + '\nreturn canFocusSurface;', {
     active: true, visible: true, occluded, globalOccluded: false, document: { hidden: false }, disposed: false, surfaceError: '', ackRecovering:false, rollbackPending:false,
   });
   const canFocusSurface = () => !blocked && originalCanFocusSurface();
@@ -86,7 +86,7 @@ test('committed real controller receives policy-approved native paste once throu
 test('retired WebView key, DOM paste, IME input and ordinary controller paste cannot write', async () => {
   const f = await fixture();
   try {
-    await f.ctl.onKey({ key: 'a' }); f.ctl.onPaste({ clipboardData: { getData: () => 'dom' }, preventDefault() {} });
+    await f.ctl.onKey({ key: 'a' }); f.ctl.onPaste({ clipboardData: { getData: () => 'dom' }, preventDefault() {}, stopPropagation() {} });
     await f.ctl.onImeInput({ inputType: 'insertText', data: 'ime', isComposing: false });
     await f.ctl.onCompositionEnd({ data: 'composed' }); await f.ctl.paste('ordinary');
     assert.deepEqual(f.writes, []);
@@ -160,9 +160,10 @@ test('modal close tick marks busy production sync dirty while canPaste waits old
  let f,sync;const entered=deferred();
  const state={busy:false,dirty:false,disposed:false,surfaceError:'',surface:{getBoundingClientRect:()=>({left:0,top:0,width:640,height:480})},
   visible:true,occluded:false,globalOccluded:false,stagingWebview:false,committedWebview:false,stagingNative:false,
-  started:true,lastGeometry:geometry,lastConfig:'',lastUpdate:'',ackRecovering:false,inputAcknowledged:false,surfaceReady:true,focusRestored:false,
+  started:true,lastGeometry:geometry,lastConfig:'',lastUpdate:'',ackRecovering:false,inputAcknowledged:false,surfaceReady:true,focusRestored:false,focusRequest:0,
   nativeViewGeometry:r=>({x:r.left,y:r.top,width:r.width,height:r.height}),nativeViewGeometryEquals,viewConfig:()=>cfg,
   canFocusSurface:()=>!state.occluded,document:{hidden:false},window:{innerWidth:1000,innerHeight:1000,devicePixelRatio:1},
+  completeNativeFocusHandoff() {},
   controller:null,onReady:()=>{},fail:e=>{throw e;}};
  f=await fixture({delayHide:true,afterTick:async()=>{sync();},confirm:async()=>{
    state.occluded=true;void sync();await f.hideStarted;state.occluded=false;return true;

@@ -1112,6 +1112,7 @@ pub fn state(id: Uuid) -> Result<ViewState, HostError> {
             generation: v.generation,
             geometry: v.geometry,
             visible: v.visible,
+            focused: v.area.has_focus(),
             last_draw_seq: v.last_seq,
             revision: v.revision.applied,
             drawn_revision: v.revision.drawn,

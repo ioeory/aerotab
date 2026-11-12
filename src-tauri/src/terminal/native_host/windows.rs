@@ -1,5 +1,10 @@
 //! Main-thread Win32 child host; no terminal parser, PTY or external process here.
-use super::{input, windows_policy, windows_renderer::Renderer, *};
+use super::{
+    focus_diagnostics::{self as focus_diag, Phase},
+    input, windows_policy,
+    windows_renderer::Renderer,
+    *,
+};
 use crate::terminal::engine::TerminalEngine;
 use std::{cell::RefCell, sync::Arc};
 use tauri::{Emitter, Manager};
@@ -58,6 +63,41 @@ impl Drop for Attachment {
         self.lifetime.invalidate();
         if self.hwnd.is_null() {
             return;
+        }
+        let had_focus = unsafe { GetFocus() == self.hwnd };
+        let parent = self.parent;
+        focus_diag::record(
+            Phase::Destroy,
+            self.session_id,
+            Some(self.generation),
+            self.hwnd as usize,
+            parent as usize,
+            0,
+            None,
+        );
+        // Hand focus back before hide/destroy so GetFocus() is never left NULL.
+        if windows_policy::release_focus_to_parent(had_focus, false) {
+            focus_diag::record(
+                Phase::ReleaseParent,
+                self.session_id,
+                Some(self.generation),
+                self.hwnd as usize,
+                parent as usize,
+                0,
+                None,
+            );
+            unsafe {
+                SetFocus(parent);
+            }
+            focus_diag::record(
+                Phase::ReleasedParent,
+                self.session_id,
+                Some(self.generation),
+                self.hwnd as usize,
+                parent as usize,
+                0,
+                None,
+            );
         }
         unsafe {
             KillTimer(self.hwnd, 1);
@@ -661,12 +701,44 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         }
         return unsafe { DefWindowProcW(hwnd, msg, w, l) };
     }
+    let identity = unsafe { &*callback };
+    let phase = match msg {
+        WM_LBUTTONDOWN => Some(Phase::MouseDown),
+        WM_SETFOCUS => Some(Phase::SetFocus),
+        WM_KILLFOCUS => Some(Phase::KillFocus),
+        _ => None,
+    };
+    if let Some(phase) = phase.filter(|_| focus_diag::is_enabled()) {
+        focus_diag::record(
+            phase,
+            identity.id,
+            Some(identity.generation),
+            hwnd as usize,
+            unsafe { GetParent(hwnd) } as usize,
+            0,
+            None,
+        );
+    }
+    if msg == WM_MOUSEACTIVATE && focus_diag::is_enabled() {
+        // This message previously fell through to DefWindowProcW; preserve the
+        // exact delegation and return value, only observe its result.
+        let result = unsafe { DefWindowProcW(hwnd, msg, w, l) };
+        focus_diag::record(
+            Phase::MouseActivate,
+            identity.id,
+            Some(identity.generation),
+            hwnd as usize,
+            unsafe { GetParent(hwnd) } as usize,
+            0,
+            Some(result),
+        );
+        return result;
+    }
     if msg == WM_LBUTTONDOWN {
         unsafe {
             SetFocus(hwnd);
         }
     }
-    let identity = unsafe { &*callback };
     if msg == WM_APP + 1 {
         route_key(identity.id, identity.generation);
         return 0;
@@ -1015,6 +1087,44 @@ pub fn state(id: Uuid) -> Result<ViewState, HostError> {
     VIEWS.with(|m| m.borrow().get(&id).map(|v| v.state()).ok_or_else(missing))
 }
 pub fn focus(id: Uuid) -> Result<(), HostError> {
+    focus_diagnostic(id, 0)
+}
+pub fn focus_diagnostic(id: Uuid, request: u64) -> Result<(), HostError> {
+    if !focus_diag::is_enabled() {
+        return focus_inner(id);
+    }
+    let identity = VIEWS.with(|m| {
+        m.borrow()
+            .get(&id)
+            .map(|v| (v.generation, v.hwnd, v.parent))
+    });
+    let (generation, hwnd, parent) = identity.map(|(g, h, p)| (Some(g), h, p)).unwrap_or((
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    ));
+    focus_diag::record(
+        Phase::Executing,
+        id,
+        generation,
+        hwnd as usize,
+        parent as usize,
+        request,
+        None,
+    );
+    let result = focus_inner(id);
+    focus_diag::record(
+        Phase::Result,
+        id,
+        generation,
+        hwnd as usize,
+        parent as usize,
+        request,
+        Some(isize::from(result.is_ok())),
+    );
+    result
+}
+fn focus_inner(id: Uuid) -> Result<(), HostError> {
     let hwnd = VIEWS.with(|m| {
         let m = m.borrow();
         let v = m.get(&id).ok_or_else(missing)?;
@@ -1037,7 +1147,15 @@ pub fn update(
     visible: bool,
     cfg: Option<ViewConfig>,
 ) -> Result<ViewState, HostError> {
-    VIEWS.with(|m| {
+    struct Placement {
+        hwnd: HWND,
+        parent: HWND,
+        physical: [i32; 4],
+        visible: bool,
+        enabled: bool,
+        release: bool,
+    }
+    let (state, placement) = VIEWS.with(|m| {
         let mut m = m.borrow_mut();
         let v = m.get_mut(&id).ok_or_else(missing)?;
         if v.thread != unsafe { GetCurrentThreadId() } {
@@ -1069,15 +1187,92 @@ pub fn update(
             v.composing = false;
         }
         v.resize();
-        v.place()?;
+        let had_focus = unsafe { GetFocus() == v.hwnd };
+        // Do not EnableWindow(0) merely because input is not ready: active() already
+        // discards keystrokes via flow.ready. Disable only when hidden or errored.
+        let enabled = windows_policy::surface_input_enabled(visible, v.error.is_some());
+        let physical = windows_policy::physical(v.geometry, v.scale)?;
+        let release = windows_policy::release_focus_to_parent(had_focus, enabled);
+        Ok((
+            v.state(),
+            Placement {
+                hwnd: v.hwnd,
+                parent: v.parent,
+                physical,
+                visible,
+                enabled,
+                release,
+            },
+        ))
+    })?;
+    focus_diag::record(
+        Phase::Update,
+        id,
+        Some(state.generation),
+        placement.hwnd as usize,
+        placement.parent as usize,
+        0,
+        Some(isize::from(placement.visible)),
+    );
+    // Outside the manager borrow (WndProc try_borrow_mut): return OS focus to the
+    // WebView parent *before* hide/disable so GetFocus() never stays NULL.
+    if placement.release {
+        focus_diag::record(
+            Phase::ReleaseParent,
+            id,
+            Some(state.generation),
+            placement.hwnd as usize,
+            placement.parent as usize,
+            0,
+            None,
+        );
         unsafe {
-            EnableWindow(
-                v.hwnd,
-                i32::from(visible && v.flow.ready && v.error.is_none()),
-            );
+            SetFocus(placement.parent);
         }
-        Ok(v.state())
-    })
+        focus_diag::record(
+            Phase::ReleasedParent,
+            id,
+            Some(state.generation),
+            placement.hwnd as usize,
+            placement.parent as usize,
+            0,
+            None,
+        );
+    }
+    let ok = unsafe {
+        SetWindowPos(
+            placement.hwnd,
+            HWND_TOP,
+            placement.physical[0],
+            placement.physical[1],
+            placement.physical[2],
+            placement.physical[3],
+            SWP_NOACTIVATE
+                | if placement.visible {
+                    SWP_SHOWWINDOW
+                } else {
+                    SWP_HIDEWINDOW
+                },
+        )
+    };
+    // Capture the Win32 error before diagnostic GetFocus/GetForegroundWindow calls.
+    let placement_error = (ok == 0).then(std::io::Error::last_os_error);
+    focus_diag::record(
+        Phase::PlacementResult,
+        id,
+        Some(state.generation),
+        placement.hwnd as usize,
+        placement.parent as usize,
+        0,
+        Some(ok as isize),
+    );
+    if let Some(error) = placement_error {
+        return Err(HostError::new("hwnd_geometry", error.to_string()));
+    }
+    unsafe {
+        EnableWindow(placement.hwnd, i32::from(placement.enabled));
+    }
+    Ok(state)
 }
 pub fn detach(id: Uuid) -> Result<(), HostError> {
     let mut v = VIEWS

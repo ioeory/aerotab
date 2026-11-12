@@ -104,7 +104,7 @@ test('production diagnostics store persists and exports the bounded enum-only ev
   const code = compileModule(js, { filename: 'diagnostics.svelte.js', generate: 'server' }).js.code.replaceAll("'svelte/internal/server'", JSON.stringify(import.meta.resolve('svelte/internal/server')));
   let saved;
   globalThis.localStorage = { getItem: () => null, setItem: (_, value) => { saved = value; } };
-  const api = await import(`data:text/javascript;base64,${Buffer.from(`const terminalGeometrySnapshot=()=>[];\n${code}`).toString('base64')}`);
+  const api = await import(`data:text/javascript;base64,${Buffer.from(`const terminalGeometrySnapshot=()=>[];\nconst terminalPipelineSnapshot=()=>[];\n${code}`).toString('base64')}`);
   for (let i = 0; i < 260; i++) api.diagnostics.record('app', 'terminal.view-switch', JSON.stringify(transactions.nativeViewFailureDiagnostic('webview-to-native', 'drain', 'geometry')));
   assert.equal(api.diagnostics.events.length, 250);
   assert.equal(JSON.parse(saved).length, 250);

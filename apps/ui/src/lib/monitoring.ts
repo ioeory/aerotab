@@ -39,12 +39,13 @@ function endpoint(ssh: Extract<StoredProfile, { kind: 'ssh' }>['ssh']): unknown 
 }
 interface Entry {
   leases: Map<symbol, number>; snapshot: MonitoringSnapshot; generation: number; inFlight: boolean;
-  timer?: ReturnType<typeof setTimeout>; due: boolean; continuous: boolean;
+  timer?: ReturnType<typeof setTimeout>; timerDueAt?: number; due: boolean; continuous: boolean;
   continuityReason?: ContinuityReason; diagnosticAt?: number; stream: number; interruptions: Set<ContinuityReason>;
+  endpointKey?: string; cancelProbe?: () => void;
 }
 interface Options {
   now?: () => number; monotonicNow?: () => number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout;
-  maxConcurrent?: number; maxSamples?: number; maxAgeMs?: number;
+  maxConcurrent?: number; maxSamples?: number; maxAgeMs?: number; probeTimeoutMs?: number;
   onDiagnostic?: (snapshot: MonitoringSnapshot, stream: number, interruptions: ContinuityReason[]) => void;
 }
 /** A single queue per RPC client; independent UI leases never stop each other. */
@@ -60,13 +61,19 @@ export class MonitoringService {
   private maxConcurrent: number;
   private maxSamples: number;
   private maxAgeMs: number;
+  private probeTimeoutMs: number;
   private paused = false;
   private nextStream = 0;
   private onDiagnostic?: Options['onDiagnostic'];
   constructor(private rpc: RpcClient, options: Options = {}) {
     this.onDiagnostic = options.onDiagnostic;
     this.monotonicNow = options.monotonicNow ?? (options.now ? options.now : () => performance.now());
-    this.now = options.now ?? Date.now; this.timer = options.setTimer ?? setTimeout; this.clear = options.clearTimer ?? clearTimeout;
+    // WebView/Chromium throws "Illegal invocation" when global timers are called as methods.
+    this.now = options.now ?? Date.now;
+    this.timer = options.setTimer ?? (((fn: () => void, ms?: number) => setTimeout(fn, ms)) as typeof setTimeout);
+    this.clear = options.clearTimer ?? ((id => clearTimeout(id)) as typeof clearTimeout);
+    // Includes profile lookup, SSH connect and collection; never hold a queue slot indefinitely.
+    this.probeTimeoutMs = Math.max(1, options.probeTimeoutMs ?? 45000);
     this.maxConcurrent = Math.max(1, options.maxConcurrent ?? 4); this.maxSamples = Math.max(1, options.maxSamples ?? 3600); this.maxAgeMs = options.maxAgeMs ?? 3600000;
   }
   setProfiles(profiles: StoredProfile[]): void {
@@ -77,9 +84,9 @@ export class MonitoringService {
     this.profiles = new Map(profiles.map(p => [p.id, p])); this.emit(); this.drain();
   }
   invalidateProfiles(): void {
+    // A global catalog event may only rename an unrelated profile. Refresh the
+    // payload on the next probe; compare the non-secret endpoint before accepting it.
     this.profiles.clear();
-    for (const entry of this.entries.values()) this.resetEntry(entry);
-    this.emit(); this.drain();
   }
   private resetEntry(entry: Entry): void {
     if (entry.timer) this.clear(entry.timer); entry.timer = undefined;
@@ -88,7 +95,11 @@ export class MonitoringService {
     entry.snapshot = { history: [], sampling: false, failures: 0 };
   }
   watch(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
-  private emit(): void { for (const listener of this.listeners) listener(); }
+  private emit(): void {
+    for (const listener of this.listeners) {
+      try { listener(); } catch { /* a failed view must not stop other views or sampling */ }
+    }
+  }
   snapshot(id: string): MonitoringSnapshot {
     return this.entries.get(id)?.snapshot ?? { history: [], sampling: false, failures: 0 };
   }
@@ -112,7 +123,7 @@ export class MonitoringService {
     const lease = Symbol(id); const first = entry.leases.size === 0;
     entry.leases.set(lease, Math.max(1000, intervalMs));
     if (first) { entry.continuityReason ??= entry.snapshot.latest ? 'subscriptionRestart' : 'firstSample'; entry.continuous = false; entry.generation++; entry.due = true; entry.snapshot = { ...entry.snapshot, error: undefined, failures: 0 }; }
-    else if (entry.timer) { this.clear(entry.timer); entry.timer = undefined; this.schedule(entry); }
+    else if (entry.timer) this.schedule(entry);
     this.drain();
     let released = false;
     return () => {
@@ -130,7 +141,15 @@ export class MonitoringService {
     if (!entry.leases.size || this.paused) return;
     const interval = Math.min(...entry.leases.values());
     const delay = Math.min(120000, interval * 2 ** Math.min(entry.snapshot.failures, 5));
-    entry.timer = this.timer(() => { entry.timer = undefined; entry.due = true; this.drain(); }, delay);
+    const dueAt = this.monotonicNow() + delay;
+    // UI lease churn must never push an already scheduled sample further out.
+    // A faster subscriber may bring it forward; a slower one keeps the deadline.
+    if (entry.timer) {
+      if (entry.timerDueAt != null && entry.timerDueAt <= dueAt) return;
+      this.clear(entry.timer);
+    }
+    entry.timerDueAt = dueAt;
+    entry.timer = this.timer(() => { entry.timer = undefined; entry.timerDueAt = undefined; entry.due = true; this.drain(); }, delay);
   }
   private drain(): void {
     if (this.paused) return;
@@ -144,15 +163,38 @@ export class MonitoringService {
   private async probe(id: string, entry: Entry): Promise<void> {
     const generation = entry.generation; const start = this.monotonicNow();
     const accept = () => generation === entry.generation && entry.leases.size > 0 && !this.paused;
-    entry.snapshot = { ...entry.snapshot, sampling: true }; this.emit();
+    let expired = false;
+    let stage: 'profile' | 'stats' | 'processing' = 'profile';
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
-      // Resolve on every sample; never persist a credential-bearing profile snapshot.
-      let profile = this.profiles.get(id);
-      if (!profile) profile = await this.rpc.call<StoredProfile>('profile.get', { id });
-      if (!profile || profile.kind !== 'ssh') throw new Error('Monitoring requires an SSH profile');
-      // profile_id accompanies the legacy profile payload for a seamless backend migration.
-      const stats = await this.rpc.call<MonitoringHostStats>('ssh.hostStats', { profile_id: id, profile: profile.ssh });
+      entry.snapshot = { ...entry.snapshot, sampling: true }; this.emit();
+      const timeout = new Promise<never>((_, reject) => {
+        entry.cancelProbe = () => { expired = true; reject(new Error('Monitoring probe interrupted')); };
+        watchdog = this.timer(entry.cancelProbe, this.probeTimeoutMs);
+      });
+      const collect = async (): Promise<MonitoringHostStats> => {
+        // Resolve on every sample; never persist a credential-bearing profile snapshot.
+        let profile = this.profiles.get(id);
+        if (!profile) profile = await this.rpc.call<StoredProfile>('profile.get', { id });
+        if (expired || !accept()) throw new Error('Monitoring probe superseded');
+        if (!profile || profile.kind !== 'ssh') throw new Error('Monitoring requires an SSH profile');
+        const key = JSON.stringify(endpoint(profile.ssh));
+        if (entry.endpointKey != null && entry.endpointKey !== key) {
+          entry.snapshot = { history: [], sampling: true, failures: 0 };
+          entry.continuous = false; entry.continuityReason = 'profileChanged'; entry.interruptions.add('profileChanged');
+        }
+        entry.endpointKey = key;
+        // Resolve credentials in Rust, exactly as the MCP stats tool does. A
+        // stale/legacy frontend auth payload must not fail RPC deserialization
+        // before the backend can resolve the authoritative saved profile.
+        stage = 'stats';
+        return this.rpc.call<MonitoringHostStats>('ssh.hostStats', { profile_id: id });
+      };
+      // The watchdog covers both RPCs. Late replies cannot commit snapshots or
+      // launch a stats request after an expired profile lookup.
+      const stats = await Promise.race([collect(), timeout]);
       if (!accept()) return;
+      stage = 'processing';
       const at = this.now(), monotonicAt = this.monotonicNow();
       // A failed probe breaks counter continuity; reboot is checked by rate helpers.
       const latest = entry.snapshot.latest;
@@ -168,8 +210,10 @@ export class MonitoringService {
       entry.snapshot = { history, latest: sample, sampling: false, failures: 0 };
     } catch {
       // Never expose server errors: authentication failures can contain sensitive payloads.
-      if (accept()) { entry.interruptions.add('probeFailed'); entry.snapshot = { ...entry.snapshot, error: 'probeFailed', failures: entry.snapshot.failures + 1, sampling: false }; }
+      if (accept()) { entry.interruptions.add('probeFailed'); entry.snapshot = { ...entry.snapshot, error: 'probeFailed', failureStage: expired ? 'timeout' : stage, failures: entry.snapshot.failures + 1, sampling: false }; }
     } finally {
+      if (watchdog != null) this.clear(watchdog);
+      entry.cancelProbe = undefined;
       this.active--; entry.inFlight = false;
       if (accept()) {
         this.schedule(entry);
@@ -185,7 +229,7 @@ export class MonitoringService {
     }
   }
   dispose(): void {
-    for (const entry of this.entries.values()) { entry.leases.clear(); entry.generation++; entry.due = false; if (entry.timer) this.clear(entry.timer); }
+    for (const entry of this.entries.values()) { entry.leases.clear(); entry.generation++; entry.due = false; if (entry.timer) this.clear(entry.timer); entry.cancelProbe?.(); }
     this.listeners.clear();
   }
 }

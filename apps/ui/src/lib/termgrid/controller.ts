@@ -4,7 +4,7 @@
  */
 
 import { tracePaste } from '../nativePasteTrace';
-import { recordTerminalGeometry } from './resizeDiagnostics';
+import { recordTerminalGeometry, registerTerminalPipeline } from './resizeDiagnostics';
 import type { RpcClient } from '../rpc';
 import type { TerminalSnapshotEnvelope } from '../types';
 import { createWebviewDrawBarrier, type WebviewDrawTicket } from './webviewDrawBarrier';
@@ -91,6 +91,8 @@ export interface NativeTerminalOptions {
   onTrzszDetected?: () => void;
   onZmodemHint?: () => void;
   onClipboard?: (bytes: Uint8Array) => void;
+  /** WebView: pointer landed on this surface — promote the pane before focusing IME. */
+  onActivate?: () => void;
 }
 
 class DrawConfigurationSuperseded extends Error {
@@ -213,6 +215,11 @@ export class NativeTerminalController {
   private blinkTimer: number | null = null;
   private raf: number | null = null;
   private needsPaint = false;
+  private receivedFrames = 0;
+  private paintedFrames = 0;
+  private lastFrameAt = 0;
+  private lastPaintAt = 0;
+  private unregisterPipeline: (() => void) | null = null;
   private selecting = false;
   private disposed = false;
   private composing = false;
@@ -222,6 +229,16 @@ export class NativeTerminalController {
   private hoverUrl: string | null = null;
   private hoverTimer: number | null = null;
   private clickOpensLink = false;
+  private boundInputBlur = () => {
+    // WebView2 can cancel IME on app deactivation without compositionend.
+    // A stale preedit flag would otherwise suppress every later key in this pane.
+    if (this.composing) {
+      this.composing = false;
+      if (this.opts.input) this.opts.input.value = '';
+    }
+    this.mouseDown = false;
+    this.selecting = false;
+  };
   private boundCompStart = () => { this.composing = true; };
   private boundCompEnd = (e: CompositionEvent) => { void this.onCompositionEnd(e).catch(() => {}); };
   private boundInput = (e: Event) => { void this.onImeInput(e as InputEvent).catch(() => {}); };
@@ -293,6 +310,11 @@ export class NativeTerminalController {
   private boundPtrDown = (e: PointerEvent) => void this.onPtrDown(e);
   private boundPtrMove = (e: PointerEvent) => void this.onPtrMove(e);
   private boundPtrUp = (e: PointerEvent) => void this.onPtrUp(e);
+  private boundMouseDown = (e: MouseEvent) => {
+    // WebView2 focuses on mousedown; pointerdown preventDefault alone is not enough
+    // when the first click both activates the pane and must keep the IME.
+    if (e.button === 0) e.preventDefault();
+  };
   private boundPtrLeave = () => {
     this.hoverUrl = null;
     this.opts.canvas.style.cursor = '';
@@ -306,6 +328,13 @@ export class NativeTerminalController {
   }
 
   async start(): Promise<void> {
+    this.unregisterPipeline ??= registerTerminalPipeline(() => ({
+      receivedFrames: this.receivedFrames, paintedFrames: this.paintedFrames,
+      lastFrameAt: this.lastFrameAt, lastPaintAt: this.lastPaintAt,
+      awaitingFullBase: this.awaitingFullBase, captureInFlight: this.captureInFlight,
+      paintPending: this.raf != null, disposed: this.disposed,
+      backend: this.opts.nativeSurface ? 'native-surface' : this.renderer?.kind ?? 'uninitialized',
+    }));
     this.applyFontFromOpts();
     if (!this.opts.nativeSurface) this.createRenderer();
     await this.rpc.call('terminal.attach', {
@@ -520,8 +549,9 @@ export class NativeTerminalController {
     void this.rpc.call('terminal.setTransferDetect', { id: this.sessionId, on });
   }
 
+  // Native OS focus is hostAdapter.SetFocus; this path is webview/IME only.
   focus() {
-    if (this.opts.nativeSurface) return; // Native focus remains click-to-focus.
+    if (this.opts.nativeSurface) return; // Native focus remains OS SetFocus via hostAdapter.
     this.focused = true;
     // Prefer the IME textarea so CJK composition targets a real editable.
     // Fall back to the canvas if WebView refuses the hidden textarea.
@@ -544,7 +574,18 @@ export class NativeTerminalController {
   }
 
   blur() {
+    this.boundInputBlur();
     this.focused = false;
+    // Release DOM focus so keydown on a stale IME cannot keep writing this session
+    // after the tab's activePaneId has already moved (same-tab pane switch).
+    const ime = this.opts.input;
+    const canvas = this.opts.canvas;
+    try {
+      if (ime && document.activeElement === ime) ime.blur();
+      else if (document.activeElement === canvas) canvas.blur();
+    } catch {
+      /* older WebView */
+    }
     this.schedulePaint();
   }
 
@@ -559,6 +600,8 @@ export class NativeTerminalController {
   async dispose(opts: { detachEngine?: boolean } = {}) {
     if (this.disposed) return;
     this.disposed = true;
+    this.unregisterPipeline?.();
+    this.unregisterPipeline = null;
     for (const item of this.pausedWrites.splice(0)) item.reject(new Error('session view disposed'));
     this.pausedBytes = 0; this.reportInputBackpressure(false);
     this.drawBarrier.dispose();
@@ -575,12 +618,15 @@ export class NativeTerminalController {
     canvas.removeEventListener('pointermove', this.boundPtrMove);
     canvas.removeEventListener('pointerup', this.boundPtrUp);
     canvas.removeEventListener('pointerleave', this.boundPtrLeave);
+    canvas.removeEventListener('mousedown', this.boundMouseDown);
     window.removeEventListener('keydown', this.boundWinKey, true);
     window.removeEventListener('paste', this.boundWinPaste, true);
+    window.removeEventListener('blur', this.boundInputBlur);
     const ime = this.opts.input;
     if (ime) {
       ime.removeEventListener('keydown', this.boundKey as EventListener);
       ime.removeEventListener('paste', this.boundPaste as EventListener);
+      ime.removeEventListener('blur', this.boundInputBlur);
       ime.removeEventListener('compositionstart', this.boundCompStart);
       ime.removeEventListener('compositionend', this.boundCompEnd as EventListener);
       ime.removeEventListener('input', this.boundInput as EventListener);
@@ -643,6 +689,8 @@ export class NativeTerminalController {
 
   private onFrame(buf: ArrayBuffer) {
     if (this.disposed) return;
+    this.receivedFrames++;
+    this.lastFrameAt = Date.now();
     try {
       // During the finite snapshot draw, preserve its exact grid. Metadata/raw
       // still drain normally; subsequent full snapshot restores stream base.
@@ -713,6 +761,8 @@ export class NativeTerminalController {
           dpr: this.spec.dpr,
           ligatures: !!this.opts.ligatures && this.renderer.kind === 'canvas2d',
         });
+        this.paintedFrames++;
+        this.lastPaintAt = Date.now();
         if (ticket && !this.disposed && this.drawBarrier.complete(ticket)) {
           // Complete readiness first; observer failures cannot change draw success.
           try {
@@ -760,6 +810,7 @@ export class NativeTerminalController {
       ime.tabIndex = 0;
       ime.addEventListener('keydown', this.boundKey as EventListener);
       ime.addEventListener('paste', this.boundPaste as EventListener);
+      ime.addEventListener('blur', this.boundInputBlur);
       ime.addEventListener('compositionstart', this.boundCompStart);
       ime.addEventListener('compositionend', this.boundCompEnd as EventListener);
       ime.addEventListener('input', this.boundInput as EventListener);
@@ -768,11 +819,13 @@ export class NativeTerminalController {
     // activeElement drifted (common after opacity/z-index quirks), still type.
     window.addEventListener('keydown', this.boundWinKey, true);
     window.addEventListener('paste', this.boundWinPaste, true);
+    window.addEventListener('blur', this.boundInputBlur);
     canvas.addEventListener('wheel', this.boundWheel, { passive: false });
     canvas.addEventListener('pointerdown', this.boundPtrDown);
     canvas.addEventListener('pointermove', this.boundPtrMove);
     canvas.addEventListener('pointerup', this.boundPtrUp);
     canvas.addEventListener('pointerleave', this.boundPtrLeave);
+    canvas.addEventListener('mousedown', this.boundMouseDown);
   }
 
   private observeResize() {
@@ -831,6 +884,9 @@ export class NativeTerminalController {
 
   private async onKey(ev: KeyboardEvent) {
     if (!this.alive || this.disposed || (this.opts.nativeSurface && !this.webviewHandoff)) return;
+    // IME/canvas listeners fire even when another pane is logically active if
+    // DOM focus lagged behind activePaneId — refuse until this controller owns focus.
+    if (!this.focused) return;
     // App hotkeys (window capture) run first and set defaultPrevented for
     // Ctrl+F / Ctrl+= / Ctrl+Shift+C / etc. Do not swallow bare Ctrl+C/D —
     // those must reach the PTY (SIGINT / EOF).
@@ -847,9 +903,14 @@ export class NativeTerminalController {
   }
 
   private onPaste(ev: ClipboardEvent) {
+    if (!this.focused) return;
+    // Window capture and the canvas/IME target share this handler. Claim each
+    // event once rather than writing again when it reaches the target listener.
+    if (ev.defaultPrevented) return;
     const text = ev.clipboardData?.getData('text');
     if (!text) return;
     ev.preventDefault();
+    ev.stopPropagation();
     void this.writePty(encodePaste(text, this.mode)).catch(() => {});
   }
 
@@ -858,12 +919,13 @@ export class NativeTerminalController {
     const text = ev.data ?? '';
     const ime = this.opts.input;
     if (ime) ime.value = '';
+    if (!this.focused) return;
     if (text) await this.writePty(text);
   }
 
   private async onImeInput(ev: InputEvent) {
     // Some engines fire `input` with insertText outside composition (e.g. emoji).
-    if (this.composing || ev.isComposing) return;
+    if (!this.focused || this.composing || ev.isComposing) return;
     if (ev.inputType !== 'insertText' || !ev.data) return;
     const ime = this.opts.input;
     if (ime) ime.value = '';
@@ -894,7 +956,8 @@ export class NativeTerminalController {
       return;
     }
     const lines = Math.max(1, Math.round(Math.abs(ev.deltaY) / 40));
-    const delta = ev.deltaY < 0 ? -lines : lines;
+    // DOM deltaY is positive downward; the VT engine uses positive for history.
+    const delta = ev.deltaY < 0 ? lines : -lines;
     await this.rpc.call('terminal.scroll', {
       id: this.sessionId,
       cmd: { delta },
@@ -911,7 +974,18 @@ export class NativeTerminalController {
   }
 
   private async onPtrDown(ev: PointerEvent) {
+    // Inactive WebView panes keep pointer-events so the first click hits the
+    // canvas (not the pane shell). Activate before focus so activePaneId and
+    // the previous pane's blur run ahead of IME focus.
+    this.opts.onActivate?.();
     this.focus();
+    // Re-assert after Svelte flush / mousedown default — WebView2 often moves
+    // focus to the pane shell between pointerdown and pointerup.
+    queueMicrotask(() => { if (this.focused) this.focus(); });
+    // The browser's pointer default runs after this listener and would focus
+    // the canvas again, blurring the IME textarea selected above. Selection is
+    // handled below; keep primary clicks on the real editable input target.
+    if (ev.button === 0) ev.preventDefault();
     this.ptrMoved = false;
     const { col, line } = this.cellAt(ev);
 
@@ -1035,8 +1109,8 @@ export class NativeTerminalController {
       if (openLink) {
         await this.tryOpenLink(col, line, ev);
       }
-      return;
     }
+    if (ev.button === 0 && this.focused) this.focus();
   }
 
   private async refreshHover(col: number, line: number) {

@@ -11,6 +11,7 @@
     createNativeViewHost, nativeViewGeometry, nativeViewGeometryEquals, nativeSurfaceError,
     NATIVE_VIEW_OCCLUSION_EVENT, type TerminalViewBackend, type NativeViewConfig,
   } from '../lib/nativeViewHost';
+  import { completeNativeFocusHandoff } from '../lib/nativeFocusHandoff';
   import { tracePaste } from '../lib/nativePasteTrace';
   import { NATIVE_ACTIVATION_EVENT, nativeActivationRouter, type NativeActivation } from '../lib/nativeActivation';
   import {
@@ -157,6 +158,7 @@
   });
   let startup: Promise<void> | null = null;
   let syncSurface: (() => void) | null = null;
+  let requestSurfaceFocus: (() => void) | null = null;
   let cleanupSurface: (() => void) | null = null;
 
   function fail(error: unknown) {
@@ -179,8 +181,21 @@
     };
   }
 
+  /**
+   * Whether this surface may take OS/DOM focus.
+   * `force` skips the `active` prop check: `aerotab:focus-pane` / pane chrome
+   * can race Svelte's active flush, and gating on `active` no-ops SetFocus.
+   */
+  function canTakeFocus(force = false) {
+    const base = visible && !occluded && !globalOccluded && !document.hidden && !disposed
+      && !surfaceError && !ackRecovering && !rollbackPending
+      && document.documentElement?.dataset.aerotabResizing === undefined
+      && document.documentElement?.dataset.aerotabOverlayOpen === undefined;
+    return force ? base : base && active;
+  }
+
   function canFocusSurface() {
-    return active && visible && !occluded && !globalOccluded && !document.hidden && !disposed && !surfaceError && !ackRecovering && !rollbackPending;
+    return canTakeFocus(false);
   }
 
   /** Commit this request's post-modal visibility, even when sync's dirty loop is busy. */
@@ -268,6 +283,7 @@
     let lastConfig = '';
     let lastUpdate = '';
     let focusRestored = false;
+    let focusRequest = 0;
     const sync = async () => {
       // A retained WebView owns visibility during/after reverse staging. Do not
       // resurrect a native draw gate from an unrelated ancestor mutation.
@@ -306,9 +322,16 @@
           // Mutation/resize observers can report unchanged bounds (including our
           // own canvas style changes). Only real changes advance host revisions.
           if (updateKey !== lastUpdate) {
-            await hostAdapter!.update(lastGeometry, shown, configKey === lastConfig ? undefined : cfg);
+            const hiding = !shown;
+            const update = hostAdapter!.update(lastGeometry, shown, configKey === lastConfig ? undefined : cfg);
+            // Hide IPC runs SetFocus(parent) before SWP_HIDEWINDOW; modal fields
+            // must wait for that OS handoff before input.focus().
+            if (hiding) void update.finally(() => completeNativeFocusHandoff());
+            await update;
             lastConfig = configKey;
             lastUpdate = updateKey;
+          } else if (!shown) {
+            completeNativeFocusHandoff();
           }
           if (!inputAcknowledged && !stagingNative) {
             await hostAdapter!.acknowledgeInput(0);
@@ -327,14 +350,25 @@
           // Re-check latest props after async show: another pane/modal may now own focus.
           hostAdapter!.setFocusAllowed(canFocusSurface() && shown);
           if (!focusRestored && canFocusSurface() && shown) {
-            await hostAdapter!.focus();
-            focusRestored = true;
+            const request = focusRequest;
+            const result = await hostAdapter!.focus();
+            if (request === focusRequest) {
+              focusRestored = result === 'applied' && canFocusSurface() && visible && !occluded
+                && !globalOccluded && !document.hidden && !disposed;
+            }
           }
         } while (dirty && !disposed);
       } catch (error) { if (!disposed && !ackRecovering) fail(error); }
       finally { busy = false; }
     };
     syncSurface = () => { void sync(); };
+    requestSurfaceFocus = () => {
+      // Explicit activation must invalidate the previous restoration, even if a
+      // show/first-draw transaction is already busy. Its dirty pass retries it.
+      focusRequest++;
+      focusRestored = false;
+      void sync();
+    };
     const ro = new ResizeObserver(() => { traceLayout('resize', surface); syncSurface?.(); });
     ro.observe(surface);
     // Changes to ancestor layout/class can move a pane without changing its size.
@@ -357,6 +391,7 @@
       }
     }, 1000);
     cleanupSurface = () => {
+      requestSurfaceFocus = null;
       ro.disconnect(); mo.disconnect(); window.clearInterval(health);
       window.removeEventListener('resize', syncSurface!);
       window.removeEventListener('scroll', syncSurface!, true);
@@ -574,11 +609,24 @@
     return controller;
   }
 
-  export function focus() {
-    if (((backend === 'native-surface' && !committedWebview) || committedNative)) {
-      hostAdapter?.setFocusAllowed(!!canFocusSurface() && surfaceReady);
-      if (canFocusSurface() && surfaceReady) void hostAdapter?.focus().catch(fail);
-    } else if (canFocusSurface()) controller?.focus();
+  /** Native focus remains OS SetFocus via hostAdapter (not click-only). */
+  export function focus(opts?: { force?: boolean }) {
+    const force = !!opts?.force;
+    // becameActive already has active=true: focus IME/OS synchronously so a
+    // following mousedown default cannot reclaim the pane shell first.
+    // force + not-yet-active: wait one tick for Svelte props, then require active
+    // so a superseded request cannot steal focus back to the old pane.
+    const apply = async () => {
+      if (!canFocusSurface()) return;
+      if (((backend === 'native-surface' && !committedWebview) || committedNative)) {
+        requestSurfaceFocus?.();
+        hostAdapter?.setFocusAllowed(surfaceReady && canFocusSurface());
+        if (surfaceReady) await hostAdapter?.focus();
+      } else controller?.focus();
+    };
+    if (canFocusSurface()) return apply().catch(fail);
+    if (!force) return Promise.resolve();
+    return tick().then(apply).catch(fail);
   }
 
   /** Await OS view detach before mounting another view of this same engine. */
@@ -663,6 +711,9 @@
         const text = new TextDecoder().decode(bytes);
         void navigator.clipboard.writeText(text).catch(() => {});
       },
+      // Same callback as native HWND activation: first WebView click must also
+      // flip activePaneId so focus does not stay on the previous pane.
+      onActivate: () => onActivate?.(),
     });
     controller = ctl;
     startup = ctl.start().then(async () => {

@@ -125,6 +125,25 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     reveal_main_window(&app)
 }
 
+/// Steal OS keyboard focus from any native-surface child HWND into WebView2.
+/// DOM `input.focus()` alone looks focused while keystrokes stay on the child.
+///
+/// Important: `WebviewWindow::set_focus` only focuses the outer tao window.
+/// Keystrokes for the page require `Webview::set_focus` → wry `MoveFocus`.
+/// `SetFocus(outer HWND)` is actively wrong: it leaves focus on the frame and
+/// was the same path that fed WM_SYSKEY* into tao during the freeze.
+#[tauri::command]
+fn desktop_focus_webview(window: tauri::WebviewWindow) -> Result<(), String> {
+    // Bring the frame forward if another app had focus.
+    let _ = window.set_focus();
+    // MoveFocus(PROGRAMMATIC) into the WebView2 document so `<input>` receives keys.
+    window
+        .as_ref()
+        .set_focus()
+        .map_err(|e| format!("webview MoveFocus failed: {e}"))?;
+    Ok(())
+}
+
 /// Convert a DOM rect (CSS pixels) to physical screen coordinates for native
 /// terminal embedding. The frontend sends `{ x, y, width, height,
 /// devicePixelRatio }` from `getBoundingClientRect()`, and we return the
@@ -646,6 +665,14 @@ async fn native_view_focus(
     native_caller(&window)?;
     let id = uuid::Uuid::parse_str(&session_id)
         .map_err(|e| HostError::new("invalid_session", e.to_string()))?;
+    #[cfg(target_os = "windows")]
+    {
+        use aerotab_core::terminal::native_host::focus_diagnostics::{self, Phase};
+        let request = focus_diagnostics::next_request();
+        focus_diagnostics::record(Phase::Requested, id, None, 0, 0, request, None);
+        native_main(app, move || NativeHost::diagnostic_focus(id, request)).await
+    }
+    #[cfg(not(target_os = "windows"))]
     native_main(app, move || NativeHost::focus(id)).await
 }
 #[cfg(feature = "native-view")]
@@ -2514,6 +2541,9 @@ fn main() {
         .compact()
         .init();
 
+    #[cfg(all(feature = "native-view", target_os = "windows"))]
+    aerotab_core::terminal::native_host::focus_diagnostics::init();
+
     tracing::info!(version = CORE_VERSION, "aerotab-app starting");
 
     // WebView2 defaults to white while the page loads. Use the app shell
@@ -2778,6 +2808,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             runtime_diagnostic_snapshot,
             show_main_window,
+            desktop_focus_webview,
             get_window_screen_rect,
             get_main_window_hwnd,
             session_info,

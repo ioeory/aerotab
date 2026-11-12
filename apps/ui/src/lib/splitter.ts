@@ -20,6 +20,9 @@ export function pointerResize(event: PointerEvent, opts: { value: number; min: n
   const transaction = resizeTransaction(opts.value, opts.min, opts.max, opts.preview, opts.end);
   const start = opts.axis === 'x' ? event.clientX : event.clientY;
   let done = false;
+  // Native terminal surfaces must not reclaim OS focus while their bounds change under the pointer.
+  const marker = typeof document !== 'undefined' ? document.documentElement?.dataset : undefined;
+  if (marker) marker.aerotabResizing = '';
   const move = (e: PointerEvent) => {
     if (e.pointerId !== event.pointerId) return;
     // Recover a missed mouseup without applying any unpressed movement.
@@ -32,21 +35,25 @@ export function pointerResize(event: PointerEvent, opts: { value: number; min: n
     window.removeEventListener('pointermove', move, true);
     window.removeEventListener('pointerup', up, true);
     window.removeEventListener('pointercancel', pointerCancel, true);
-    window.removeEventListener('blur', cancel);
+    window.removeEventListener('blur', interrupted);
     window.removeEventListener('keydown', key, true);
-    target?.removeEventListener('lostpointercapture', pointerCancel);
+    target?.removeEventListener('lostpointercapture', lostCapture);
     try { if (target?.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId); } catch { /* Target may have been removed. */ }
+    if (marker) delete marker.aerotabResizing;
     if (commit) transaction.commit(); else transaction.cancel();
   };
   const cancel = () => finish(false);
+  // Window blur / lost capture come from OS focus or HWND changes, not the user aborting.
+  const interrupted = () => finish(true);
   const pointerCancel = (e: PointerEvent) => { if (e.pointerId === event.pointerId) cancel(); };
+  const lostCapture = (e: PointerEvent) => { if (e.pointerId === event.pointerId) interrupted(); };
   const up = (e: PointerEvent) => { if (e.pointerId === event.pointerId) finish(true); };
   const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } };
-  target?.addEventListener('lostpointercapture', pointerCancel);
+  target?.addEventListener('lostpointercapture', lostCapture);
   window.addEventListener('pointermove', move, true);
   window.addEventListener('pointerup', up, true);
   window.addEventListener('pointercancel', pointerCancel, true);
-  window.addEventListener('blur', cancel);
+  window.addEventListener('blur', interrupted);
   window.addEventListener('keydown', key, true);
   return cancel;
 }

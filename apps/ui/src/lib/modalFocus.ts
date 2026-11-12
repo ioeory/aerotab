@@ -4,6 +4,9 @@
  * `data-aerotab-modal` markers on standalone overlays.
  */
 
+import { focusWebviewDesktop } from './desktopFocus';
+import { waitForNativeOsFocusHandoff } from './nativeFocusHandoff';
+
 const MODAL_FOCUS_DELAYS_MS = [0, 50, 120] as const;
 
 export function isModalOverlayActive(): boolean {
@@ -69,14 +72,25 @@ export function scheduleModalFieldFocus(focus: () => void): void {
     focus();
     return;
   }
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
+  void (async () => {
+    // Native-gpu: wait for SetFocus(parent) from hide IPC, then force WebView2
+    // MoveFocus so a sibling HWND cannot keep keystrokes after the wait times out.
+    await waitForNativeOsFocusHandoff();
+    if (!isModalOverlayActive()) return;
+    await focusWebviewDesktop();
+    const run = () => {
+      if (!isModalOverlayActive()) return;
       focus();
-      for (const ms of MODAL_FOCUS_DELAYS_MS) {
-        window.setTimeout(() => {
-          if (isModalOverlayActive()) focus();
-        }, ms);
-      }
+    };
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        run();
+        for (const ms of MODAL_FOCUS_DELAYS_MS) {
+          window.setTimeout(() => {
+            if (isModalOverlayActive()) void focusWebviewDesktop().then(run);
+          }, ms);
+        }
+      });
     });
-  });
+  })();
 }

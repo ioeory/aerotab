@@ -18,6 +18,11 @@ renderer.link = function ({ href, tokens }) {
   } catch { return label; }
   return `<a href="${escape(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${label}</a>`;
 };
+export const isMermaidLang = (lang?: string) => (lang ?? '').match(/^\S*/)![0].toLowerCase() === 'mermaid';
+/** Inert code block; the preview later swaps it for a sanitized SVG and keeps it as the error fallback. */
+export const mermaidPlaceholder = (code: string) => `<div class="mermaid-diagram" data-mermaid><pre><code class="language-mermaid">${escape(code)}</code></pre></div>\n`;
+const defaultCode = renderer.code.bind(renderer);
+renderer.code = token => isMermaidLang(token.lang) ? mermaidPlaceholder(token.text) : defaultCode(token);
 const markdownParser = new Marked({ renderer, gfm: true, async: false });
 export function renderMarkdown(markdown: string): string {
   return markdownParser.parse(markdown) as string;

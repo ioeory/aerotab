@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import ResourceWorkspace from './components/hosts/ResourceWorkspace.svelte';
   import PrimaryNav from './components/PrimaryNav.svelte';
   import type { WorkspacePage } from './lib/workspacePages';
@@ -43,6 +43,8 @@
   import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
   import { isOverlayBlockingInput } from './lib/modalFocus';
+  import { syncAerotabOverlayMarker } from './lib/overlayMarker';
+  import { completeNativeFocusHandoff, expectNativeFocusHandoff } from './lib/nativeFocusHandoff';
   import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
   import { b64encode } from './lib/rpc';
   import { withRpcTimeout } from './lib/rpcTimeout';
@@ -95,7 +97,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.4-ui-20261111';
+  const buildId = '0.3.5-ui-20261112-webview-focus6';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1987,12 +1989,34 @@
       || sftpWindows.length > 0;
     if (overlayOpen) {
       document.body.dataset.modalOverlay = 'true';
+      // Same-tick marker: MutationObserver runs as a microtask, but native focus
+      // restore can race before that. Menus still rely on the observer path.
+      syncAerotabOverlayMarker(true);
+      // Start OS focus handoff before ProfileSelector's input.focus() races.
+      // untrack: writing nativeSurfaceBlocked must not re-run this effect and
+      // complete the handoff before hide IPC has called SetFocus(parent).
+      untrack(() => {
+        expectNativeFocusHandoff();
+        if (!nativeSurfaceBlocked) {
+          nativeSurfaceBlocked = true;
+          document.body.dataset.nativeViewOccluded = 'true';
+          document.dispatchEvent(new CustomEvent(NATIVE_VIEW_OCCLUSION_EVENT, {
+            detail: { occluded: true },
+          }));
+        } else {
+          // Already occluded: hide IPC / SetFocus(parent) already ran.
+          completeNativeFocusHandoff();
+        }
+      });
       const active = document.activeElement;
       if (active instanceof HTMLElement && active.closest('.xterm, .terminal-surface')) {
         active.blur();
       }
     } else {
       delete document.body.dataset.modalOverlay;
+      // Same-tick clear: don't wait for MutationObserver to drop the marker,
+      // or canFocusSurface stays false and pane/terminal focus no-ops.
+      syncAerotabOverlayMarker(false);
     }
   });
 
@@ -2005,6 +2029,7 @@
     const sync = () => {
       const blocked = isOverlayBlockingInput()
         || !!document.querySelector('[data-native-view-blocker]');
+      syncAerotabOverlayMarker(blocked);
       nativeSurfaceBlocked = blocked;
       document.body.dataset.nativeViewOccluded = String(blocked);
       if (blocked !== last) {
@@ -2021,7 +2046,7 @@
         'data-aerotab-menu-open', 'data-aerotab-tab-list', 'data-native-view-blocker'],
     });
     sync();
-    return () => { observer.disconnect(); delete document.body.dataset.nativeViewOccluded; };
+    return () => { observer.disconnect(); delete document.body.dataset.nativeViewOccluded; syncAerotabOverlayMarker(false); };
   });
 
   $effect(() => {
@@ -2041,23 +2066,26 @@
     }
     hostStatsStatus = 'loading';
     if (pane?.profileId) {
-      const monitoring = getHostMonitoring(rpc);
-      monitoring.setProfiles(savedProfiles);
+      // Only the active pane and polling settings own this lease. Catalog
+      // refreshes and synchronous watcher callbacks must not restart its timer.
       const id = pane.profileId;
-      const update = () => {
-        const snapshot = monitoring.service.snapshot(id);
-        // Do not read hostStats here: update also runs synchronously inside the
-        // subscription effect. Reading its output makes every sample tear down
-        // and recreate that subscription (effect_update_depth_exceeded).
-        const stats = snapshot.latest?.stats ?? null;
-        hostStats = stats;
-        hostStatsStatus = snapshot.error ? 'unavailable' : stats ? 'ok' : 'loading';
-        hostStatsUpdatedAt = snapshot.latest?.at ?? null;
-      };
-      const unwatch = monitoring.service.watch(update);
-      const release = monitoring.service.subscribe(id, Math.max(10, hostStatsIntervalSec) * 1000);
-      update();
-      return () => { release(); unwatch(); };
+      return untrack(() => {
+        const monitoring = getHostMonitoring(rpc);
+        monitoring.setProfiles(savedProfiles);
+        const update = () => {
+          const snapshot = monitoring.service.snapshot(id);
+          // Do not read hostStats: synchronous subscription callbacks must not
+          // make the output of this effect one of its own dependencies.
+          const stats = snapshot.latest?.stats ?? null;
+          hostStats = stats;
+          hostStatsStatus = snapshot.error ? 'unavailable' : stats ? 'ok' : 'loading';
+          hostStatsUpdatedAt = snapshot.latest?.at ?? null;
+        };
+        const unwatch = monitoring.service.watch(update);
+        const release = monitoring.service.subscribe(id, Math.max(10, hostStatsIntervalSec) * 1000);
+        update();
+        return () => { release(); unwatch(); };
+      });
     }
     void refreshHostStats();
     hostStatsPollHandle = window.setInterval(() => {

@@ -6,7 +6,7 @@
   // engine on launch via bootstrapSyncEngine().
 
   import { onMount, onDestroy } from 'svelte';
-  import { wizardCanEnter, syncSetupComplete, syncTargetFingerprint } from '../../../lib/syncWizard';
+  import { wizardCanEnter, syncSetupComplete, syncTargetFingerprint, hasSyncApproval } from '../../../lib/syncWizard';
   import { RefreshCw, Play } from '@lucide/svelte';
   import { b64decode, b64encode, type RpcClient } from '../../../lib/rpc';
   import { i18n } from '../../../lib/i18n.svelte';
@@ -179,6 +179,7 @@
   let deviceId = $state<string | null>(null);
   let lastSyncMs = $state<number | null>(null);
   let autoIntervalMs = $state<number | null>(null);
+  let autoRunning = $state(false);
   let notesPausedDirty = $state(false);
   let kindLive = $state<Backend | null>(null);
   let protocol = $state<number>(1);
@@ -565,6 +566,7 @@
         deviceId: string | null;
         lastSyncMs: number | null;
         autoIntervalMs: number | null;
+        autoRunning?: boolean;
         notesPausedDirty?: boolean;
         protocol?: number;
         ownSeq?: number | null;
@@ -576,6 +578,7 @@
       deviceId = s.deviceId;
       lastSyncMs = s.lastSyncMs;
       autoIntervalMs = s.autoIntervalMs;
+      autoRunning = s.autoRunning === true;
       notesPausedDirty = s.notesPausedDirty ?? false;
       protocol = s.protocol ?? (s.configured ? 2 : 1);
       ownSeq = s.ownSeq ?? null;
@@ -1079,7 +1082,7 @@
         await refreshStatus();
       }
       await loadSyncHistory();
-    })();
+    })().catch(() => setSyncInfo('err', i18n.t('sync.restoreFailed')));
     statusTimer = setInterval(async () => {
       await refreshStatus();
       await loadSyncHistory();
@@ -1484,7 +1487,10 @@
     </label>
     <div class="help">{i18n.t('sync.autoSyncHelp')}</div>
     {#if notesPausedDirty}<p class="help" role="status">{i18n.t('sync.notesPausedDirty')}</p>{/if}
-    {#if configured && autoIntervalMs}
+    {#if autoSyncEnabled && !autoRunning}
+      <p class="help" role="status">{i18n.t(hasSyncApproval(currentPersistedSettings()) ? 'sync.autoSyncStopped' : 'sync.autoSyncNeedsApproval')}</p>
+    {/if}
+    {#if configured && autoRunning && autoIntervalMs}
       <div class="help text-[var(--color-accent)]">
         {i18n.t('sync.autoSyncActive', { minutes: Math.round(autoIntervalMs / 60_000) })}
       </div>

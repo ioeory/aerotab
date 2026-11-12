@@ -151,7 +151,6 @@ pub struct ViewState {
     pub generation: Uuid,
     pub geometry: Geometry,
     pub visible: bool,
-    #[cfg(target_os = "windows")]
     pub focused: bool,
     pub last_draw_seq: Option<u32>,
     pub revision: u32,
@@ -186,7 +185,6 @@ impl Registry {
             generation: Uuid::new_v4(),
             geometry,
             visible: true,
-            #[cfg(target_os = "windows")]
             focused: false,
             last_draw_seq: None,
             revision: 0,
@@ -232,8 +230,15 @@ impl Registry {
 }
 pub type InputDispatch = std::sync::Arc<dyn Fn(&'static str, serde_json::Value) + Send + Sync>;
 /// All operations must execute on the Tauri main thread; GTK values remain thread-local.
+#[cfg(any(target_os = "windows", test))]
+pub mod focus_diagnostics;
+
 pub struct NativeHost;
 impl NativeHost {
+    #[cfg(target_os = "windows")]
+    pub fn diagnostic_focus(id: Uuid, request: u64) -> Result<(), HostError> {
+        windows::focus_diagnostic(id, request)
+    }
     #[cfg(all(debug_assertions, target_os = "windows"))]
     pub fn debug_windows_state(id: Uuid) -> Result<serde_json::Value, HostError> {
         windows::debug_state(id)

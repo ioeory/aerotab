@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNativeActivationRouter } from './nativeActivation.ts';
 import { createNativeInputQueue } from './nativeInputBridge.ts';
+import { createNativeViewHost } from './nativeViewHost.ts';
 
 test('two input owners route keys only to their session, independent of latest attachment and disposal', async () => {
   const writes = { a: [], b: [] };
@@ -56,4 +57,83 @@ test('two native panes reactivate independently; stale, hidden and retired owner
   const closing = activate('a', 12, 'ga2', () => new Promise(r => finish = r));
   live.delete('a'); finish({ generation: 'ga2', focused: true }); await closing;
   assert.equal(selected, 'webview');
+});
+
+// Real router + real per-host focus queues. Only the Tauri/Win32 boundary is
+// simulated: defer an already issued IPC, SetFocus changes one OS owner, and
+// WM_SETFOCUS emits a globally increasing activation sequence (windows.rs).
+// This is a logic-layer regression, not an execution of Windows or Svelte.
+test('a newer user click on B survives an already issued A focus IPC executing late', async () => {
+  const router = createNativeActivationRouter();
+  const hosts = {};
+  const trace = [];
+  let selected = 'a';
+  let osFocus = 'webview';
+  let activationSeq = 0;
+  let executeOldFocus;
+  let signalIssued;
+  const issued = new Promise(resolve => { signalIssued = resolve; });
+  const activations = [];
+  const setSimulatedWin32Focus = (id, source) => {
+    osFocus = id;
+    const event = { sessionId: id, generation: hosts[id].generation(), seq: ++activationSeq };
+    trace.push({ source, ...event });
+    const accepted = router.accept(event, {
+      sessionId: id, generation: () => hosts[id].generation(),
+      // Both split panes remain visible even when only B is active.
+      eligible: () => true,
+      state: () => hosts[id].state(),
+      activate: () => {
+        selected = id;
+        hosts.a.setFocusAllowed(id === 'a');
+        hosts.b.setFocusAllowed(id === 'b');
+      },
+    });
+    activations.push(accepted);
+    return accepted;
+  };
+  const invoke = async (command, args) => {
+    const id = args?.sessionId;
+    if (command === 'native_view_capabilities') return { available: true, geometryUnit: 'css-px' };
+    if (command === 'native_view_attach') return { generation: `g${id}`, handoffOutputSeq: '0' };
+    if (command === 'native_view_update' || command === 'native_view_detach') return {};
+    if (command === 'native_view_state') return { generation: `g${id}`, focused: osFocus === id };
+    if (command === 'native_view_focus') {
+      assert.equal(id, 'a');
+      trace.push({ source: 'A focus IPC issued', args });
+      signalIssued();
+      await new Promise(resolve => {
+        executeOldFocus = () => {
+          // Backend focus currently checks visibility/readiness, not whether
+          // a later user click superseded this already dispatched request.
+          setSimulatedWin32Focus(id, 'late programmatic WM_SETFOCUS');
+          resolve();
+        };
+      });
+      return;
+    }
+    assert.fail(`unexpected command: ${command}`);
+  };
+  for (const id of ['a', 'b']) {
+    hosts[id] = createNativeViewHost({ sessionId: id, invoke });
+    await hosts[id].start({ x: 0, y: 0, width: 600, height: 400 });
+    await hosts[id].update({ x: 0, y: 0, width: 600, height: 400 }, true);
+    await hosts[id].acknowledgeInput(0);
+  }
+  hosts.a.setFocusAllowed(true);
+  const oldFocus = hosts.a.focus();
+  await issued;
+  // Simulates WM_LBUTTONDOWN -> SetFocus(B) -> WM_SETFOCUS(B).
+  await setSimulatedWin32Focus('b', 'user WM_LBUTTONDOWN');
+  assert.equal(selected, 'b', 'the last user click was applied before releasing A IPC');
+  assert.equal(osFocus, 'b');
+  // Even revoking A in the real host cannot retract its dispatched IPC.
+  executeOldFocus();
+  await oldFocus;
+  await Promise.all(activations);
+  try {
+    assert.equal(selected, 'b', `last user intent B must survive stale A IPC: ${JSON.stringify(trace)}`);
+  } finally {
+    await Promise.all(Object.values(hosts).map(host => host.dispose()));
+  }
 });

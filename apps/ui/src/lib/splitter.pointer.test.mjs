@@ -30,7 +30,9 @@ function fixture({ captureFails = false } = {}) {
 }
 
 for (const reason of ['pointercancel', 'blur', 'Escape', 'dispose', 'pointerup']) {
-  test(`real pointer transaction cleans listeners and ${reason === 'pointerup' ? 'commits' : 'cancels'} on ${reason}`, () => {
+  // Focus moving to a native child HWND is not a user cancellation: keep the dragged width.
+  const commits = reason === 'pointerup' || reason === 'blur';
+  test(`real pointer transaction cleans listeners and ${commits ? 'commits' : 'cancels'} on ${reason}`, () => {
     const f = fixture();
     try {
       const cancel = f.begin();
@@ -40,8 +42,8 @@ for (const reason of ['pointercancel', 'blur', 'Escape', 'dispose', 'pointerup']
       else f.send(reason);
       assert.equal(f.listeners.size, 0);
       assert.equal(f.targetListeners.size, 0);
-      assert.deepEqual(f.ends, reason === 'pointerup' ? [220] : []);
-      assert.equal(f.values.at(-1), reason === 'pointerup' ? 220 : 200);
+      assert.deepEqual(f.ends, commits ? [220] : []);
+      assert.equal(f.values.at(-1), commits ? 220 : 200);
     } finally { delete globalThis.window; }
   });
 }
@@ -61,7 +63,7 @@ test('native-gpu boundary: held left-button drag captures before moving right an
   } finally { delete globalThis.window; }
 });
 
-test('lost capture cancels once, restores width and cannot leave click-to-move resizing active', () => {
+test('lost capture ends once, keeps the dragged width and cannot leave click-to-move resizing active', () => {
   const f = fixture();
   try {
     const cancel = f.begin();
@@ -69,10 +71,23 @@ test('lost capture cancels once, restores width and cannot leave click-to-move r
     f.loseCapture();
     f.send('pointermove', { clientX: 80, buttons: 0 });
     cancel();
-    assert.deepEqual(f.values, [230, 200]);
-    assert.deepEqual(f.ends, []);
+    assert.deepEqual(f.values, [230]);
+    assert.deepEqual(f.ends, [230]);
     assert.equal(f.listeners.size + f.targetListeners.size, 0);
   } finally { delete globalThis.window; }
+});
+
+test('active drag marks the document so native surfaces do not take focus mid-resize', () => {
+  const f = fixture();
+  const dataset = {};
+  globalThis.document = { documentElement: { dataset } };
+  try {
+    f.begin();
+    assert.equal(dataset.aerotabResizing, '');
+    f.send('pointermove', { clientX: 30 });
+    f.send('pointerup', { buttons: 0 });
+    assert.equal('aerotabResizing' in dataset, false);
+  } finally { delete globalThis.window; delete globalThis.document; }
 });
 
 test('missed mouseup ends on buttons=0 without applying unpressed pointer movement', () => {

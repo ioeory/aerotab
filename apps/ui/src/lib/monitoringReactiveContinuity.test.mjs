@@ -15,7 +15,8 @@ const footerEffect = app.slice(footerStart, app.indexOf('\n  });', footerStart) 
 assert.ok(footerStart >= 0, 'actual footer subscription effect must exist');
 const detail = read('../components/HostSystemPanel.svelte');
 const subscriptionEffect = detail.split('\n').find(line => line.includes('$effect(() => { if (!profileId) return; return monitoring.service.subscribe('));
-assert.ok(profilesEffect && subscriptionEffect, 'actual monitoring effects must be found');
+const errorEffect = detail.split('\n').find(line => line.includes('$effect(() => { if (snapshot.error)'));
+assert.ok(profilesEffect && subscriptionEffect && errorEffect, 'actual monitoring effects must be found');
 const core = read('./monitoring.ts');
 const store = read('./hostMonitoring.svelte.ts').replace(/^import .*;\n/gm, '');
 const source = `
@@ -27,8 +28,16 @@ class Diagnostics { events = $state([]); record(...args) { this.events = [...thi
 const diagnostics = new Diagnostics();
 const PROFILES_CHANGED = 'aerotab:profiles-changed';
 ${store}
-let wall = 10000, mono = 1000, resolves = [], timers = new Map(), nextTimer = 0;
-const rpc = { call: () => new Promise(resolve => resolves.push(resolve)) };
+let wall = 10000, mono = 1000, resolves = [], rejects = [], timers = new Map(), nextTimer = 0;
+const rpc = { call: (method, params) => {
+  // Desktop invoke serializes parameters synchronously, reading Svelte proxies.
+  JSON.stringify(params);
+  return new Promise((resolve, reject) => { resolves.push(resolve); rejects.push(reject); });
+} };
+let statusState = $state({ id: 0, text: '' });
+let notifications = 0;
+const m = key => key;
+const onError = message => { notifications++; diagnostics.record('status', message); statusState = { id: statusState.id + 1, text: message }; };
 const monitoring = getHostMonitoring(rpc);
 // Keep the production service, diagnostics callback and revision watcher intact;
 // control only its clock/timer boundary to exercise real repeated probes quickly.
@@ -52,7 +61,7 @@ const refreshHostStats = () => {};
 let displayed;
 const snapshot = $derived.by(() => { void monitoring.revision; return monitoring.service.snapshot(profileId ?? ''); });
 const stop = effect_root(() => {
-  ${profilesEffect} ${subscriptionEffect} ${footerEffect}
+  ${profilesEffect} ${subscriptionEffect} ${footerEffect} ${errorEffect}
   $effect(() => { displayed = { cpu: snapshot.latest?.stats.cpu_percent, history: snapshot.history.length, network: networkState(snapshot) }; });
 });
 flushSync();
@@ -62,7 +71,7 @@ for (let i = 0; i < 8; i++) {
     network_interfaces: [{ name: 'eth0', rx_bytes: 1000 + i * 100, tx_bytes: 2000 + i * 200 }] });
   await new Promise(resolve => setImmediate(resolve));
   flushSync();
-  if (subscriptions !== 2 + i || releases !== i) throw Error('sample restarted leases: ' + subscriptions + '/' + releases);
+  if (subscriptions !== 2 || releases !== 0) throw Error('sample restarted leases: ' + subscriptions + '/' + releases);
   const snapshot = monitoring.service.snapshot('a');
   if (snapshot.history.length !== i + 1) throw Error('history reset at round ' + i);
   if (displayed.cpu !== 2.4 + i || displayed.history !== i + 1) throw Error('UI snapshot stopped updating at round ' + i);
@@ -71,13 +80,53 @@ for (let i = 0; i < 8; i++) {
   savedProfiles = [profile('renamed-' + i)];
   flushSync();
   if (snapshot.history.length !== monitoring.service.snapshot('a').history.length) throw Error('profile refresh reset history');
-  if (subscriptions !== 3 + i || releases !== 1 + i) throw Error('sampling recreated subscription: ' + subscriptions + '/' + releases);
+  if (subscriptions !== 2 || releases !== 0) throw Error('profile refresh recreated subscription: ' + subscriptions + '/' + releases);
+  if (timers.size !== 1) throw Error('profile refresh lost the next sampling timer');
   wall -= 5000; mono += 1000;
   const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn());
   flushSync();
 }
+// An unreachable host must not make the error-reporting effect subscribe to
+// the diagnostic/status state it mutates, starving all further UI interactions.
+rejects.at(-1)(new Error('unreachable'));
+await new Promise(resolve => setImmediate(resolve));
+flushSync();
+if (notifications !== 1 || statusState.text !== 'probeFailed') throw Error('failure notification missing or repeated');
+if (monitoring.service.snapshot('a').error !== 'probeFailed') throw Error('failure state missing');
+// Later diagnostics/status writes must not replay the same error notification.
+onError('unrelated status');
+flushSync();
+if (notifications !== 2 || statusState.text !== 'unrelated status') throw Error('error effect subscribed to reporting state');
+const retryTimers = [...timers.values()]; timers.clear(); retryTimers.forEach(fn => fn());
+flushSync();
+rejects.at(-1)(new Error('still unreachable'));
+await new Promise(resolve => setImmediate(resolve));
+flushSync();
+if (monitoring.service.snapshot('a').failures !== 2 || notifications > 4) throw Error('repeated failure did not settle');
+const settledNotifications = notifications;
+flushSync();
+if (notifications !== settledNotifications) throw Error('failure reporting kept running without a new sample');
+// Successful retries must resume both the panel and footer, then restore rates
+// on the second consecutive sample without reopening the system detail panel.
+for (let i = 0; i < 2; i++) {
+  wall += 5000; mono += 5000;
+  const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn());
+  resolves.at(-1)({ hostname: 'same-host', cpu_percent: 40 + i, uptime_seconds: 200 + i,
+    network_interfaces: [{ name: 'eth0', rx_bytes: 10000 + i * 500, tx_bytes: 20000 + i * 1000 }] });
+  await new Promise(resolve => setImmediate(resolve));
+  flushSync();
+  if (displayed.cpu !== 40 + i || hostStats.cpu_percent !== 40 + i || hostStatsStatus !== 'ok') throw Error('detail/footer did not recover');
+  if (displayed.network.status !== (i ? 'ready' : 'waitingSecond')) throw Error('rates did not recover');
+  if (timers.size !== 1 || subscriptions !== 2 || releases !== 0) throw Error('recovery lost persistent sampling lease');
+}
+let navigated = $state(false), renderedNavigation = false;
+const stopNavigation = effect_root(() => { $effect(() => { renderedNavigation = navigated; }); });
+navigated = true;
+flushSync();
+if (!renderedNavigation) throw Error('UI scheduler stopped responding after failed connection');
+stopNavigation();
 stop(); monitoring.service.dispose();
-if (releases !== 10) throw Error('leases not released');
+if (releases !== 2) throw Error('leases not released');
 `;
 const javascript = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 const code = compileModule(javascript, { filename: 'monitoring-continuity.svelte.js', generate: 'client' }).js.code

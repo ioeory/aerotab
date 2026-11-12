@@ -34,14 +34,27 @@ export function capacityTone(value: number | null | undefined): 'normal' | 'warn
 }
 export function sparklinePaths(input: { at: number; value: number | null | undefined; breakBefore?: boolean }[], ceiling = 100): string[] {
   const points = input.slice(-60); if (points.length < 2) return [];
-  const start = points[0]!.at, duration = points.at(-1)!.at - start;
-  if (duration <= 0 || !Number.isFinite(ceiling) || ceiling <= 0) return [];
+  if (points.some((point, index) => index > 0 && !(point.at > points[index - 1]!.at)) || !Number.isFinite(ceiling) || ceiling <= 0) return [];
+  // X is drawable-sample order, not wall-clock and not raw history slots.
+  // Sampling pauses use explicit breakBefore. Null rates (network needs 2 probes)
+  // skip without consuming width and without fragmenting the series — a null
+  // per-sample break left only the final consecutive run as a short right-edge
+  // dash with a large blank region to its left.
+  const vertices: { value: number; breakBefore: boolean }[] = [];
+  let breakPending = false;
+  for (const point of points) {
+    if (point.breakBefore) breakPending = true;
+    if (point.value == null || !Number.isFinite(point.value)) continue;
+    vertices.push({ value: point.value, breakBefore: breakPending && vertices.length > 0 });
+    breakPending = false;
+  }
+  if (vertices.length < 2) return [];
+  const step = 200 / (vertices.length - 1);
   const paths: string[] = []; let segment: string[] = [];
   const finish = () => { if (segment.length > 1) paths.push(`M${segment.join(' L')}`); segment = []; };
-  for (const point of points) {
+  for (const [index, point] of vertices.entries()) {
     if (point.breakBefore) finish();
-    if (point.value == null || !Number.isFinite(point.value)) { finish(); continue; }
-    const x = (point.at - start) / duration * 200, y = 30 - Math.max(0, Math.min(1, point.value / ceiling)) * 28;
+    const x = index * step, y = 30 - Math.max(0, Math.min(1, point.value / ceiling)) * 28;
     segment.push(`${x.toFixed(1)},${y.toFixed(1)}`);
   }
   finish(); return paths;

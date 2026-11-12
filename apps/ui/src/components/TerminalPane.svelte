@@ -90,6 +90,7 @@
     type TrzszTerminalInput,
     type TrzszTerminalOutput,
   } from '../lib/trzszBridge';
+  import { createRawBypassGate } from '../lib/trzszRawBypass';
   import {
     installWindowsTerminalCaretFix,
     refreshCursorBlinkIfFocused,
@@ -239,6 +240,10 @@
   let cleanupFileDrag: (() => void) | null = null;
   let sessionWriteChain: Promise<void> = Promise.resolve();
   const transferDetector = new TerminalTransferDetector();
+  const rawBypassGate = createRawBypassGate({
+    isTransferring: () => !!transferFilter?.isTransferringFiles(),
+    release: () => { void nativeCtl?.setRawBypass(false); },
+  });
   const canOpenSftp = $derived(session.kind === 'Ssh' && !!onOpenSftp);
   const canOpenExternalNative = $derived(
     session.kind === 'Ssh' || session.kind === 'ssh' || session.kind === 'LocalShell' || session.kind === 'local',
@@ -710,6 +715,12 @@
 
   async function sendSessionInputAsync(input: TrzszTerminalInput): Promise<void> {
     if (typeof input === 'string') {
+      // Both the WebView grid and HWND input bridge use this ordered writer.
+      // Enter must reveal the live cursor after browsing scrollback; mouse
+      // reports and unrelated control sequences must retain the viewport.
+      if (useNative && (input.includes('\r') || input.includes('\n'))) {
+        await rpc.call('terminal.scroll', { id: session.id, cmd: 'bottom' });
+      }
       if (input.includes('\x03')) {
         interruptOutputCooldownUntil = performance.now() + INTERRUPT_OUTPUT_COOLDOWN_MS;
       }
@@ -797,6 +808,7 @@
     if (!enabled) {
       if (transferFilter?.isTransferringFiles()) transferFilter.stopTransferringFiles();
       transferFilter = null;
+      rawBypassGate.dispose();
       void nativeCtl?.setRawBypass(false);
       return;
     }
@@ -884,9 +896,7 @@
       console.warn('trzsz output processing failed', err);
       void nativeCtl?.feed(bytes);
     }
-    if (!transferFilter.isTransferringFiles()) {
-      void nativeCtl?.setRawBypass(false);
-    }
+    rawBypassGate.onServerOutput();
   }
 
   function onNativeTrzszDetected(): void {
@@ -997,13 +1007,15 @@
     const focusListener = (ev: Event) => {
       const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
       if (detail?.sessionId && detail.sessionId !== session.id) return;
-      if (!active) return;
+      // Do not gate on `active` here: dispatchFocusPane can race Svelte's prop flush
+      // after tabs.focusPane; sessionId match is the authoritative target.
       if (exited) {
         focusExitedOverlay();
         return;
       }
       requestAnimationFrame(() => {
-        if (useNative) nativeView?.focus();
+        // force: active prop may not have flushed yet after tabs.focusPane.
+        if (useNative) nativeView?.focus({ force: true });
         else focusTerminalIfAllowed(term);
       });
     };
@@ -1291,10 +1303,15 @@
     wasActive = isActive;
     if (!becameActive) return;
     untrack(() => tabs.clearActivity(session.id));
+    // Immediate OS/DOM focus on activate — scheduleTerminalFit retries after layout.
+    if (!searchOpen) {
+      if (useNative) nativeView?.focus({ force: true });
+      else focusTerminalAuto(term, host);
+    }
     scheduleTerminalFit(() => {
       safeFit(true);
       if (searchOpen) return;
-      if (useNative) nativeView?.focus();
+      if (useNative) nativeView?.focus({ force: true });
       else focusTerminalAuto(term, host);
     });
   });
@@ -1549,6 +1566,7 @@
     cleanupHost = null;
     cleanupFileDrag?.();
     cleanupFileDrag = null;
+    rawBypassGate.dispose();
     cleanupSearchListener?.();
     cleanupSearchListener = null;
     macTextareaGuard?.();
@@ -1865,7 +1883,8 @@
     role="application"
     data-aerotab-context-menu=""
     class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
-           {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+           {active ? '' : 'opacity-[0.92]'}
+           {active || nativeBackend !== 'native-surface' ? '' : 'pointer-events-none'}"
     oncontextmenu={onContextMenu}
     onpointerup={onPointerUp}
     ondragover={onTransferDragOver}
@@ -1921,8 +1940,9 @@
     role="application"
     data-aerotab-context-menu=""
     class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
-           {active ? '' : 'pointer-events-none opacity-[0.92]'}"
+           {active ? '' : 'opacity-[0.92]'}"
     oncontextmenu={onContextMenu}
+    onpointerdown={() => { if (!active) onActivate?.(); }}
     onpointerup={onPointerUp}
     ondragover={onTransferDragOver}
     ondrop={onTransferDrop}

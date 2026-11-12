@@ -24,6 +24,7 @@ export const en = {
   networkNoEligible: 'No interfaces eligible for overview', networkIncomplete: 'Incomplete interface rates; inspect interfaces below',
   networkInvalidCounters: 'No comparable counters (reset, new interface or invalid interval)', networkReady: 'Consecutive interface samples available',
   coreCount: 'cores',
+  failureProfile: 'Profile lookup failed', failureStats: 'SSH statistics request failed', failureProcessing: 'Sample processing failed', failureTimeout: 'Sampling timed out (45 s limit)',
 } as const;
 export const zh: Record<keyof typeof en, string> = {
   title: '主机监控', newPanel: '新建面板', addHosts: '添加主机', rename: '重命名', delete: '删除面板',
@@ -46,6 +47,7 @@ export const zh: Record<keyof typeof en, string> = {
   networkNoEligible: '无可汇总的网络接口', networkIncomplete: '接口速率不完整，请查看下方接口',
   networkInvalidCounters: '无可比较的计数器（重置、新接口或无效采样间隔）', networkReady: '已取得连续接口样本',
   coreCount: '核',
+  failureProfile: '读取主机配置失败', failureStats: 'SSH 统计请求失败', failureProcessing: '采样数据处理失败', failureTimeout: '采样超时（上限 45 秒）',
 };
 export function monitoringMessage(key: keyof typeof en): string { return i18n.resolvedLocale === 'zh-CN' ? zh[key] : en[key]; }
 export function monitoringNumber(value: number | null | undefined, suffix = ''): string {

@@ -5,7 +5,7 @@
 
 import type { RpcClient } from './rpc';
 // @ts-ignore Node's native TS test runner requires an explicit extension.
-import { syncTargetFingerprint } from './syncWizard.ts';
+import { hasSyncApproval } from './syncWizard.ts';
 
 export type SyncBackend = 'webdav' | 'git' | 's3' | 'drive';
 export type SyncGroup =
@@ -273,7 +273,7 @@ export async function applyPersistedAutoSync(
   settings: PersistedSyncSettings,
   opts?: { force?: boolean },
 ): Promise<void> {
-  if (settings.setupVersion === 3 && (!settings.firstSyncApproved || settings.approvedTarget !== syncTargetFingerprint(settings))) {
+  if (settings.setupVersion === 3 && !hasSyncApproval(settings)) {
     await rpc.call('sync.stopAutoSync', {});
     return;
   }
@@ -333,23 +333,22 @@ export async function bootstrapSyncEngine(rpc: RpcClient): Promise<SyncBootstrap
       if (!token) return 'no_git_https_secret';
     }
     const r = await rpc.call<{ secret: string }>('secret.getMaster', secretParams(settings));
+    // Keep keyring failures separate from configuration/scheduler failures.
+    if (!r.secret) return 'no_keyring_secret';
     await configureSyncEngineFromSettings(rpc, settings, r.secret);
-    await applyPersistedAutoSync(rpc, settings);
-    if (!wasConfigured) {
-      return 'configured';
-    }
-    return 'already_configured';
   } catch (e) {
     const msg = (e as Error).message ?? '';
     if (msg.includes('HTTPS token is missing')) return 'no_git_https_secret';
-    return 'no_keyring_secret';
+    throw e;
   }
+  await applyPersistedAutoSync(rpc, settings);
+  return wasConfigured ? 'already_configured' : 'configured';
 }
 
 /** Ensure engine is live before sync.now (palette or settings). */
 export async function ensureSyncEngineConfigured(rpc: RpcClient): Promise<void> {
   const settings = await loadPersistedSyncSettings(rpc);
-  if (settings?.setupVersion === 3 && (!settings.firstSyncApproved || settings.approvedTarget !== syncTargetFingerprint(settings))) throw new Error('Finish Config sync setup and approve the first merge preview before syncing.');
+  if (settings?.setupVersion === 3 && !hasSyncApproval(settings)) throw new Error('Finish Config sync setup and approve the first merge preview before syncing.');
   if (await isSyncEngineConfigured(rpc)) return;
   const boot = await bootstrapSyncEngine(rpc);
   if (boot === 'configured' || boot === 'already_configured') return;

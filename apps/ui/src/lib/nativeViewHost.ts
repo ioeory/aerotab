@@ -33,6 +33,8 @@ export function nativeOutputSeq(value: unknown): bigint {
   return parsed;
 }
 
+export type NativeFocusResult = 'applied' | 'skipped';
+
 export type NativeViewInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 /** Match pane layout barrier: CSS/DPI round-trips may drift by a fraction of a pixel. */
@@ -115,7 +117,8 @@ export function createNativeViewHost(options: {
   let stopping: Promise<void> | null = null;
   let desired: { geometry: NativeViewGeometry; visible: boolean; cfg?: NativeViewConfig; revision: number } | null = null;
   let pendingConfig: NativeViewConfig | undefined;
-  let focusing: Promise<void> | null = null;
+  let focusing: Promise<NativeFocusResult> | null = null;
+  let focusEpoch = 0;
   let focusAllowed = false;
   let visible = false;
   let suspendedForWebview = false;
@@ -144,6 +147,7 @@ export function createNativeViewHost(options: {
     async quiesceInput(): Promise<number> {
       if (disposed || !attached || !generation || !desiredGeometry || !lastConfig) throw new Error('native input freeze unavailable');
       inputFrozen = true;
+      focusEpoch++;
       cancelPasteWaiters();
       inputReady = true;
       focusAllowed = false;
@@ -156,7 +160,7 @@ export function createNativeViewHost(options: {
     },
     async setInputRecovery(pending: boolean) {
       inputRecovery = pending;
-      if (pending) { focusAllowed = false; cancelPasteWaiters(); }
+      if (pending) { focusEpoch++; focusAllowed = false; cancelPasteWaiters(); }
       if (!disposed && attached && desiredGeometry && lastConfig) await this.update(desiredGeometry, visible, lastConfig);
     },
     async acknowledgeInput(seq: number) {
@@ -167,6 +171,7 @@ export function createNativeViewHost(options: {
     /** Reversible input cut: hide the same widget, then capture its final reservation. */
     async suspendForWebview(): Promise<number> {
       if (disposed || !attached || !desiredGeometry || !lastConfig || inputFrozen) throw new Error('native suspension unavailable');
+      focusEpoch++;
       focusAllowed = false;
       suspendedForWebview = true;
       cancelPasteWaiters();
@@ -259,7 +264,7 @@ export function createNativeViewHost(options: {
       desired = { geometry, visible: shown, revision: ++requestedRevision, ...(pendingConfig ? { cfg: pendingConfig } : {}) };
       tracePaste('visibility-update', 'received', undefined, { revision: requestedRevision, shown });
       setDrawVisible(shown);
-      if (!shown) visible = false; // Suppress focus immediately, before IPC completes.
+      if (!shown) { focusEpoch++; visible = false; } // Suppress focus immediately, before IPC completes.
       if (!updating) {
         updating = (async () => {
           while (desired && !disposed && attached) {
@@ -317,24 +322,41 @@ export function createNativeViewHost(options: {
       drawing = wait.finally(() => { drawing = null; });
       return drawing;
     },
-    setFocusAllowed(allowed: boolean) { focusAllowed = allowed; },
-    focus(): Promise<void> {
-      if (disposed || !attached || !focusAllowed) return Promise.resolve();
-      if (!focusing) {
-        focusing = (async () => {
-          await updating;
-          if (disposed || !attached || !focusAllowed || !visible) return;
-          try { await invoke('native_view_focus', { sessionId }); }
-          catch (error) {
-            // A dock/modal hide can reach the UI thread after focus was queued.
-            // Rejection of that stale focus is not a rendering/attachment failure.
-            const code = (error as { code?: string } | null)?.code;
-            if (code === 'input_not_ready' && (!focusAllowed || !visible || inputFrozen || inputRecovery || suspendedForWebview || disposed)) return;
-            throw nativeSurfaceError(error);
-          }
-        })().finally(() => { focusing = null; });
-      }
-      return focusing;
+    setFocusAllowed(allowed: boolean) { if (focusAllowed !== allowed) focusEpoch++; focusAllowed = allowed; },
+    focus(): Promise<NativeFocusResult> {
+      const request = ++focusEpoch;
+      const expectedGeneration = generation;
+      const current = () => request === focusEpoch && !disposed && attached && focusAllowed && visible
+        && generation === expectedGeneration && !inputFrozen && !inputRecovery && !suspendedForWebview;
+      if (disposed || !attached || !focusAllowed) return Promise.resolve('skipped');
+      // Chain after any in-flight focus so a pane switch that races an earlier
+      // no-op (focusAllowed flipped mid-await) still issues SetFocus.
+      let focusQueued = false;
+      const run = focusing?.then(() => {}, () => {}) ?? Promise.resolve();
+      const pending = run.then(async (): Promise<NativeFocusResult> => {
+        focusQueued = true;
+        await updating;
+        if (!current()) return 'skipped';
+        try {
+          await invoke('native_view_focus', { sessionId });
+          if (!current()) return 'skipped';
+          // A resolved IPC only means the request ran, not that OS focus stuck.
+          const state = await invoke('native_view_state', { sessionId }) as { generation?: string; focused?: boolean; error?: unknown };
+          checkState(state);
+          return current() && state.generation === expectedGeneration && state.focused === true ? 'applied' : 'skipped';
+        }
+        catch (error) {
+          // A dock/modal hide can reach the UI thread after focus was queued.
+          // Rejection of that stale focus is not a rendering/attachment failure.
+          const code = (error as { code?: string } | null)?.code;
+          if (code === 'input_not_ready' && !current()) return 'skipped';
+          throw nativeSurfaceError(error);
+        }
+      }).finally(() => {
+        if (focusQueued && focusing === pending) focusing = null;
+      });
+      focusing = pending;
+      return pending;
     },
     async state() {
       try {

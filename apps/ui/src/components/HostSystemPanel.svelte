@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Cpu, HardDrive, Network, Activity } from '@lucide/svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { MountUsage } from '../lib/monitoringTypes';
@@ -32,7 +33,9 @@
     { label: m('latency'), value: number(sample?.probeMs, ' ms') },
   ]);
   $effect(() => { if (!profileId) return; return monitoring.service.subscribe(profileId, 5000); });
-  $effect(() => { if (snapshot.error) onError(m('probeFailed')); });
+  // Error reporting reads/writes reactive diagnostics and status; those must
+  // not become dependencies of this effect and recursively report the failure.
+  $effect(() => { if (snapshot.error) untrack(() => onError(m('probeFailed'))); });
   function kb(value: number | null | undefined): string { return bytes(value == null ? null : value * 1024); }
   function uptime(seconds: number | null | undefined): string { return seconds == null ? '—' : `${Math.floor(seconds / 86400)}d ${Math.floor(seconds % 86400 / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`; }
   function bounded(value: number): number { return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0; }
@@ -42,7 +45,7 @@
     <header><strong>{m('system')}</strong><span class:busy={snapshot.sampling}>{monitoring.service.isPaused() ? m('paused') : snapshot.sampling ? m('sampling') : ''}</span></header>
     {#if !profileId}<p class="empty">{m('sshOnly')}</p>
     {:else}
-      {#if snapshot.error}<p class="error" role="status">{m('probeFailed')}{sample ? ` ${m('stale')}` : ''}</p>{/if}
+      {#if snapshot.error}<p class="error" role="status">{m('probeFailed')}{snapshot.failureStage ? ` ${m(({ profile: 'failureProfile', stats: 'failureStats', processing: 'failureProcessing', timeout: 'failureTimeout' } as const)[snapshot.failureStage])}` : ''}{sample ? ` ${m('stale')}` : ''}</p>{/if}
       {#if !sample}<p class="empty">{m('waiting')}</p>
       {:else}
         <div class="host-line"><h3 title={stats?.hostname ?? profileId}>{stats?.hostname ?? profileId}</h3><time datetime={new Date(sample.at).toISOString()} title={m('lastSample')}>{new Date(sample.at).toLocaleTimeString()}</time></div>

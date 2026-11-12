@@ -20,6 +20,29 @@ test('approval is scoped to exact target and groups', async()=>{
   assert.deepEqual(calls,['sync.stopAutoSync']);
 });
 
+test('persisted legacy approval with reordered group keys restores auto-sync without new consent', async () => {
+  const value = { backend: 'git', gitRepoPath: '/mock', setupVersion: 3, firstSyncApproved: true, autoSyncEnabled: true, autoSyncMinutes: 100, enabledGroups: { Appearance: true, Connections: true } };
+  value.approvedTarget = JSON.stringify([['backend', 'git'], ['enabledGroups', { Connections: true, Appearance: true }], ['gitRepoPath', '/mock']]);
+  const calls = [];
+  await applyPersistedAutoSync({ async call(method, args) { calls.push([method, args]); return { configured: true, autoRunning: false }; } }, value);
+  assert.ok(calls.some(([method, args]) => method === 'sync.startAutoSync' && args.interval_ms === 6000000));
+  value.enabledGroups.Credentials = true;
+  calls.length = 0;
+  await applyPersistedAutoSync({ async call(method) { calls.push([method]); return {}; } }, value);
+  assert.deepEqual(calls, [['sync.stopAutoSync']]);
+});
+test('bootstrap propagates scheduler errors instead of reporting missing credentials', async () => {
+  const value = { backend: 'git', gitRepoPath: '/mock', autoSyncEnabled: true };
+  const rpc = { async call(method) {
+    if (method === 'settings.get') return { value };
+    if (method === 'sync.status') return { configured: true };
+    if (method === 'secret.hasMaster') return { has: true };
+    if (method === 'secret.getMaster') return { secret: 'mock' };
+    if (method === 'sync.startAutoSync') throw Error('merge approval required');
+    return {};
+  } };
+  await assert.rejects(bootstrapSyncEngine(rpc), /merge approval required/);
+});
 test('legacy transport secrets migrate to keyring before settings are scrubbed', async () => {
   const calls = [];
   const value = { backend: 'webdav', webdavUrl: 'https://dav.invalid', webdavPassword: 'private', gitSshPassphrase: 'phrase' };

@@ -10,6 +10,16 @@ test('wizard cannot skip authorization, password, content, configuration or prev
   assert.equal(syncSetupComplete(state), false);
   state.preview = true; assert.equal(syncSetupComplete(state), true);
 });
+test('approval fingerprint survives backend sorting nested group keys', () => {
+  const value = { backend: 'git', gitRepoPath: '/mock', enabledGroups: { Connections: true, Appearance: true, Shortcuts: true, PluginCfg: true, Credentials: false, Notes: false } };
+  const restored = { ...value, enabledGroups: Object.fromEntries(Object.entries(value.enabledGroups).sort(([a], [b]) => a.localeCompare(b))) };
+  assert.equal(syncTargetFingerprint(value), syncTargetFingerprint(restored));
+  assert.notEqual(syncTargetFingerprint(value), syncTargetFingerprint({ ...restored, enabledGroups: { ...restored.enabledGroups, Credentials: true } }));
+});
+test('approval fingerprint survives JSON persistence and omitted optional fields', () => {
+  const value = { backend: 'git', gitRepoPath: '/mock', gitRemoteUrl: 'https://git.invalid/repo', optional: undefined, enabledGroups: { Connections: true } };
+  assert.equal(syncTargetFingerprint(value), syncTargetFingerprint(JSON.parse(JSON.stringify(value))));
+});
 test('target identity changes invalidate approval while timer changes do not', () => {
   const a={backend:'s3',s3Bucket:'one',enabledGroups:{Connections:true}};
   assert.notEqual(syncTargetFingerprint(a),syncTargetFingerprint({...a,s3Bucket:'two'}));

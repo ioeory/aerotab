@@ -202,6 +202,7 @@
     {@const focused = tab.activePaneId === pane.id}
     {@const hidden = !!tab.maximizedPaneId && tab.maximizedPaneId !== pane.id}
     <!-- Keep mounted while maximized-away so VT/xterm are not remounted (same as layoutVisible). -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions (focus-only mousedown guard; terminal descendants own keyboard input) -->
     <div
       class="group absolute z-0 min-w-0 min-h-0 overflow-hidden bg-[var(--color-bg)]
              {focused && !hidden ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
@@ -213,6 +214,19 @@
       role="group"
       tabindex="-1"
       onpointerdown={() => focusPane(pane.id)}
+      onmousedown={(event) => {
+        // WebView pane shell is focusable (tabindex=-1). A left click that is
+        // meant for the terminal — whether it hit the shell (legacy
+        // pointer-events:none) or the canvas/host — must not let the shell's
+        // mousedown default steal IME focus after activation.
+        // Leave buttons, inputs, drag chrome and native-surface alone.
+        if (event.button !== 0) return;
+        if (!event.currentTarget.querySelector('.terminal-host [data-terminal-view-backend="webview"]')) return;
+        const target = event.target;
+        if (!(target instanceof Element) || !event.currentTarget.contains(target)) return;
+        if (target.closest('button, input, textarea, a, .pane-drag-handle')) return;
+        event.preventDefault();
+      }}
     >
         {#if tab.panes.length > 1}
           <div
@@ -278,7 +292,12 @@
           {rpc}
           session={pane}
           active={focused && tabVisible}
-          onActivate={() => { if (tabVisible && !hidden) tabs.focusPane(tab.id, pane.id); }}
+          onActivate={() => {
+            if (!tabVisible || hidden) return;
+            nativeActivationRouter.invalidate();
+            tabs.focusPane(tab.id, pane.id);
+            requestAnimationFrame(() => dispatchFocusPane(pane.id));
+          }}
           rendererOverride={terminalViewChoices[pane.id]}
           {nativeSurfaceOccluded}
           layoutVisible={!hidden}

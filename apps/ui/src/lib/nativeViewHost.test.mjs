@@ -20,6 +20,38 @@ const capabilities = { available: true, backend: 'gtk-glarea', geometryUnit: 'cs
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { resolve, promise }; };
 
+test('focus reports skipped until matching live OS focus is confirmed and ignores superseded completion', async () => {
+ const {createNativeViewHost}=await api();
+ let focused=false;
+ let stateGeneration='g';
+ let pause=null;
+ let issued;
+ const host=createNativeViewHost({sessionId:'s',invoke:async cmd=>{
+  if(cmd==='native_view_capabilities')return capabilities;
+  if(cmd==='native_view_attach')return {generation:'g'};
+  if(cmd==='native_view_focus'){issued?.();if(pause)await pause.promise;return;}
+  if(cmd==='native_view_state')return {generation:stateGeneration,focused};
+  return {};
+ }});
+ try{
+  assert.equal(await host.focus(),'skipped');
+  await host.start(geometry);await host.update(geometry,true);host.setFocusAllowed(true);
+  assert.equal(await host.focus(),'skipped','IPC resolving alone is not evidence of OS focus');
+  focused=true;assert.equal(await host.focus(),'applied');
+  stateGeneration='replaced';assert.equal(await host.focus(),'skipped');stateGeneration='g';
+  pause=deferred();const started=new Promise(resolve=>{issued=resolve;});
+  const old=host.focus();await started;
+  host.setFocusAllowed(false);host.setFocusAllowed(true);
+  pause.resolve();assert.equal(await old,'skipped','re-allowing must not validate an old completion');
+  pause=null;assert.equal(await host.focus(),'applied','fresh request for the same pane remains usable');
+  pause=deferred();const concurrentStarted=new Promise(resolve=>{issued=resolve;});
+  const previous=host.focus();await concurrentStarted;
+  const latest=host.focus();pause.resolve();
+  assert.equal(await previous,'skipped','new same-pane request invalidates old completion');
+  assert.equal(await latest,'applied','new same-pane request runs after the old request');
+ }finally{await host.dispose();}
+});
+
 test('clipboard generation verifies live host replacement and invalidates on dispose', async () => {
   const { createNativeViewHost } = await api();
   let generation = 'g';

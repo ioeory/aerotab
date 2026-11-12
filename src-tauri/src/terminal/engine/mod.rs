@@ -24,13 +24,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::search::RegexSearch;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, Term, TermDamage};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Notify};
@@ -637,11 +637,69 @@ impl TerminalEngine {
             let mut g = self.inner.lock().unwrap();
             g.cell_px = (cell_w, cell_h);
             let size = TermSize::new(cols.max(1) as usize, rows.max(1) as usize);
+            let alt = g.term.mode().contains(TermMode::ALT_SCREEN);
+            let visible_lines = (!alt).then(|| Self::lines_from_viewport_top(g.term.grid()));
             g.term.resize(size);
+            if let Some(lines) = visible_lines {
+                Self::reclaim_reflowed_rows(&mut g.term, lines);
+            }
             g.full_pending = true;
             g.dirty = true;
         }
         self.redraw.notify_one();
+    }
+
+    fn starts_logical_line(grid: &Grid<Cell>, y: i32) -> bool {
+        y <= -(grid.history_size() as i32)
+            || !grid[Line(y - 1)][Column(grid.columns() - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
+    }
+
+    /// Logical lines from the viewport top through the cursor line. The top row
+    /// counts as a start even when it continues a line from scrollback.
+    fn lines_from_viewport_top(grid: &Grid<Cell>) -> usize {
+        let cursor = grid.cursor.point.line.0.max(0);
+        1 + (1..=cursor)
+            .filter(|&y| Self::starts_logical_line(grid, y))
+            .count()
+    }
+
+    /// alacritty keeps the cursor row fixed when narrowing, so rows produced by
+    /// reflow above it go to scrollback even with blank rows below the cursor,
+    /// leaving a mid-line fragment at the viewport top. Pull back only rows of
+    /// lines that were visible before the resize, never older scrollback.
+    fn reclaim_reflowed_rows(term: &mut Term<EventQueue>, visible_lines: usize) {
+        let grid = term.grid();
+        let screen = grid.screen_lines();
+        let cursor = grid.cursor.point.line.0;
+        if cursor < 0 || grid.history_size() == 0 {
+            return;
+        }
+        let blank_below = (cursor + 1..screen as i32)
+            .rev()
+            .take_while(|&y| grid[Line(y)].is_clear())
+            .count();
+        let floor = -(blank_below.min(grid.history_size()) as i32);
+        let mut seen = 0;
+        let mut top = cursor;
+        while top >= floor {
+            if Self::starts_logical_line(grid, top) {
+                seen += 1;
+                if seen == visible_lines {
+                    break;
+                }
+            }
+            top -= 1;
+        }
+        let pull = (-top.max(floor)).max(0) as usize;
+        if pull == 0 {
+            return;
+        }
+        let cols = grid.columns();
+        let grid = term.grid_mut();
+        grid.resize(true, screen + pull, cols);
+        grid.resize(true, screen, cols);
     }
 
     pub fn scroll(&self, cmd: ScrollCmd) {
@@ -1379,6 +1437,75 @@ mod tests {
             .find(|r| r.fg == frame::COLOR_NAMED | 1)
             .expect("red run");
         assert_eq!(red.chars, vec!['r' as u32, 'e' as u32, 'd' as u32]);
+    }
+
+    const MOTD: &[u8] = b"Linux wtrpro 6.18.18.c1126-trim #1126 SMP PREEMPT_DYNAMIC Wed Sep 16 02:05:34 UTC 2026 x86_64\r\nLast login: Thu Nov 12 01:08:12 2026 from 192.168.3.215\r\nioe@wtrpro:~$ ";
+
+    #[test]
+    fn narrowing_reflow_grows_into_blank_rows_instead_of_scrollback() {
+        let (e, _rx) = engine(62, 20);
+        e.feed(MOTD);
+        for cols in [120u16, 62, 50, 40] {
+            e.resize(cols, 20, 8, 16);
+            let d = decode(&e.snapshot_frame());
+            assert_eq!(d.header.history_size, 0, "cols={cols}");
+            assert!(
+                row_text(&d, 0).starts_with("Linux wtrpro"),
+                "cols={cols} row0={:?}",
+                row_text(&d, 0)
+            );
+        }
+        let d = decode(&e.snapshot_frame());
+        assert!(row_text(&d, 3).starts_with("Last login: Thu Nov 12 01:08:12 2026 fro"));
+        assert!(row_text(&d, 5).starts_with("ioe@wtrpro:~$"));
+        assert_eq!((d.header.cursor_line, d.header.cursor_col), (5, 14));
+    }
+
+    #[test]
+    fn drag_resize_sweep_restores_original_layout() {
+        let (e, _rx) = engine(62, 20);
+        e.feed(MOTD);
+        let rows = |d: &super::frame::decode::Decoded| {
+            (0..6)
+                .map(|y| row_text(d, y).trim_end().to_string())
+                .collect::<Vec<_>>()
+        };
+        let initial = rows(&decode(&e.snapshot_frame()));
+        for cols in [50u16, 30, 10, 3, 2, 10, 30, 120, 90, 62] {
+            e.resize(cols, 20, 8, 16);
+            let d = decode(&e.snapshot_frame());
+            if cols >= 10 {
+                assert!(row_text(&d, 0).starts_with("Linux"), "cols={cols}");
+            }
+        }
+        let d = decode(&e.snapshot_frame());
+        assert_eq!(rows(&d), initial);
+        assert_eq!(d.header.history_size, 0);
+        assert_eq!((d.header.cursor_line, d.header.cursor_col), (3, 14));
+    }
+
+    #[test]
+    fn narrowing_reflow_keeps_overflow_in_scrollback_when_viewport_is_full() {
+        let (e, _rx) = engine(62, 4);
+        e.feed(MOTD);
+        e.resize(40, 4, 8, 16);
+        let d = decode(&e.snapshot_frame());
+        assert_eq!(d.header.history_size, 2);
+        assert!(row_text(&d, 3).starts_with("ioe@wtrpro:~$"));
+        assert_eq!(d.header.cursor_line, 3);
+    }
+
+    #[test]
+    fn narrowing_reflow_does_not_restore_cleared_screen_from_scrollback() {
+        let (e, _rx) = engine(62, 20);
+        e.feed(MOTD);
+        e.feed(b"\x1b[H\x1b[2Jioe@wtrpro:~$ ");
+        e.resize(40, 20, 8, 16);
+        let d = decode(&e.snapshot_frame());
+        assert!(d.header.history_size > 0);
+        assert!(row_text(&d, 0).starts_with("ioe@wtrpro:~$"));
+        assert!(row_text(&d, 1).trim().is_empty());
+        assert_eq!(d.header.cursor_line, 0);
     }
 
     #[test]
