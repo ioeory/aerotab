@@ -1015,7 +1015,10 @@
       }
       requestAnimationFrame(() => {
         // force: active prop may not have flushed yet after tabs.focusPane.
-        if (useNative) nativeView?.focus({ force: true });
+        // keepOsFocus: the focus guard already landed OS focus on the WebView2
+        // document window; issuing MoveFocus here re-triggers Chromium's
+        // internal focus events and loops the restore chain (IME breaks).
+        if (useNative) nativeView?.focus({ force: true, keepOsFocus: true });
         else focusTerminalIfAllowed(term);
       });
     };

@@ -52,7 +52,7 @@ test('explicit activation retries focus after a busy draw even when already rest
  assert.equal(f.events.filter(e=>e[0]==='focus').length,2);
 });
 test('superseded activation cannot focus an inactive pane after prop flush', async () => {
- const scope={tick:async()=>{},canFocusSurface:()=>false,fail:e=>{throw e;},
+ const scope={tick:async()=>{},canFocusSurface:()=>false,canTakeFocus:()=>false,fail:e=>{throw e;},
   desktopFocusRequest:0,focusWebviewDesktop:async()=>{},document:{activeElement:null,hidden:false}};
  const source=text.slice(text.indexOf('  export function focus('),text.indexOf('  /** Await OS view detach')).replace('export function','function');
  const js=ts.transpileModule(source+'\nreturn focus;', {compilerOptions:{target:99,module:0}}).outputText;

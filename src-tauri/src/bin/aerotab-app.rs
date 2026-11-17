@@ -213,6 +213,17 @@ mod focus_guard {
         focus != doc
     }
 
+    /// Is our main window currently the foreground window?
+    /// Used to distinguish a real window deactivation (another app came to
+    /// the foreground) from Chromium-internal LostFocus events (IME
+    /// composition windows, canvas/textarea handoffs), which must not be
+    /// forwarded as window blur or they re-arm the frontend restore chain
+    /// mid-typing and tear down the IME composition.
+    pub(crate) fn foreground_is_main_window() -> bool {
+        let main = MAIN_HWND.load(Ordering::Relaxed);
+        main != 0 && unsafe { GetForegroundWindow() } as isize == main
+    }
+
     /// Does the GUI thread's keyboard focus sit on the outer tao frame
     /// itself? (No foreground check — that is the caller's policy.)
     fn focus_is_on_frame() -> bool {
@@ -3235,8 +3246,21 @@ fn main() {
                 // document window), and double events re-run the frontend
                 // restore chain on every keystroke, tearing down the IME
                 // composition (CJK input breaks).
+                //
+                // Focused(false) from WebView2 LostFocus also fires during
+                // IME composition (the IME window briefly owns Win32 focus)
+                // and Chromium internal focus handoffs — not real window
+                // deactivation. Only forward a blur when another window is
+                // actually foreground; otherwise ignore it.
                 #[cfg(windows)]
-                focus_guard::emit_window_focus(*focused);
+                {
+                    let focused = *focused;
+                    if focused
+                        || focus_guard::foreground_is_main_window()
+                    {
+                        focus_guard::emit_window_focus(focused);
+                    }
+                }
                 #[cfg(not(windows))]
                 {
                     let _ = window.emit("aerotab:window-focus", *focused);

@@ -621,9 +621,21 @@
 
   let desktopFocusRequest = 0;
 
-  /** Native focus remains OS SetFocus via hostAdapter (not click-only). */
-  export function focus(opts?: { force?: boolean }) {
+  /**
+   * Native focus remains OS SetFocus via hostAdapter (not click-only).
+   *
+   * `keepOsFocus`: the caller knows WebView2 already owns OS keyboard focus
+   * (focus guard landed Win32 focus on the document window; window-restore
+   * and aerotab:focus-pane paths). Skip the MoveFocus IPC: each MoveFocus
+   * makes Chromium re-issue internal focus, raising another LostFocus/
+   * GotFocus pair — tauri Focused then re-emits window-focus, the restore
+   * chain re-runs focus(), and the loop tears down the IME composition
+   * window on every keystroke (CJK input breaks). Live trace showed this
+   * feedback loop as ~2000 emit pairs in one typing session.
+   */
+  export function focus(opts?: { force?: boolean; keepOsFocus?: boolean }) {
     const force = !!opts?.force;
+    const keepOsFocus = !!opts?.keepOsFocus;
     const request = ++desktopFocusRequest;
     // becameActive already has active=true: focus IME/OS synchronously so a
     // following mousedown default cannot reclaim the pane shell first.
@@ -643,6 +655,8 @@
       } else {
         const target = controller;
         target?.focus(); // Keep first-click DOM focus synchronous.
+        if (keepOsFocus) return; // OS focus is already on WebView2; MoveFocus
+        // would re-trigger Chromium focus events and loop the restore chain.
         const focusedElement = document.activeElement;
         await focusWebviewDesktop();
         // IPC can outlive a pane switch, modal open, or backend transition.

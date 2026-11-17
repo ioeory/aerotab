@@ -34,9 +34,12 @@ test('window reactivation restores current pane with overlay/input guards and cl
   const backend = readFileSync(new URL('../../../../src-tauri/src/bin/aerotab-app.rs', import.meta.url), 'utf8');
   // Windows routes through the guard's deduped emitter (guard emit + tauri
   // Focused would double-fire now that Chromium raises GotFocus again);
-  // other platforms keep the direct emit. Either way the Focused handler
-  // must forward the event to the frontend restore chain.
-  assert.match(backend, /WindowEvent::Focused\(focused\)[\s\S]*?(?:focus_guard::emit_window_focus\(\*focused\)|window\.emit\("aerotab:window-focus", focused\))/);
+  // blur is only forwarded when the app really lost foreground (IME
+  // composition windows must not be reported as window blur). Other
+  // platforms keep the direct emit. Either way the Focused handler must
+  // forward the event to the frontend restore chain.
+  assert.match(backend, /WindowEvent::Focused\(focused\)[\s\S]*?(?:focus_guard::emit_window_focus\(focused\)|focus_guard::emit_window_focus\(\*focused\)|window\.emit\("aerotab:window-focus", focused\))/);
+  assert.match(backend, /foreground_is_main_window\(\)/);
   // The Focused handler runs nested inside Win32 message dispatch: a
   // synchronous MoveFocus there oscillates parent/child focus (vault modal
   // flicker) and can deadlock the UI thread. The retry must go through IPC.
