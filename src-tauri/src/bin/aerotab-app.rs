@@ -226,6 +226,7 @@ mod focus_guard {
 
     /// Does the GUI thread's keyboard focus sit on the outer tao frame
     /// itself? (No foreground check — that is the caller's policy.)
+    #[allow(dead_code)] // diagnostic twin of focus_not_on_document; keep for live tracing
     fn focus_is_on_frame() -> bool {
         let main = MAIN_HWND.load(Ordering::Relaxed);
         if main == 0 {
@@ -255,6 +256,7 @@ mod focus_guard {
 
     /// Is Win32 keyboard focus stuck on the outer tao frame while AeroTab is
     /// the foreground app? That is the broken state we repair.
+    #[allow(dead_code)] // diagnostic twin of focus_not_on_document; keep for live tracing
     fn focus_stuck_on_frame() -> bool {
         let main = MAIN_HWND.load(Ordering::Relaxed);
         if main == 0 {

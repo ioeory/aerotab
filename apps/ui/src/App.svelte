@@ -43,7 +43,7 @@
   import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
   import { isOverlayBlockingInput, shouldAutoFocusTerminal } from './lib/modalFocus';
-  import { focusTrace } from './lib/desktopFocus';
+  import { focusTrace, focusWebviewDesktop } from './lib/desktopFocus';
   import { listenNativeEvent } from './lib/nativePasteBridge';
   import { syncAerotabOverlayMarker } from './lib/overlayMarker';
   import { completeNativeFocusHandoff, expectNativeFocusHandoff } from './lib/nativeFocusHandoff';
@@ -812,10 +812,10 @@
     // fresh install gives the user a working terminal on launch and remembers
     // sessions across restarts. Set the flags to `false` explicitly to opt
     // out from the Terminal settings page.
+    let restored = 0;
     try {
       const t = await rpc.call<{ value: unknown }>('settings.get', { key: 'terminal' });
       const v = (t.value ?? {}) as Record<string, unknown>;
-      let restored = 0;
       const wantRestore = v.restoreTabs !== false;
       const wantAutoOpen = v.autoOpenTerminal !== false;
       if (wantRestore) {
@@ -841,6 +841,36 @@
       /* ignore */
     }
     restoreReady = true;
+    // Startup session restore (M9) runs while the vault unlock modal may be
+    // open, and the initial window-focus event fires before any restored tab
+    // exists — every focus request is either occluded or has no target pane,
+    // leaving the restored terminal keyboard-dead until a manual click.
+    // Event-driven: whenever the occlusion clears (vault unlock can take
+    // arbitrarily long), land focus on the restored active pane.
+    if (restored > 0) {
+      let settled = false;
+      const tryFocus = () => {
+        if (settled) return;
+        if (isOverlayBlockingInput()) return; // occlusion-clear event retries.
+        settled = true;
+        // One-shot OS focus confirm: the guard's startup Focused(true) fired
+        // before this listener existed and is deduped away on the Rust side,
+        // so Win32 focus may still sit on the frame. desktop_focus_webview
+        // is foreground-gated, so this never steals focus from other apps.
+        void focusWebviewDesktop().catch(() => {});
+        requestAnimationFrame(() => focusActivePane());
+        // Svelte effects (workspacePage -> sessions, pane mount) may not
+        // have flushed yet at occlusion-clear time; one delayed pass closes
+        // the race without re-running the whole chain.
+        setTimeout(() => focusActivePane(), 150);
+      };
+      const onOcclusion = (ev: Event) => {
+        if ((ev as CustomEvent<{ occluded?: boolean }>).detail?.occluded === false) tryFocus();
+      };
+      document.addEventListener(NATIVE_VIEW_OCCLUSION_EVENT, onOcclusion);
+      setTimeout(() => document.removeEventListener(NATIVE_VIEW_OCCLUSION_EVENT, onOcclusion), 10 * 60_000);
+      tryFocus();
+    }
   });
 
   function setStatus(text: string, level: StatusLevel = 'info', autoHideMs = 0) {
@@ -2465,6 +2495,7 @@
   bind:this={vaultUnlockModal}
   {onError}
   onUnlocked={() => { setStatus(i18n.t('sync.vaultUnlocked')); }}
+  onSkip={() => { requestAnimationFrame(() => focusActivePane()); }}
 />
 <SerialModal {rpc} bind:this={serialModal} {onError} />
 <ImportConnectionsWizard

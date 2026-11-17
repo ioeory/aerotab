@@ -778,6 +778,26 @@
     syncSurface?.();
   });
 
+  // Startup modal race (vault unlock `<dialog>`): the webview backend's
+  // onMount `ctl.focus()` gate is skipped while occluded, leaving
+  // `controller.focused=false` — `onKey` then drops every keydown until a
+  // manual click/alt-tab. When occlusion clears while this pane is the
+  // active target and the controller never armed focus, re-assert it once.
+  let occlusionFocusArmed = false;
+  $effect(() => {
+    if (backend !== 'webview' || disposed) return;
+    if (globalOccluded || !active || !visible || occluded) return;
+    if (occlusionFocusArmed) return;
+    // The controller can be null while `startup` is still resolving; retry on
+    // the next effect flush instead of scheduling a separate timer.
+    if (!controller) return;
+    occlusionFocusArmed = true;
+    requestAnimationFrame(() => {
+      if (disposed || backend !== 'webview' || !canFocusSurface()) return;
+      controller?.focus();
+    });
+  });
+
   $effect(() => {
     if (!active || !visible || occluded || globalOccluded) controller?.blur();
   });

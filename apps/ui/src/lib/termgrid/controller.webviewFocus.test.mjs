@@ -91,7 +91,7 @@ const safeFit = () => {}, focusTerminalAuto = () => {};
 ${section(grid, '  function focusPane(', '  function closePane(')}
 ${section(pane, '  let wasActive = false;', '  async function teardownXtermInstance()').replace('  $effect(() => {', '  const stopActivation = effect_root(() => { $effect(() => {').replace('\n  });', '\n  }); });')}
 const stopBlur = effect_root(() => {
-${section(view, '  $effect(() => {\n    if (!active || !visible', '  $effect(() => {\n    void theme;')}
+${section(view, '  let occlusionFocusArmed = false;', '  $effect(() => {\n    void theme;')}
 });
 flushSync();
 export { tick, flushSync };
@@ -101,6 +101,7 @@ export const setVisible = value => { visible = value; };
 export const setOccluded = value => { occluded = value; };
 export const explicitFocus = focus;
 export const stop = () => { stopActivation(); stopBlur(); };
+const focusTrace = () => {};
 `;
   const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   const compiled = compileModule(js, { filename: 'webview-focus.svelte.js', generate: 'client' }).js.code
@@ -269,5 +270,28 @@ test('already-active explicit focus moves IME before any deferred tick', async (
     await pending;
     await f.type();
     assert.deepEqual(f.writes, ['a', '中文']);
+  } finally { f.close(); }
+});
+
+// Startup modal race (vault unlock dialog): the pane mounts while a modal holds
+// occlusion, so the onMount ctl.focus() gate is skipped and controller.focused
+// stays false — onKey drops every keydown. When occlusion later clears, the
+// occlusion-clear effect must arm focus without a manual click or alt-tab.
+test('occlusion clearing after startup modal arms webview keyboard focus', async () => {
+  const f = await fixture();
+  try {
+    // Modal open at mount time: controller exists but occluded panes never arm focus.
+    f.runtime.setActive(true);
+    f.runtime.setOccluded(true);
+    await f.settle();
+    const modal = new Textarea(); modal.focus();
+    await f.type();
+    assert.deepEqual(f.writes, [], 'keys must not reach the PTY while a modal is open');
+    // User dismisses the modal: occlusion clears and the pane is the active target.
+    f.runtime.setOccluded(false);
+    await f.settle();
+    assert.equal(document.activeElement, f.input, 'occlusion clear must re-arm IME focus');
+    await f.type();
+    assert.deepEqual(f.writes, ['a', '中文'], 'typing must work immediately after the modal closes');
   } finally { f.close(); }
 });
