@@ -32,7 +32,11 @@ test('aerotab-app registers desktop_focus_webview for native-gpu modal handoff',
 test('window reactivation restores current pane with overlay/input guards and cleanup', () => {
   const app = readFileSync(new URL('../App.svelte', import.meta.url), 'utf8');
   const backend = readFileSync(new URL('../../../../src-tauri/src/bin/aerotab-app.rs', import.meta.url), 'utf8');
-  assert.match(backend, /WindowEvent::Focused\(focused\)[\s\S]*?window\.emit\("aerotab:window-focus", focused\)/);
+  // Windows routes through the guard's deduped emitter (guard emit + tauri
+  // Focused would double-fire now that Chromium raises GotFocus again);
+  // other platforms keep the direct emit. Either way the Focused handler
+  // must forward the event to the frontend restore chain.
+  assert.match(backend, /WindowEvent::Focused\(focused\)[\s\S]*?(?:focus_guard::emit_window_focus\(\*focused\)|window\.emit\("aerotab:window-focus", focused\))/);
   // The Focused handler runs nested inside Win32 message dispatch: a
   // synchronous MoveFocus there oscillates parent/child focus (vault modal
   // flicker) and can deadlock the UI thread. The retry must go through IPC.

@@ -169,7 +169,19 @@ mod focus_guard {
     /// The guard tracks Win32 activation directly and re-emits the event so
     /// the frontend restore chain always runs. The frontend dedupes by
     /// tracking its own `focused` state.
-    fn emit_window_focus(focused: bool) {
+    ///
+    /// Dedup on our side too: repeated WM_ACTIVATE pairs arrive during
+    /// WebView2 MoveFocus round trips and native child focus handoffs.
+    /// Re-emitting the same value every time re-runs the frontend restore
+    /// chain (focusWebviewDesktop IPC → MoveFocus → another WM_ACTIVATE),
+    /// a feedback loop that tears down the IME composition window on every
+    /// keystroke and kills CJK input.
+    pub(crate) fn emit_window_focus(focused: bool) {
+        static LAST_EMIT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+        let prev = LAST_EMIT.swap(focused as isize, Ordering::Relaxed);
+        if prev == focused as isize {
+            return;
+        }
         if let Some(app) = APP_HANDLE.get() {
             let result = app.emit_to(
                 tauri::EventTarget::webview_window(super::MAIN_WINDOW_LABEL),
@@ -3217,7 +3229,18 @@ fn main() {
                 // deadlock the UI thread when a modal field is being focused.
                 // The frontend restore path (aerotab:window-focus) issues the
                 // retry over IPC instead, which the message pump marshals.
-                let _ = window.emit("aerotab:window-focus", focused);
+                // Route through the guard's deduped emitter: tauri Focused
+                // and the guard now both fire (Chromium raises GotFocus/
+                // LostFocus again since the guard lands focus on the
+                // document window), and double events re-run the frontend
+                // restore chain on every keystroke, tearing down the IME
+                // composition (CJK input breaks).
+                #[cfg(windows)]
+                focus_guard::emit_window_focus(*focused);
+                #[cfg(not(windows))]
+                {
+                    let _ = window.emit("aerotab:window-focus", *focused);
+                }
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<DesktopWindowState>();
