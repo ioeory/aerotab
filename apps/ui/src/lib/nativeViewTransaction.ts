@@ -1,6 +1,24 @@
 // @ts-ignore Node strip-types tests require an explicit extension; Vite resolves this source directly.
 import { traceView } from './viewCausalTrace.ts';
 
+/** A superseded transaction is a designed race loss: rollback ran, the retained
+ * source stays interactive, and diagnostics were recorded. Callers that surface
+ * errors to the user must filter these via isBenignViewRace. */
+export function viewTransactionSuperseded(): Error {
+  const error = new Error('view transaction superseded or session closed');
+  (error as { benignViewRace?: boolean }).benignViewRace = true;
+  return error;
+}
+
+/** Marked errors from runNativeViewTransaction plus the component-side
+ * plain-Error race guards ('...superseded during layout barrier', 'native
+ * staging superseded'). Real surface failures never match. */
+export function isBenignViewRace(error: unknown): boolean {
+  if ((error as { benignViewRace?: unknown } | null)?.benignViewRace === true) return true;
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && /\bsuperseded\b/.test(message);
+}
+
 /** Restore only a still-live retained owner, never a stale async catch. */
 export function restoreRetainedSourceStatus<T>(options: {
   source: T; generation: number;
@@ -65,7 +83,7 @@ export async function runNativeViewTransaction<T>(options: {
 }): Promise<void> {
   let stage: ViewFailureStage = 'prepare';
   let receiptInvalid = false;
-  const check = () => { if (!options.current()) throw new Error('view transaction superseded or session closed'); };
+  const check = () => { if (!options.current()) throw viewTransactionSuperseded(); };
   try {
     check();
     traceView({ stage: 'transaction.prepare' });

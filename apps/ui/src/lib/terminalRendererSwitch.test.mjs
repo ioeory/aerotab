@@ -109,3 +109,34 @@ test('failed reload reports rejection and a later notification can retry', async
   await queue.request();
   assert.deepEqual(applied, ['native']);
 });
+
+// A superseded view transaction is a designed race loss: the transaction rolled
+// back, the retained renderer stayed interactive, and diagnostics.record
+// already captured the failure enum. reloadSettingsLive must filter these via
+// isBenignViewRace instead of re-raising into a red status toast.
+test('benign view race is classified without matching real surface failures', async () => {
+  const { isBenignViewRace, viewTransactionSuperseded } = await import('./nativeViewTransaction.ts');
+  assert.equal(isBenignViewRace(viewTransactionSuperseded()), true, 'marked transaction race');
+  assert.equal(isBenignViewRace(new Error('native staging superseded during layout barrier')), true);
+  assert.equal(isBenignViewRace(new Error('WebView staging superseded')), true);
+  assert.equal(isBenignViewRace({ benignViewRace: true }), true);
+  assert.equal(isBenignViewRace(null), false);
+  assert.equal(isBenignViewRace(undefined), false);
+  assert.equal(isBenignViewRace('view transaction superseded or session closed'), false, 'bare string is not an error');
+  assert.equal(isBenignViewRace(new Error('native commit revision not drawn')), false, 'real draw failure must surface');
+  assert.equal(isBenignViewRace(new Error('WebView input drain timeout')), false);
+  assert.equal(isBenignViewRace(new Error('native_surface_unavailable: stale_generation: attachment replaced')), false);
+});
+
+test('reloadSettingsLive filters benign view races instead of calling onError', async () => {
+  const source2 = await readFile(new URL('../components/TerminalPane.svelte', import.meta.url), 'utf8');
+  const start = source2.indexOf('  function reloadSettingsLive(');
+  const end = source2.indexOf('  async function applyTermSettingsLive(', start);
+  const fn = source2.slice(start, end);
+  assert.ok(fn.includes('isBenignViewRace'), 'filter must consult isBenignViewRace');
+  assert.ok(fn.includes("traceView({ stage: 'reload.superseded' });"), 'race must stay traceable');
+  // The production body calls onError only on the non-benign path.
+  const benignReturn = fn.indexOf('return;');
+  const onErrorCall = fn.indexOf('onError?.(String(error))');
+  assert.ok(benignReturn > 0 && onErrorCall > benignReturn, 'benign path must return before onError');
+});

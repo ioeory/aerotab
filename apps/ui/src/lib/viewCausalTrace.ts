@@ -17,7 +17,7 @@ export function createViewCausalBuffer(capacity = 128) {
   return Object.freeze({
     record(event: ViewTraceEvent) {
       // Copy an allowlist only; caller extras, text, errors and RPC payloads never enter the buffer.
-      const stages = ['layout.sample', 'pane.report', 'store.report', 'reload.request', 'reload.apply', 'reload.applied',
+      const stages = ['layout.sample', 'pane.report', 'store.report', 'reload.request', 'reload.apply', 'reload.applied', 'reload.superseded',
         'pane.stage.begin', 'pane.stage.success', 'pane.stage.catch', 'rollback.restore-status',
         'transaction.current', 'transaction.prepare', 'transaction.prepared', 'transaction.drain', 'transaction.drained',
         'transaction.commit', 'transaction.committed', 'transaction.rollback', 'transaction.rolled-back'];

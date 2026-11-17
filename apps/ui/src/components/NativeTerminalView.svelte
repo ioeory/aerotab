@@ -5,7 +5,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { settlePaneLayout } from '../lib/paneLayoutBarrier';
   import { traceView, traceLayout } from '../lib/viewCausalTrace';
-  import { runNativeViewTransaction, recoverNativeInputRollback } from '../lib/nativeViewTransaction';
+  import { runNativeViewTransaction, recoverNativeInputRollback, viewTransactionSuperseded } from '../lib/nativeViewTransaction';
   import type { RpcClient } from '../lib/rpc';
   import {
     createNativeViewHost, nativeViewGeometry, nativeViewGeometryEquals, nativeSurfaceError,
@@ -416,7 +416,7 @@
     if ((backend !== 'webview' && !committedWebview) || committedNative || stagingNative || !controller) throw new Error('native staging unavailable');
     const source = controller;
     await settlePaneLayout(surface);
-    if (disposed || controller !== source) throw new Error('native staging superseded during layout barrier');
+    if (disposed || controller !== source) throw viewTransactionSuperseded();
     const sourceConfig = JSON.stringify(viewConfig());
     const sourceBounds = surface?.getBoundingClientRect() ?? null;
     traceLayout('capture', surface);
@@ -458,13 +458,13 @@
         } finally { clearTimeout(timer); }
       },
       commit: async () => {
-        if (!(await hostAdapter!.waitForDraw())) throw new Error('staged native draw superseded');
+        if (!(await hostAdapter!.waitForDraw())) throw viewTransactionSuperseded();
         // Last await before the synchronous ownership flip. No source freeze is
         // needed during target preparation, so rollback keeps its input usable.
-        if (!current()) throw new Error('native staging superseded');
+        if (!current()) throw viewTransactionSuperseded();
         await hostAdapter!.acknowledgeInput(0);
         if (!(await hostAdapter!.waitForDraw())) throw new Error('native commit revision not drawn');
-        if (!current()) throw new Error('native staging superseded');
+        if (!current()) throw viewTransactionSuperseded();
         committedNative = true;
         committedWebview = false;
         stagingNative = false;
@@ -516,7 +516,7 @@
     if (disposed || stagingWebview || !controller || !hostAdapter || !inputQueue) throw new Error('WebView staging unavailable');
     const source = controller, host = hostAdapter, queue = inputQueue;
     await settlePaneLayout(surface);
-    if (disposed || controller !== source || hostAdapter !== host) throw new Error('WebView staging superseded during layout barrier');
+    if (disposed || controller !== source || hostAdapter !== host) throw viewTransactionSuperseded();
     const generation = host.generation(), epoch = ++reverseEpoch;
     const config = JSON.stringify(viewConfig());
     const sourceBounds = surface?.getBoundingClientRect() ?? null;
@@ -560,7 +560,7 @@
         await drainSource();
       },
       commit: async () => {
-        if (!current()) throw new Error('WebView staging superseded');
+        if (!current()) throw viewTransactionSuperseded();
         committedWebview = true; committedNative = false;
         stagingWebview = false; webviewHandoff = false;
         source.commitWebviewSurface();

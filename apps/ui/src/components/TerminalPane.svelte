@@ -105,7 +105,7 @@
   import { getTerminalSettings, invalidateTerminalSettingsCache } from '../lib/terminalSettingsCache';
   import { createTerminalSettingsReload } from '../lib/terminalRendererSwitch';
   import { traceView, traceController } from '../lib/viewCausalTrace';
-  import { restoreRetainedSourceStatus } from '../lib/nativeViewTransaction';
+  import { restoreRetainedSourceStatus, isBenignViewRace } from '../lib/nativeViewTransaction';
   import { spawnDetachedNativeTerminal } from '../lib/nativeTerminal';
   import {
     NativeTerminalController,
@@ -1412,7 +1412,17 @@
   });
 
   function reloadSettingsLive() {
-    return settingsReload.request().catch((error: unknown) => onError?.(String(error)));
+    return settingsReload.request().catch((error: unknown) => {
+      // A superseded view transaction is a designed race loss: the transaction
+      // rolled back, the retained renderer stayed interactive, and
+      // diagnostics.record already captured it. Re-raising here only produced
+      // a red status toast on renderer switches racing startup restore.
+      if (isBenignViewRace(error)) {
+        traceView({ stage: 'reload.superseded' });
+        return;
+      }
+      onError?.(String(error));
+    });
   }
 
   async function applyTermSettingsLive(cfg: Awaited<ReturnType<typeof loadTermSettings>>) {
