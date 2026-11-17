@@ -42,7 +42,8 @@
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
   import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
-  import { isOverlayBlockingInput } from './lib/modalFocus';
+  import { isOverlayBlockingInput, shouldAutoFocusTerminal } from './lib/modalFocus';
+  import { listenNativeEvent } from './lib/nativePasteBridge';
   import { syncAerotabOverlayMarker } from './lib/overlayMarker';
   import { completeNativeFocusHandoff, expectNativeFocusHandoff } from './lib/nativeFocusHandoff';
   import { installPaneDragGlobalHandlers, subscribePanePointerDrop } from './lib/paneDrag';
@@ -97,7 +98,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.5-ui-20261112-webview-focus6';
+  const buildId = '0.3.5-ui-20261117-webview-focus10';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -1725,6 +1726,51 @@
       if (disposed) void internal.invoke('plugin:event|unlisten', { event: 'aerotab:prepare-close', eventId: id });
     }).catch(error => onError(String(error)));
     return () => { disposed = true; internal.unregisterCallback(callback); if (eventId !== undefined) void internal.invoke('plugin:event|unlisten', { event: 'aerotab:prepare-close', eventId }); };
+  });
+
+  onMount(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let focused = false;
+    let frame = 0;
+    let retryTimer = 0;
+    const restore = (value: boolean) => {
+      if (disposed || focused === value) return;
+      focused = value;
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      if (!value) return;
+      // Win11 activation race: the synchronous MoveFocus issued by the backend
+      // (and this rAF pass) can be dropped by WebView2 while Chromium restores
+      // its own focus. One delayed retry closes the remaining gap.
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(() => {
+        retryTimer = 0;
+        if (disposed || !focused || document.hidden || isOverlayBlockingInput()) return;
+        const tab2 = tabs.tabs.find(candidate => candidate.id === tabs.activeId);
+        const pane2 = tab2 ? tabs.activePane(tab2) : undefined;
+        const host2 = pane2 && document.querySelector(`[data-pane-drop-pane="${CSS.escape(pane2.id)}"]`);
+        if (host2 && shouldAutoFocusTerminal(host2)) focusActivePane();
+      }, 350);
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (disposed || !focused || document.hidden || isOverlayBlockingInput()) return;
+        const tab = tabs.tabs.find(candidate => candidate.id === tabs.activeId);
+        const pane = tab ? tabs.activePane(tab) : undefined;
+        const host = pane && document.querySelector(`[data-pane-drop-pane="${CSS.escape(pane.id)}"]`);
+        if (host && shouldAutoFocusTerminal(host)) focusActivePane();
+      });
+    };
+    void listenNativeEvent<boolean>('aerotab:window-focus', restore).then(stop => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      if (frame) cancelAnimationFrame(frame);
+      if (retryTimer) clearTimeout(retryTimer);
+      unlisten?.();
+    };
   });
 
   // MCP open_terminal only requests a visible connection. The backend must not

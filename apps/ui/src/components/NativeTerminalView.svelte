@@ -12,6 +12,7 @@
     NATIVE_VIEW_OCCLUSION_EVENT, type TerminalViewBackend, type NativeViewConfig,
   } from '../lib/nativeViewHost';
   import { completeNativeFocusHandoff } from '../lib/nativeFocusHandoff';
+  import { focusWebviewDesktop } from '../lib/desktopFocus';
   import { tracePaste } from '../lib/nativePasteTrace';
   import { NATIVE_ACTIVATION_EVENT, nativeActivationRouter, type NativeActivation } from '../lib/nativeActivation';
   import {
@@ -609,9 +610,12 @@
     return controller;
   }
 
+  let desktopFocusRequest = 0;
+
   /** Native focus remains OS SetFocus via hostAdapter (not click-only). */
   export function focus(opts?: { force?: boolean }) {
     const force = !!opts?.force;
+    const request = ++desktopFocusRequest;
     // becameActive already has active=true: focus IME/OS synchronously so a
     // following mousedown default cannot reclaim the pane shell first.
     // force + not-yet-active: wait one tick for Svelte props, then require active
@@ -622,7 +626,17 @@
         requestSurfaceFocus?.();
         hostAdapter?.setFocusAllowed(surfaceReady && canFocusSurface());
         if (surfaceReady) await hostAdapter?.focus();
-      } else controller?.focus();
+      } else {
+        const target = controller;
+        target?.focus(); // Keep first-click DOM focus synchronous.
+        const focusedElement = document.activeElement;
+        await focusWebviewDesktop();
+        // IPC can outlive a pane switch, modal open, or backend transition.
+        if (request !== desktopFocusRequest || !canFocusSurface() || controller !== target
+          || (document.activeElement !== focusedElement && document.activeElement !== document.body)
+          || ((backend === 'native-surface' && !committedWebview) || committedNative)) return;
+        target?.focus();
+      }
     };
     if (canFocusSurface()) return apply().catch(fail);
     if (!force) return Promise.resolve();

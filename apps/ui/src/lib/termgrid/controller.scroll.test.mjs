@@ -20,7 +20,11 @@ test('DOM wheel up scrolls toward history and down toward live screen', async ()
 
 test('one paste event handled in window capture and target writes only once', async () => {
   const writes = [];
-  const ctl = new NativeTerminalController({ sessionId: 's', rpc: { call: async () => {} }, canvas: {}, cursorBlink: false, writeInput: async text => writes.push(text) });
+  const ctl = new NativeTerminalController({ sessionId: 's', rpc: { call: async () => {} }, canvas: { focus() {} }, cursorBlink: false, writeInput: async text => writes.push(text) });
+  // v0.3.5+ paste/key handlers require the controller to own focus; the
+  // window-capture + target delivery path is what this test exercises.
+  globalThis.requestAnimationFrame = globalThis.requestAnimationFrame ?? (() => 0);
+  ctl.focus();
   const event = { defaultPrevented: false, clipboardData: { getData: () => 'one paste' }, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
   // The window capture listener and canvas/IME listener receive the same event.
   ctl.shouldHandleGlobalInput = () => true;
@@ -37,32 +41,59 @@ test('one paste event handled in window capture and target writes only once', as
 
 test('switching away during IME composition cannot leave the current terminal permanently rejecting keys', async () => {
   const writes = [], windowListeners = new Map(), inputListeners = new Map();
+  // Node has no DOM; supply the minimal surface the controller touches:
+  // fontMetrics (constructor), focus() (activeElement), bindInput (listeners).
+  const fakeCtx = { font: '', measureText: () => ({ width: 8 }), };
+  const fakeCanvas = { width: 64, height: 64, getContext: () => fakeCtx };
+  const savedWindow = globalThis.window, savedDocument = globalThis.document;
   globalThis.window = { addEventListener: (name, fn) => windowListeners.set(name, fn), removeEventListener: (name) => windowListeners.delete(name), clearTimeout() {} };
+  globalThis.document = { activeElement: null, createElement: () => fakeCanvas };
   globalThis.cancelAnimationFrame = () => {};
-  const input = { value: 'unfinished', addEventListener: (name, fn) => inputListeners.set(name, fn), removeEventListener: name => inputListeners.delete(name) };
-  const canvas = { addEventListener() {}, removeEventListener() {} };
-  const ctl = new NativeTerminalController({ sessionId: 's', rpc: { call: async () => {} }, canvas, input, cursorBlink: false, writeInput: async text => writes.push(text) });
-  ctl.bindInput();
-  inputListeners.get('compositionstart')();
-  assert.equal(ctl.composing, true);
-  // WebView2 may omit compositionend when Alt+Tab deactivates the window.
-  windowListeners.get('blur')?.();
-  await ctl.onKey({ key: 'a', defaultPrevented: false, preventDefault() {}, stopPropagation() {} });
-  assert.deepEqual(writes, ['a'], 'returning from another app must not suppress ordinary keys');
-  assert.equal(input.value, '', 'interrupted preedit must not be replayed later');
-  await ctl.dispose();
-  assert.equal(windowListeners.has('blur'), false);
-  assert.equal(inputListeners.has('blur'), false);
+  try {
+    const input = { value: 'unfinished', focus() {}, addEventListener: (name, fn) => inputListeners.set(name, fn), removeEventListener: name => inputListeners.delete(name) };
+    const canvas = { addEventListener() {}, removeEventListener() {}, focus() {} };
+    const ctl = new NativeTerminalController({ sessionId: 's', rpc: { call: async () => {} }, canvas, input, cursorBlink: false, writeInput: async text => writes.push(text) });
+    ctl.bindInput();
+    // The pane is active when composition starts; blur only interrupts IME.
+    ctl.focus();
+    inputListeners.get('compositionstart')();
+    assert.equal(ctl.composing, true);
+    // WebView2 may omit compositionend when Alt+Tab deactivates the window.
+    windowListeners.get('blur')?.();
+    // v0.3.5+ onKey guards on `focused` (stale-IME cross-pane protection).
+    // Deactivation cleared it; reactivation must restore ordinary keys.
+    ctl.focus();
+    await ctl.onKey({ key: 'a', defaultPrevented: false, preventDefault() {}, stopPropagation() {} });
+    assert.deepEqual(writes, ['a'], 'returning from another app must not suppress ordinary keys');
+    assert.equal(input.value, '', 'interrupted preedit must not be replayed later');
+    await ctl.dispose();
+    assert.equal(windowListeners.has('blur'), false);
+    assert.equal(inputListeners.has('blur'), false);
+  } finally {
+    globalThis.window = savedWindow;
+    globalThis.document = savedDocument;
+  }
 });
 
 test('terminal input blur also cancels stale composition without requiring a tab switch', async () => {
   const writes = [], listeners = new Map();
+  const fakeCtx = { font: '', measureText: () => ({ width: 8 }) };
+  const fakeCanvas = { width: 64, height: 64, getContext: () => fakeCtx };
+  const savedWindow = globalThis.window, savedDocument = globalThis.document;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, clearTimeout() {} };
-  const ctl = new NativeTerminalController({ sessionId: 's', rpc: { call: async () => {} }, canvas: { addEventListener() {}, removeEventListener() {} }, input: { value: 'preedit', addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener() {} }, cursorBlink: false, writeInput: async text => writes.push(text) });
-  ctl.bindInput(); listeners.get('compositionstart')(); listeners.get('blur')?.();
-  await ctl.onKey({ key: 'b', defaultPrevented: false, preventDefault() {}, stopPropagation() {} });
-  assert.deepEqual(writes, ['b']);
-  await ctl.dispose();
+  globalThis.document = { activeElement: null, createElement: () => fakeCanvas };
+  try {
+    const ctl = new NativeTerminalController({ sessionId: 's', rpc: { call: async () => {} }, canvas: { addEventListener() {}, removeEventListener() {}, focus() {} }, input: { value: 'preedit', focus() {}, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener() {} }, cursorBlink: false, writeInput: async text => writes.push(text) });
+    ctl.bindInput(); ctl.focus(); listeners.get('compositionstart')(); listeners.get('blur')?.();
+    // blur cleared `focused`; a same-tab refocus must accept keys again.
+    ctl.focus();
+    await ctl.onKey({ key: 'b', defaultPrevented: false, preventDefault() {}, stopPropagation() {} });
+    assert.deepEqual(writes, ['b']);
+    await ctl.dispose();
+  } finally {
+    globalThis.window = savedWindow;
+    globalThis.document = savedDocument;
+  }
 });
 
 const pane = readFileSync(new URL('../../components/TerminalPane.svelte', import.meta.url), 'utf8');

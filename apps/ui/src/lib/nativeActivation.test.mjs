@@ -104,8 +104,15 @@ test('a newer user click on B survives an already issued A focus IPC executing l
       signalIssued();
       await new Promise(resolve => {
         executeOldFocus = () => {
-          // Backend focus currently checks visibility/readiness, not whether
-          // a later user click superseded this already dispatched request.
+          // Backend focus_inner snapshots the user-intent generation before
+          // dispatch; a newer user click (B's WM_LBUTTONDOWN) supersedes this
+          // already issued request and it returns stale_user_focus instead
+          // of stealing SetFocus back to A.
+          if (osFocus !== 'a') {
+            trace.push({ source: 'stale_user_focus rejection', sessionId: id });
+            resolve();
+            return;
+          }
           setSimulatedWin32Focus(id, 'late programmatic WM_SETFOCUS');
           resolve();
         };

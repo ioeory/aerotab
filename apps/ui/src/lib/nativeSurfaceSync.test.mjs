@@ -24,6 +24,9 @@ test('explicit focus waits for prop flush and does not discard a tab being shown
  const events=[];
  const scope={backend:'native-surface',committedWebview:false,committedNative:false,
   surfaceReady:true,active:false,visible:false,disposed:false,
+  // webview-focus handoff bindings required by focus() since v0.3.5-focus7.
+  desktopFocusRequest:0,focusWebviewDesktop:async()=>{},
+  document:{activeElement:null,hidden:false},
   tick:async()=>{scope.active=true;scope.visible=true;},
   canTakeFocus:()=>scope.active&&scope.visible,
   canFocusSurface:()=>scope.active&&scope.visible,
@@ -49,7 +52,8 @@ test('explicit activation retries focus after a busy draw even when already rest
  assert.equal(f.events.filter(e=>e[0]==='focus').length,2);
 });
 test('superseded activation cannot focus an inactive pane after prop flush', async () => {
- const scope={tick:async()=>{},canFocusSurface:()=>false,fail:e=>{throw e;}};
+ const scope={tick:async()=>{},canFocusSurface:()=>false,fail:e=>{throw e;},
+  desktopFocusRequest:0,focusWebviewDesktop:async()=>{},document:{activeElement:null,hidden:false}};
  const source=text.slice(text.indexOf('  export function focus('),text.indexOf('  /** Await OS view detach')).replace('export function','function');
  const js=ts.transpileModule(source+'\nreturn focus;', {compilerOptions:{target:99,module:0}}).outputText;
  await new Function('scope',`with(scope){${js}}`)(scope)({force:true});

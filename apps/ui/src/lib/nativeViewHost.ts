@@ -349,6 +349,7 @@ export function createNativeViewHost(options: {
           // A dock/modal hide can reach the UI thread after focus was queued.
           // Rejection of that stale focus is not a rendering/attachment failure.
           const code = (error as { code?: string } | null)?.code;
+          if (code === 'stale_user_focus') return 'skipped';
           if (code === 'input_not_ready' && !current()) return 'skipped';
           throw nativeSurfaceError(error);
         }

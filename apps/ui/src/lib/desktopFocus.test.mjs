@@ -29,6 +29,23 @@ test('aerotab-app registers desktop_focus_webview for native-gpu modal handoff',
   assert.doesNotMatch(app, /SetFocus\(hwnd\)/);
 });
 
+test('window reactivation restores current pane with overlay/input guards and cleanup', () => {
+  const app = readFileSync(new URL('../App.svelte', import.meta.url), 'utf8');
+  const backend = readFileSync(new URL('../../../../src-tauri/src/bin/aerotab-app.rs', import.meta.url), 'utf8');
+  assert.match(backend, /WindowEvent::Focused\(focused\)[\s\S]*?window\.emit\("aerotab:window-focus", focused\)/);
+  // The Focused handler runs nested inside Win32 message dispatch: a
+  // synchronous MoveFocus there oscillates parent/child focus (vault modal
+  // flicker) and can deadlock the UI thread. The retry must go through IPC.
+  const handler = backend.slice(backend.indexOf('.on_window_event('), backend.indexOf('.on_menu_event('));
+  assert.doesNotMatch(handler, /set_focus\(\)/, 'on_window_event must not issue synchronous MoveFocus');
+  assert.match(app, /listenNativeEvent<boolean>\('aerotab:window-focus', restore\)/);
+  assert.match(app, /!focused \|\| document.hidden \|\| isOverlayBlockingInput\(\)/);
+  assert.match(app, /host && shouldAutoFocusTerminal\(host\)/);
+  const command = backend.slice(backend.indexOf('fn desktop_focus_webview('), backend.indexOf('/// Convert a DOM rect'));
+  assert.doesNotMatch(command, /window\.set_focus\(\)/, 'late request must not foreground the app');
+  assert.match(command, /GetForegroundWindow/);
+});
+
 test('modalFocus awaits handoff then forces desktop webview focus', () => {
   const modal = readFileSync(new URL('./modalFocus.ts', import.meta.url), 'utf8');
   assert.match(modal, /focusWebviewDesktop/);

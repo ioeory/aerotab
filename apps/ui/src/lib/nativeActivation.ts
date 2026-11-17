@@ -1,5 +1,5 @@
 export const NATIVE_ACTIVATION_EVENT = 'aerotab:native-activation';
-export interface NativeActivation { sessionId: string; generation: string; seq: number }
+export interface NativeActivation { sessionId: string; generation: string; seq: number; user?: boolean }
 /** Shared across mounted panes so a late A state response cannot undo a newer B click. */
 export function createNativeActivationRouter() {
   let newest = 0;

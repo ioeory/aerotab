@@ -19,6 +19,14 @@ use windows_sys::Win32::{
 thread_local! {
     static VIEWS: RefCell<HashMap<Uuid, Box<Attachment>>> = RefCell::default();
     static ACTIVATION_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Monotonic generation of the latest *user-driven* OS focus change
+    /// (WM_LBUTTONDOWN on a native surface). A programmatic `focus_inner`
+    /// request that was queued before a newer user action must not run.
+    static USER_FOCUS_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Set by WM_LBUTTONDOWN on a native surface and consumed by the next
+    /// WM_SETFOCUS, so the activation event can mark `user: true` exactly for
+    /// mouse-driven focus (not programmatic restores).
+    static PENDING_USER_FOCUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 struct Callback {
     id: Uuid,
@@ -735,6 +743,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         return result;
     }
     if msg == WM_LBUTTONDOWN {
+        // User intent: any already-issued programmatic focus IPC for another
+        // pane is now stale and must not steal focus back after this click.
+        USER_FOCUS_GEN.with(|gen| gen.set(gen.get() + 1));
+        PENDING_USER_FOCUS.with(|pending| pending.set(true));
         unsafe {
             SetFocus(hwnd);
         }
@@ -793,10 +805,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                         seq.set(next);
                         next
                     });
+                    // `user`: this focus originated from a WM_LBUTTONDOWN on a
+                    // native surface (pending flag), not a programmatic restore.
+                    // The frontend activation router uses this so a late
+                    // programmatic SetFocus cannot override the user's pane choice.
+                    let user = PENDING_USER_FOCUS.with(|pending| pending.replace(false));
                     let _ = v.app.emit_to(
                         tauri::EventTarget::webview_window("main"),
                         "aerotab:native-activation",
-                        serde_json::json!({"sessionId":v.id(),"generation":v.generation,"seq":seq}),
+                        serde_json::json!({"sessionId":v.id(),"generation":v.generation,"seq":seq,"user":user}),
                     );
                 }
                 0
@@ -1087,11 +1104,15 @@ pub fn state(id: Uuid) -> Result<ViewState, HostError> {
     VIEWS.with(|m| m.borrow().get(&id).map(|v| v.state()).ok_or_else(missing))
 }
 pub fn focus(id: Uuid) -> Result<(), HostError> {
-    focus_diagnostic(id, 0)
+    focus_delegated(id, 0)
 }
-pub fn focus_diagnostic(id: Uuid, request: u64) -> Result<(), HostError> {
+/// Programmatic focus request: snapshot the user-intent generation *before*
+/// dispatch so a user click on another pane while this IPC is queued makes
+/// the request stale (skipped instead of stealing focus back).
+pub fn focus_delegated(id: Uuid, request: u64) -> Result<(), HostError> {
+    let observed_user_gen = USER_FOCUS_GEN.with(|gen| gen.get());
     if !focus_diag::is_enabled() {
-        return focus_inner(id);
+        return focus_inner(id, observed_user_gen);
     }
     let identity = VIEWS.with(|m| {
         m.borrow()
@@ -1112,7 +1133,7 @@ pub fn focus_diagnostic(id: Uuid, request: u64) -> Result<(), HostError> {
         request,
         None,
     );
-    let result = focus_inner(id);
+    let result = focus_inner(id, observed_user_gen);
     focus_diag::record(
         Phase::Result,
         id,
@@ -1120,11 +1141,18 @@ pub fn focus_diagnostic(id: Uuid, request: u64) -> Result<(), HostError> {
         hwnd as usize,
         parent as usize,
         request,
-        Some(isize::from(result.is_ok())),
+        Some(match &result {
+            Err(e) if e.code == "stale_user_focus" => -1,
+            _ => isize::from(result.is_ok()),
+        }),
     );
     result
 }
-fn focus_inner(id: Uuid) -> Result<(), HostError> {
+/// Backwards-compatible diagnostic entry point (no user-generation guard).
+pub fn focus_diagnostic(id: Uuid, request: u64) -> Result<(), HostError> {
+    focus_delegated(id, request)
+}
+fn focus_inner(id: Uuid, observed_user_gen: u64) -> Result<(), HostError> {
     let hwnd = VIEWS.with(|m| {
         let m = m.borrow();
         let v = m.get(&id).ok_or_else(missing)?;
@@ -1136,6 +1164,14 @@ fn focus_inner(id: Uuid) -> Result<(), HostError> {
         }
         Ok(v.hwnd)
     })?;
+    // A newer user-driven focus change happened while this request was queued:
+    // executing SetFocus here would override the user's latest click.
+    if USER_FOCUS_GEN.with(|gen| gen.get()) != observed_user_gen {
+        return Err(HostError::new(
+            "stale_user_focus",
+            "superseded by a newer user focus change",
+        ));
+    }
     unsafe {
         SetFocus(hwnd);
     }

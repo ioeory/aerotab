@@ -103,6 +103,231 @@ fn disable_native_webview_context_menus(window: &tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn disable_native_webview_context_menus(_window: &tauri::WebviewWindow) {}
 
+/// Windows focus guard.
+///
+/// Root cause chain (verified live on Win11 with GUI thread probes):
+///
+/// 1. When AeroTab is re-activated (taskbar / Alt+Tab) Win32 sets keyboard
+///    focus on the tao outer frame (`Tauri Window` HWND). wry's parent
+///    subclass should forward `WM_SETFOCUS` to WebView2 via
+///    `MoveFocus(PROGRAMMATIC)`, but on real app switches this never lands:
+///    focus stays on the frame indefinitely (probed 1.5 s after activation).
+/// 2. `tauri-runtime-wry` (non-multiwebview mode) drops tao's
+///    `WindowEvent::Focused` and synthesizes it from WebView2's
+///    `GotFocus`/`LostFocus` COM callbacks instead. Because the WebView2
+///    never receives Win32 focus, `GotFocus` never fires, so the frontend
+///    `aerotab:window-focus` restore path never runs: no typing, no hotkeys.
+///
+/// Fix: install a comctl32 subclass (installed last ⇒ called first) on the
+/// outer frame. On activation/focus, when the GUI-thread focus is still the
+/// outer frame itself, post a private message; handling that message runs
+/// *outside* the nested `WM_SETFOCUS` dispatch, where calling
+/// `MoveFocus(PROGRAMMATIC)` is safe (the focus-oscillation deadlock from
+/// focus8 came from calling it synchronously inside the event handler).
+/// Once WebView2 owns focus, its `GotFocus` callback makes tauri emit
+/// `WindowEvent::Focused(true)` and the existing frontend restore chain
+/// (`aerotab:window-focus` → `focusActivePane`) works unchanged.
+#[cfg(target_os = "windows")]
+mod focus_guard {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::OnceLock;
+
+    use windows_sys::core::PCWSTR;
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, PostMessageW,
+        RegisterWindowMessageW, GUITHREADINFO, WM_ACTIVATE, WM_SETFOCUS,
+    };
+
+    /// Private registered message (≥ 0xC000): "outer frame holds focus while
+    /// the app is foreground — push focus into WebView2". Registered so it can
+    /// never clash with tao/wry WM_USER-range messages.
+    fn restore_message() -> u32 {
+        static MSG: OnceLock<u32> = OnceLock::new();
+        *MSG.get_or_init(|| unsafe {
+            RegisterWindowMessageW(c"AeroTabRestoreWebviewFocus".as_ptr() as PCWSTR)
+        })
+    }
+
+    const FOCUS_GUARD_SUBCLASS_ID: usize = 0x5159;
+
+    static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+    static WEBVIEW_CHILD_HWND: OnceLock<isize> = OnceLock::new();
+
+    /// Is Win32 keyboard focus stuck on the outer tao frame while AeroTab is
+    /// the foreground app? That is the broken state we repair.
+    fn focus_stuck_on_frame() -> bool {
+        let main = MAIN_HWND.load(Ordering::Relaxed);
+        if main == 0 {
+            return false;
+        }
+        // Only act when the app is foreground: never steal focus.
+        if unsafe { GetForegroundWindow() } as isize != main {
+            return false;
+        }
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            flags: 0,
+            hwndActive: std::ptr::null_mut(),
+            hwndFocus: std::ptr::null_mut(),
+            hwndCapture: std::ptr::null_mut(),
+            hwndMenuOwner: std::ptr::null_mut(),
+            hwndMoveSize: std::ptr::null_mut(),
+            hwndCaret: std::ptr::null_mut(),
+            rcCaret: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+        };
+        // The subclass proc (and posted-message handling) run on the very GUI
+        // thread that owns the frame, so query the current thread.
+        let focused = unsafe { GetGUIThreadInfo(GetCurrentThreadId(), &mut info) };
+        focused != 0 && info.hwndFocus as isize == main
+    }
+
+    /// Locate the `WRY_WEBVIEW` container HWND (direct child of the frame).
+    /// Cached; WebView2 keeps this child for the lifetime of the window.
+    fn webview_child_hwnd() -> Option<HWND> {
+        let cached = *WEBVIEW_CHILD_HWND.get_or_init(|| 0);
+        if cached != 0 {
+            return Some(cached as HWND);
+        }
+        let main = MAIN_HWND.load(Ordering::Relaxed);
+        if main == 0 {
+            return None;
+        }
+        let found = Cell::new(0isize);
+        unsafe {
+            EnumChildWindows(
+                main as HWND,
+                Some(found_wry_child),
+                &found as *const Cell<isize> as LPARAM,
+            );
+        }
+        let hwnd = found.get();
+        if hwnd != 0 {
+            let _ = WEBVIEW_CHILD_HWND.set(hwnd);
+            return Some(hwnd as HWND);
+        }
+        None
+    }
+
+    unsafe extern "system" fn found_wry_child(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let out = lparam as *const Cell<isize>;
+        let mut name = [0u16; 32];
+        let n = GetClassNameW(hwnd, name.as_mut_ptr(), 32);
+        let class = String::from_utf16_lossy(&name[..n.max(0) as usize]);
+        if class == "WRY_WEBVIEW" {
+            (*out).set(hwnd as isize);
+            return 0; // stop enumeration
+        }
+        1
+    }
+
+    /// Push Win32 focus from the outer frame into the WebView2 container.
+    /// `SetFocus(WRY_WEBVIEW)` makes wry's `default_window_proc` forward to
+    /// the `Chrome_WidgetWin_1` document window, which triggers WebView2
+    /// `GotFocus` → tauri `Focused(true)` → the frontend restore chain.
+    /// Only called from our posted message, i.e. on the GUI thread and
+    /// outside any nested focus dispatch.
+    fn restore_webview_focus() {
+        if !focus_stuck_on_frame() {
+            focus_guard_log("restore: not stuck, skip");
+            return;
+        }
+        match webview_child_hwnd() {
+            Some(child) => {
+                let before = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+                let result = unsafe { SetFocus(child) };
+                focus_guard_log(&format!(
+                    "restore: SetFocus({child:p}) prev={before:p} new={result:p}"
+                ));
+            }
+            None => focus_guard_log("restore: WRY_WEBVIEW child not found"),
+        }
+    }
+
+    /// Release-build friendly diagnostics: append to a log file next to the
+    /// executable when `AEROTAB_FOCUS_GUARD_LOG` is set, else no-op.
+    fn focus_guard_log(message: &str) {
+        use std::io::Write;
+        let Ok(dir) = std::env::var("AEROTAB_FOCUS_GUARD_LOG") else {
+            return;
+        };
+        let mut line = message.to_owned();
+        line.push('\n');
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::path::Path::new(&dir).join("focus-guard.log"))
+            .and_then(|mut f| f.write_all(line.as_bytes()));
+    }
+
+    unsafe extern "system" fn focus_guard_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _uidsubclass: usize,
+        _dwrefdata: usize,
+    ) -> LRESULT {
+        if msg == WM_SETFOCUS || msg == WM_ACTIVATE {
+            // WM_ACTIVATE: LOWORD(wparam) != WA_INACTIVE means activating.
+            let activating = msg != WM_ACTIVATE || (wparam & 0xffff) != 0;
+            // The frame just received focus / the window activated while focus
+            // sits on the frame itself. Schedule the repair asynchronously —
+            // never MoveFocus synchronously inside the focus dispatch.
+            let stuck = focus_stuck_on_frame();
+            focus_guard_log(&format!(
+                "proc: msg=0x{msg:X} activating={activating} stuck={stuck}"
+            ));
+            if activating && stuck {
+                PostMessageW(hwnd, restore_message(), 0, 0);
+            }
+        } else if msg == restore_message() {
+            focus_guard_log("proc: restore message received");
+            // Runs on the GUI thread, outside the focus dispatch that
+            // scheduled it. Re-check: the situation may already be resolved,
+            // e.g. wry's own MoveFocus landed or the user moved on.
+            restore_webview_focus();
+            return 0;
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    /// Install the guard on the main window's outer frame. Call once after
+    /// the main `WebviewWindow` exists. Idempotent.
+    pub fn install(app: &tauri::AppHandle) {
+        use tauri::Manager;
+        let Some(window) = app.get_webview_window(super::MAIN_WINDOW_LABEL) else {
+            return;
+        };
+        let Ok(hwnd) = window.hwnd() else {
+            return;
+        };
+        MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        let ok = unsafe {
+            SetWindowSubclass(
+                hwnd.0 as HWND,
+                Some(focus_guard_proc),
+                FOCUS_GUARD_SUBCLASS_ID,
+                0,
+            )
+        };
+        focus_guard_log(&format!(
+            "install: hwnd={:p} SetWindowSubclass={ok}",
+            hwnd.0
+        ));
+        tracing::info!("windows focus guard installed on main window");
+    }
+}
+
 fn parse_window_behavior(value: serde_json::Value) -> WindowBehaviorSettings {
     let mut out = WindowBehaviorSettings::default();
     let Some(obj) = value.as_object() else {
@@ -134,8 +359,18 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
 /// was the same path that fed WM_SYSKEY* into tao during the freeze.
 #[tauri::command]
 fn desktop_focus_webview(window: tauri::WebviewWindow) -> Result<(), String> {
-    // Bring the frame forward if another app had focus.
-    let _ = window.set_focus();
+    // Do not reactivate the outer frame here: a delayed pane request must not
+    // bring the application back after the user switches to another app.
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        if !std::ptr::eq(
+            unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0,
+            hwnd.0,
+        ) {
+            return Ok(());
+        }
+    }
     // MoveFocus(PROGRAMMATIC) into the WebView2 document so `<input>` receives keys.
     window
         .as_ref()
@@ -2759,6 +2994,10 @@ fn main() {
                     }
                 }
             }
+            // Windows focus guard: repairs "activate AeroTab but keyboard focus
+            // stays on the tao frame" (see mod focus_guard docs).
+            #[cfg(target_os = "windows")]
+            focus_guard::install(app.handle());
             #[cfg(all(feature="native-view",target_os="linux"))]
             start_native_host_smoke(app.handle());
             #[cfg(all(debug_assertions, feature="native-view", target_os="windows"))]
@@ -2772,6 +3011,17 @@ fn main() {
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW_LABEL {
                 return;
+            }
+            if let WindowEvent::Focused(focused) = event {
+                // NOTE: never call Webview::set_focus (MoveFocus) from here.
+                // This handler runs nested inside the Win32 message dispatch
+                // (WM_SETFOCUS/WM_NCACTIVATE); a synchronous MoveFocus there
+                // re-enters WebView2's focus path and can oscillate between
+                // the parent and the WebView child HWND (focus flicker) and
+                // deadlock the UI thread when a modal field is being focused.
+                // The frontend restore path (aerotab:window-focus) issues the
+                // retry over IPC instead, which the message pump marshals.
+                let _ = window.emit("aerotab:window-focus", focused);
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<DesktopWindowState>();

@@ -76,6 +76,8 @@ let occluded = $state(false), globalOccluded = false, disposed = false;
 let surfaceError = '', ackRecovering = false, rollbackPending = false;
 let backend = 'webview', committedWebview = false, committedNative = false;
 let hostAdapter = null, surfaceReady = false, requestSurfaceFocus = null;
+let desktopFocusRequest = 0;
+const focusWebviewDesktop = () => globalThis.__webviewFocusFixture.desktopFocus?.() ?? Promise.resolve();
 const fail = error => { throw error; };
 ${section(view, '  function canTakeFocus(', '  /** Commit this request')}
 ${section(view, '  export function focus(', '  /** Await OS view detach')}
@@ -161,6 +163,37 @@ for (const flushBeforeDefault of [false, true]) {
     } finally { f.close(); }
   });
 }
+
+test('desktop handoff reasserts target IME after OS focus moves DOM to body', async () => {
+  const f = await fixture();
+  try {
+    f.runtime.setActive(true); await f.settle();
+    let complete;
+    globalThis.__webviewFocusFixture.desktopFocus = () => new Promise(resolve => { complete = resolve; });
+    const pending = f.runtime.explicitFocus({ force: true });
+    document.body.focus();
+    complete(); await pending;
+    assert.equal(document.activeElement, f.input);
+    await f.type(); assert.deepEqual(f.writes, ['a', '中文']);
+  } finally { f.close(); }
+});
+
+test('late desktop handoff does not steal another input or inactive pane focus', async () => {
+  for (const deactivate of [false, true]) {
+    const f = await fixture();
+    try {
+      f.runtime.setActive(true); await f.settle();
+      let complete;
+      globalThis.__webviewFocusFixture.desktopFocus = () => new Promise(resolve => { complete = resolve; });
+      const pending = f.runtime.explicitFocus({ force: true });
+      if (deactivate) { f.runtime.setActive(false); f.runtime.flushSync(); }
+      const other = new Textarea(); other.focus();
+      complete(); await pending;
+      assert.equal(document.activeElement, other);
+      assert.deepEqual(f.writes, []);
+    } finally { f.close(); }
+  }
+});
 
 test('secondary canvas click retains the existing context-menu default behavior', async () => {
   const f = await fixture();
