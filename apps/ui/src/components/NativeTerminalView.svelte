@@ -188,7 +188,16 @@
    * can race Svelte's active flush, and gating on `active` no-ops SetFocus.
    */
   function canTakeFocus(force = false) {
-    const base = visible && !occluded && !globalOccluded && !document.hidden && !disposed
+    // Query the occlusion marker live: `globalOccluded` mirrors an event that
+    // the modal overlay effect does not re-dispatch on close, so the stale
+    // value can lock pane focus out after returning from hosts/modals
+    // (alt-tab back left focus stranded on sidebar buttons).
+    const occludedNow = (() => {
+      if (typeof document === 'undefined' || !document.body?.dataset) return globalOccluded;
+      const marker = document.body.dataset.nativeViewOccluded;
+      return marker === undefined ? globalOccluded : marker === 'true';
+    })();
+    const base = visible && !occluded && !occludedNow && !document.hidden && !disposed
       && !surfaceError && !ackRecovering && !rollbackPending
       && document.documentElement?.dataset.aerotabResizing === undefined
       && document.documentElement?.dataset.aerotabOverlayOpen === undefined;

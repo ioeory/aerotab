@@ -2079,6 +2079,21 @@
       // Same-tick clear: don't wait for MutationObserver to drop the marker,
       // or canFocusSurface stays false and pane/terminal focus no-ops.
       syncAerotabOverlayMarker(false);
+      untrack(() => {
+        // The open path set nativeViewOccluded directly (bypassing the
+        // observer's `last` bookkeeping), so closing must clear it the same
+        // way: recompute blockers live instead of assuming the observer
+        // fires. Without this, globalOccluded stays true and every pane
+        // focus request no-ops after the modal closes (alt-tab back left
+        // focus stranded on whatever element was focused before leaving).
+        const blockedNow = isOverlayBlockingInput()
+          || !!document.querySelector('[data-native-view-blocker]');
+        nativeSurfaceBlocked = blockedNow;
+        document.body.dataset.nativeViewOccluded = String(blockedNow);
+        document.dispatchEvent(new CustomEvent(NATIVE_VIEW_OCCLUSION_EVENT, {
+          detail: { occluded: blockedNow },
+        }));
+      });
     }
   });
 
