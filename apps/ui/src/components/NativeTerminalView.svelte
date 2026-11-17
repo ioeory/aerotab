@@ -12,7 +12,7 @@
     NATIVE_VIEW_OCCLUSION_EVENT, type TerminalViewBackend, type NativeViewConfig,
   } from '../lib/nativeViewHost';
   import { completeNativeFocusHandoff } from '../lib/nativeFocusHandoff';
-  import { focusWebviewDesktop } from '../lib/desktopFocus';
+  import { focusWebviewDesktop, focusTrace } from '../lib/desktopFocus';
   import { tracePaste } from '../lib/nativePasteTrace';
   import { NATIVE_ACTIVATION_EVENT, nativeActivationRouter, type NativeActivation } from '../lib/nativeActivation';
   import {
@@ -618,10 +618,15 @@
     const request = ++desktopFocusRequest;
     // becameActive already has active=true: focus IME/OS synchronously so a
     // following mousedown default cannot reclaim the pane shell first.
-    // force + not-yet-active: wait one tick for Svelte props, then require active
-    // so a superseded request cannot steal focus back to the old pane.
+    // force + not-yet-active: wait one tick for Svelte props, then proceed
+    // even if `active` has not flushed yet — force callers (aerotab:focus-pane,
+    // window-restore) are authoritative about the target pane; bailing out
+    // here silently dropped focus on window reactivation.
     const apply = async () => {
-      if (!canFocusSurface()) return;
+      if (!canTakeFocus(force)) {
+        focusTrace(`focus.apply: skip force=${force} visible=${visible} active=${active} occluded=${occluded}/${globalOccluded} hidden=${document.hidden}`);
+        return;
+      }
       if (((backend === 'native-surface' && !committedWebview) || committedNative)) {
         requestSurfaceFocus?.();
         hostAdapter?.setFocusAllowed(surfaceReady && canFocusSurface());
@@ -632,7 +637,7 @@
         const focusedElement = document.activeElement;
         await focusWebviewDesktop();
         // IPC can outlive a pane switch, modal open, or backend transition.
-        if (request !== desktopFocusRequest || !canFocusSurface() || controller !== target
+        if (request !== desktopFocusRequest || !canTakeFocus(force) || controller !== target
           || (document.activeElement !== focusedElement && document.activeElement !== document.body)
           || ((backend === 'native-surface' && !committedWebview) || committedNative)) return;
         target?.focus();

@@ -143,6 +143,8 @@ mod focus_guard {
         RegisterWindowMessageW, GUITHREADINFO, WM_ACTIVATE, WM_SETFOCUS,
     };
 
+    use tauri::Emitter;
+
     /// Private registered message (≥ 0xC000): "outer frame holds focus while
     /// the app is foreground — push focus into WebView2". Registered so it can
     /// never clash with tao/wry WM_USER-range messages.
@@ -157,16 +159,53 @@ mod focus_guard {
 
     static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
     static WEBVIEW_CHILD_HWND: OnceLock<isize> = OnceLock::new();
+    static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
-    /// Is Win32 keyboard focus stuck on the outer tao frame while AeroTab is
-    /// the foreground app? That is the broken state we repair.
-    fn focus_stuck_on_frame() -> bool {
+    /// Emit `aerotab:window-focus` from the guard. tauri's own Focused event
+    /// only fires from WebView2 controller GotFocus/LostFocus, and Chromium
+    /// does not raise LostFocus when Win32 focus leaves its HWND tree
+    /// (alt-tab away). The stale focused_webview marker then suppresses the
+    /// next GotFocus, so after one round trip Focused stops firing forever.
+    /// The guard tracks Win32 activation directly and re-emits the event so
+    /// the frontend restore chain always runs. The frontend dedupes by
+    /// tracking its own `focused` state.
+    fn emit_window_focus(focused: bool) {
+        if let Some(app) = APP_HANDLE.get() {
+            let result = app.emit_to(
+                tauri::EventTarget::webview_window(super::MAIN_WINDOW_LABEL),
+                "aerotab:window-focus",
+                focused,
+            );
+            match result {
+                Ok(()) => focus_guard_log(&format!("emit: window-focus={focused}")),
+                Err(e) => focus_guard_log(&format!("emit failed: {e}")),
+            }
+        } else {
+            focus_guard_log("emit: no app handle");
+        }
+    }
+
+    /// Is Win32 keyboard focus anywhere other than the Chromium document
+    /// window while the webview exists? Used at activation time: focus on
+    /// the frame itself *or* parked on the Chrome_WidgetWin_0 wrapper both
+    /// leave the app keyboard-dead, so both need the repair.
+    fn focus_not_on_document() -> bool {
+        let Some(container) = webview_child_hwnd() else {
+            return false;
+        };
+        let Some(doc) = chrome_document_window(container) else {
+            // Document window not created yet: nothing to compare against.
+            return false;
+        };
+        let focus = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+        focus != doc
+    }
+
+    /// Does the GUI thread's keyboard focus sit on the outer tao frame
+    /// itself? (No foreground check — that is the caller's policy.)
+    fn focus_is_on_frame() -> bool {
         let main = MAIN_HWND.load(Ordering::Relaxed);
         if main == 0 {
-            return false;
-        }
-        // Only act when the app is foreground: never steal focus.
-        if unsafe { GetForegroundWindow() } as isize != main {
             return false;
         }
         let mut info = GUITHREADINFO {
@@ -189,6 +228,20 @@ mod focus_guard {
         // thread that owns the frame, so query the current thread.
         let focused = unsafe { GetGUIThreadInfo(GetCurrentThreadId(), &mut info) };
         focused != 0 && info.hwndFocus as isize == main
+    }
+
+    /// Is Win32 keyboard focus stuck on the outer tao frame while AeroTab is
+    /// the foreground app? That is the broken state we repair.
+    fn focus_stuck_on_frame() -> bool {
+        let main = MAIN_HWND.load(Ordering::Relaxed);
+        if main == 0 {
+            return false;
+        }
+        // Only act when the app is foreground: never steal focus.
+        if unsafe { GetForegroundWindow() } as isize != main {
+            return false;
+        }
+        focus_is_on_frame()
     }
 
     /// Locate the `WRY_WEBVIEW` container HWND (direct child of the frame).
@@ -230,32 +283,142 @@ mod focus_guard {
         1
     }
 
-    /// Push Win32 focus from the outer frame into the WebView2 container.
-    /// `SetFocus(WRY_WEBVIEW)` makes wry's `default_window_proc` forward to
-    /// the `Chrome_WidgetWin_1` document window, which triggers WebView2
-    /// `GotFocus` → tauri `Focused(true)` → the frontend restore chain.
+    /// Push Win32 focus from the outer frame into the WebView2 document window.
+    /// Two steps:
+    /// 1. `SetFocus(WRY_WEBVIEW)` — wry's container forwards to its first
+    ///    child (`Chrome_WidgetWin_0`, a plain wrapper).
+    /// 2. `SetFocus(Chrome_WidgetWin_1)` — the Chromium document window that
+    ///    actually receives keyboard input. Without step 2 focus can stall on
+    ///    the wrapper and typing lands nowhere (verified live on Win11).
+    /// Once the document window owns focus, WebView2 raises `GotFocus` →
+    /// tauri `Focused(true)` → the frontend restore chain runs.
     /// Only called from our posted message, i.e. on the GUI thread and
     /// outside any nested focus dispatch.
     fn restore_webview_focus() {
-        if !focus_stuck_on_frame() {
-            focus_guard_log("restore: not stuck, skip");
+        // The restore message is only posted by ourselves while the window
+        // was being activated (WM_SETFOCUS/WM_ACTIVATE on the foreground
+        // window), so the foreground check would race the activation
+        // transition here — it already gated the scheduling.
+        let Some(container) = webview_child_hwnd() else {
+            focus_guard_log("restore: WRY_WEBVIEW child not found");
+            return;
+        };
+        let before = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+        // Focus must reach the Chromium document window (Chrome_WidgetWin_1).
+        // Merely entering the WRY container / its wrapper is not enough:
+        // Win32 focus parked on Chrome_WidgetWin_0 never fires WebView2's
+        // controller GotFocus, so tauri never emits Focused(true) and the
+        // frontend DOM-focus restore chain never runs (typing dead).
+        // Only push focus when we are the foreground window; otherwise
+        // Chromium may be mid-transition and we would fight the user.
+        let doc = chrome_document_window(container);
+        let Some(doc_hwnd) = doc else {
+            focus_guard_log(&format!(
+                "restore: doc window not found under container={container:p}"
+            ));
+            return;
+        };
+        let focus = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+        if focus == doc_hwnd {
+            focus_guard_log("restore: focus already on document window, skip");
+            // Focus reached the document window without our help. tauri's
+            // Focused(true) may still be missing (stale focused_webview
+            // marker), so emit the event ourselves; the frontend dedupes.
+            emit_window_focus(true);
             return;
         }
-        match webview_child_hwnd() {
-            Some(child) => {
-                let before = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
-                let result = unsafe { SetFocus(child) };
-                focus_guard_log(&format!(
-                    "restore: SetFocus({child:p}) prev={before:p} new={result:p}"
-                ));
-            }
-            None => focus_guard_log("restore: WRY_WEBVIEW child not found"),
+        let foreground = unsafe { GetForegroundWindow() };
+        let main = MAIN_HWND.load(Ordering::Relaxed);
+        let frame_owned =
+            focus.is_null() || focus == main as HWND || is_or_descends(container, focus);
+        if foreground as isize != main || !frame_owned {
+            focus_guard_log(&format!(
+                "restore: skip fg={foreground:p} main={main:x} focus={focus:p} frame_owned={frame_owned}"
+            ));
+            return;
         }
+        let step2 = unsafe { SetFocus(doc_hwnd) };
+        let after2 = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+        focus_guard_log(&format!(
+            "restore: doc={doc_hwnd:p} prev={before:p} focus={focus:p} after={after2:p} step2={step2:p}"
+        ));
+        // tauri's Focused(true) may still be suppressed by its stale
+        // focused_webview marker (Chromium did not raise LostFocus on the
+        // previous deactivate). Emit the event ourselves; the frontend
+        // dedupes against its own focused state.
+        emit_window_focus(true);
+    }
+
+    /// Is `hwnd` equal to `root` or a descendant of it?
+    fn is_or_descends(root: HWND, hwnd: HWND) -> bool {
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut cur = hwnd;
+        for _ in 0..16 {
+            if cur == root {
+                return true;
+            }
+            // GetAncestor with GA_PARENT
+            let parent = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetAncestor(
+                    cur,
+                    windows_sys::Win32::UI::WindowsAndMessaging::GA_PARENT,
+                )
+            };
+            if parent.is_null() {
+                return false;
+            }
+            cur = parent;
+        }
+        false
+    }
+
+    /// The Chromium document window class as null-terminated UTF-16
+    /// ("Chrome_WidgetWin_1\0").
+    const CHROME_WIDGETWIN_1: [u16; 19] = [
+        67, 104, 114, 111, 109, 101, 95, 87, 105, 100, 103, 101, 116, 87, 105, 110, 95, 49, 0,
+    ];
+
+    /// Search for a descendant window with the given class name.
+    /// The WebView2 hierarchy is shallow (container → wrapper → document),
+    /// so a small iterative search over `FindWindowExW` is sufficient.
+    /// `class_utf16` must be a null-terminated UTF-16 string.
+    fn find_descendant_by_class(root: HWND, class_utf16: &[u16]) -> Option<HWND> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowExW;
+        // Strip the terminating NUL for comparisons.
+        let needle: &[u16] = match class_utf16.iter().position(|&c| c == 0) {
+            Some(pos) => &class_utf16[..pos],
+            None => class_utf16,
+        };
+        let mut name_buf = [0u16; 64];
+        let mut queue = vec![root];
+        while let Some(hwnd) = queue.pop() {
+            let mut child: HWND = std::ptr::null_mut();
+            loop {
+                child = unsafe { FindWindowExW(hwnd, child, std::ptr::null(), std::ptr::null()) };
+                if child.is_null() {
+                    break;
+                }
+                let n = unsafe { GetClassNameW(child, name_buf.as_mut_ptr(), 64) };
+                let name = &name_buf[..n.max(0) as usize];
+                if name == needle {
+                    return Some(child);
+                }
+                queue.push(child);
+            }
+        }
+        None
+    }
+
+    /// The Chromium document window inside the WebView2 hierarchy.
+    fn chrome_document_window(container: HWND) -> Option<HWND> {
+        find_descendant_by_class(container, &CHROME_WIDGETWIN_1)
     }
 
     /// Release-build friendly diagnostics: append to a log file next to the
     /// executable when `AEROTAB_FOCUS_GUARD_LOG` is set, else no-op.
-    fn focus_guard_log(message: &str) {
+    pub(crate) fn focus_guard_log(message: &str) {
         use std::io::Write;
         let Ok(dir) = std::env::var("AEROTAB_FOCUS_GUARD_LOG") else {
             return;
@@ -280,15 +443,32 @@ mod focus_guard {
         if msg == WM_SETFOCUS || msg == WM_ACTIVATE {
             // WM_ACTIVATE: LOWORD(wparam) != WA_INACTIVE means activating.
             let activating = msg != WM_ACTIVATE || (wparam & 0xffff) != 0;
-            // The frame just received focus / the window activated while focus
-            // sits on the frame itself. Schedule the repair asynchronously —
-            // never MoveFocus synchronously inside the focus dispatch.
-            let stuck = focus_stuck_on_frame();
+            // Schedule the repair whenever activation leaves focus anywhere
+            // but the Chromium document window — the frame itself, or the
+            // Chrome_WidgetWin_0 wrapper that wry's container forwards to.
+            // Focus parked on the wrapper never fires WebView2's controller
+            // GotFocus, so tauri never emits Focused(true) (typing dead).
+            let needs_repair = activating && focus_not_on_document();
             focus_guard_log(&format!(
-                "proc: msg=0x{msg:X} activating={activating} stuck={stuck}"
+                "proc: msg=0x{msg:X} activating={activating} needs_repair={needs_repair}"
             ));
-            if activating && stuck {
+            // WM_ACTIVATE(wa_inactive) is the reliable signal that Win32
+            // focus left the window; Chromium does not raise controller
+            // LostFocus in that path, so tauri's Focused(false) is missing.
+            // Emit it ourselves so the frontend resets its focused state
+            // (otherwise the next Focused(true) is deduped away and the
+            // restore chain never runs — the typing-dead symptom).
+            if msg == WM_ACTIVATE && !activating {
+                emit_window_focus(false);
+            }
+            if needs_repair {
                 PostMessageW(hwnd, restore_message(), 0, 0);
+            } else if activating {
+                // Focus already reached the document window (wry landed or a
+                // click landed first). tauri may still miss Focused(true)
+                // because its focused_webview marker went stale, so emit it
+                // from the activation path as well; the frontend dedupes.
+                emit_window_focus(true);
             }
         } else if msg == restore_message() {
             focus_guard_log("proc: restore message received");
@@ -312,6 +492,7 @@ mod focus_guard {
             return;
         };
         MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        let _ = APP_HANDLE.set(app.clone());
         let ok = unsafe {
             SetWindowSubclass(
                 hwnd.0 as HWND,
@@ -326,6 +507,21 @@ mod focus_guard {
         ));
         tracing::info!("windows focus guard installed on main window");
     }
+}
+
+/// Frontend focus-chain diagnostics: same sink as the Rust focus guard.
+/// Bounded: the webview sends short strings, and the command is a no-op
+/// unless AEROTAB_FOCUS_GUARD_LOG is set.
+#[tauri::command]
+fn desktop_focus_trace(window: tauri::WebviewWindow, line: String) {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return;
+    }
+    let safe: String = line.chars().take(400).collect();
+    #[cfg(target_os = "windows")]
+    focus_guard::focus_guard_log(&format!("ui: {safe}"));
+    #[cfg(not(target_os = "windows"))]
+    let _ = safe;
 }
 
 fn parse_window_behavior(value: serde_json::Value) -> WindowBehaviorSettings {
@@ -3059,6 +3255,7 @@ fn main() {
             runtime_diagnostic_snapshot,
             show_main_window,
             desktop_focus_webview,
+            desktop_focus_trace,
             get_window_screen_rect,
             get_main_window_hwnd,
             session_info,

@@ -43,6 +43,7 @@
   import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
   import { isOverlayBlockingInput, shouldAutoFocusTerminal } from './lib/modalFocus';
+  import { focusTrace } from './lib/desktopFocus';
   import { listenNativeEvent } from './lib/nativePasteBridge';
   import { syncAerotabOverlayMarker } from './lib/overlayMarker';
   import { completeNativeFocusHandoff, expectNativeFocusHandoff } from './lib/nativeFocusHandoff';
@@ -1737,6 +1738,15 @@
     const restore = (value: boolean) => {
       if (disposed || focused === value) return;
       focused = value;
+      const overlayWhy = [
+        document.body.dataset.modalOverlay === 'true' ? 'modal' : '',
+        document.querySelector('dialog[open]') ? 'dialog' : '',
+        document.querySelector('[data-aerotab-modal]') ? 'aerotab-modal' : '',
+        document.querySelector('[data-aerotab-tab-list]') ? 'tab-list' : '',
+        document.querySelector('[data-aerotab-menu-open]') ? 'menu-open' : '',
+        document.querySelector('[data-native-view-blocker]') ? 'native-blocker' : '',
+      ].filter(Boolean).join(',') || 'none';
+      focusTrace(`window-focus=${value} hidden=${document.hidden} overlay=${isOverlayBlockingInput()}(${overlayWhy}) occluded=${document.body.dataset.nativeViewOccluded ?? '-'} activeEl=${document.activeElement?.tagName ?? '-'}`);
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
       if (!value) return;
@@ -1746,10 +1756,16 @@
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = window.setTimeout(() => {
         retryTimer = 0;
-        if (disposed || !focused || document.hidden || isOverlayBlockingInput()) return;
+        if (disposed || !focused) return;
+        if (document.hidden || isOverlayBlockingInput()) {
+          focusTrace(`retry: blocked hidden=${document.hidden} overlay=${isOverlayBlockingInput()} occluded=${document.body.dataset.nativeViewOccluded ?? '-'} activeEl=${document.activeElement?.tagName ?? '-'}`);
+          return;
+        }
         const tab2 = tabs.tabs.find(candidate => candidate.id === tabs.activeId);
         const pane2 = tab2 ? tabs.activePane(tab2) : undefined;
         const host2 = pane2 && document.querySelector(`[data-pane-drop-pane="${CSS.escape(pane2.id)}"]`);
+        const ok = !!(host2 && shouldAutoFocusTerminal(host2));
+        focusTrace(`retry: pane=${pane2?.id ?? '-'} host=${!!host2} shouldFocus=${ok} activeEl=${document.activeElement?.tagName}.${(document.activeElement?.className ?? '').toString().slice(0, 40)}`);
         if (host2 && shouldAutoFocusTerminal(host2)) focusActivePane();
       }, 350);
       frame = requestAnimationFrame(() => {
