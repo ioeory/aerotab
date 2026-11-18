@@ -140,6 +140,24 @@ const focusTrace = () => {};
     close() { runtime.stop(); ctl.blur(); } };
 }
 
+test('right-to-left pointer selection includes the first and last characters', async () => {
+  const f = await fixture();
+  try {
+    f.ctl.cols = 10;
+    f.ctl.metrics.width = 8;
+    for (const [type, x] of [['pointerdown', 23], ['pointermove', 0], ['pointerup', -2]]) {
+      const ev = new Event(type, { cancelable: true });
+      Object.assign(ev, { button: 0, pointerId: 1, clientX: x, clientY: 0, detail: 1 });
+      f.canvas.dispatchEvent(ev);
+    }
+    assert.deepEqual(f.selections.map(([method, { col, side }]) => [method, col, side]), [
+      ['terminal.selectionStart', 2, 'right'],
+      ['terminal.selectionUpdate', 0, 'left'],
+      ['terminal.selectionUpdate', 0, 'left'],
+    ]);
+  } finally { f.close(); }
+});
+
 test('active WebView canvas pointer default must not replace the IME focus selected by production controller', async () => {
   const f = await fixture();
   try {

@@ -279,7 +279,7 @@ fn selection(dispatch: &InputDispatch, id: Uuid, pos: input::CellPosition, start
     };
     let mut params = serde_json::json!({
         "id": id, "col": pos.col, "line": pos.row,
-        "side": if start { "left" } else { "right" },
+        "side": pos.selection_side(),
     });
     if start {
         params["kind"] = serde_json::json!("simple");
@@ -1264,7 +1264,11 @@ mod input_tests {
         let bytes = input::encode_mouse(
             mode,
             input::MouseAction::Motion(None),
-            input::CellPosition { col: 0, row: 0 },
+            input::CellPosition {
+                col: 0,
+                row: 0,
+                right_half: false,
+            },
             Modifiers::default(),
         );
         assert_eq!(bytes, Some(b"\x1b[<35;1;1M".to_vec()));

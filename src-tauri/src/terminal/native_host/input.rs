@@ -288,7 +288,34 @@ impl MouseMode {
 pub(super) struct CellPosition {
     pub col: u16,
     pub row: u16,
+    pub right_half: bool,
 }
+impl CellPosition {
+    pub fn selection_side(self) -> crate::terminal::engine::CellSide {
+        use crate::terminal::engine::CellSide;
+        if self.right_half {
+            CellSide::Right
+        } else {
+            CellSide::Left
+        }
+    }
+}
+
+#[test]
+fn selection_uses_pointer_half_and_clamps_at_grid_edges() {
+    use crate::terminal::engine::CellSide::{Left, Right};
+    for (x, side) in [
+        (0., Left),
+        (12., Left),
+        (15., Left),
+        (16., Right),
+        (20., Left),
+        (40., Right),
+    ] {
+        assert_eq!(cell_position(x, 12., 8, 16, 3, 2).selection_side(), side);
+    }
+}
+
 pub(super) fn cell_position(
     x: f64,
     y: f64,
@@ -303,9 +330,11 @@ pub(super) fn cell_position(
         }
         (((value - 12.).max(0.) / f64::from(size.max(1))) as u16).min(count.saturating_sub(1))
     }
+    let col = index(x, cw, cols);
     CellPosition {
-        col: index(x, cw, cols),
+        col,
         row: index(y, ch, rows),
+        right_half: x.is_finite() && x - 12. >= (f64::from(col) + 0.5) * f64::from(cw.max(1)),
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -441,7 +470,11 @@ mod mouse_tests {
         }
     }
     fn pos() -> CellPosition {
-        CellPosition { col: 4, row: 2 }
+        CellPosition {
+            col: 4,
+            row: 2,
+            right_half: false,
+        }
     }
     #[test]
     fn sgr_buttons_release_modifiers_and_wheel() {
@@ -514,7 +547,11 @@ mod mouse_tests {
             control: true,
             ..Modifiers::default()
         };
-        let edge = CellPosition { col: 222, row: 94 };
+        let edge = CellPosition {
+            col: 222,
+            row: 94,
+            right_half: false,
+        };
         assert_eq!(
             encode_mouse(legacy, MouseAction::Press(0), edge, m),
             Some(vec![27, 91, 77, 48, 255, 127])
@@ -526,7 +563,11 @@ mod mouse_tests {
         assert!(encode_mouse(
             legacy,
             MouseAction::Press(0),
-            CellPosition { col: 223, row: 0 },
+            CellPosition {
+                col: 223,
+                row: 0,
+                right_half: false
+            },
             m
         )
         .is_none());
@@ -541,7 +582,11 @@ mod mouse_tests {
         assert!(encode_mouse(
             utf8,
             MouseAction::Press(0),
-            CellPosition { col: 2015, row: 0 },
+            CellPosition {
+                col: 2015,
+                row: 0,
+                right_half: false
+            },
             m
         )
         .is_none());
@@ -550,19 +595,35 @@ mod mouse_tests {
     fn coordinates_clamp_to_grid_and_ignore_invalid_geometry() {
         assert_eq!(
             cell_position(-9., -1., 8, 16, 80, 24),
-            CellPosition { col: 0, row: 0 }
+            CellPosition {
+                col: 0,
+                row: 0,
+                right_half: false
+            }
         );
         assert_eq!(
             cell_position(28., 44., 8, 16, 80, 24),
-            CellPosition { col: 2, row: 2 }
+            CellPosition {
+                col: 2,
+                row: 2,
+                right_half: false
+            }
         );
         assert_eq!(
             cell_position(99999., 99999., 8, 16, 80, 24),
-            CellPosition { col: 79, row: 23 }
+            CellPosition {
+                col: 79,
+                row: 23,
+                right_half: true
+            }
         );
         assert_eq!(
             cell_position(f64::NAN, f64::INFINITY, 0, 0, 0, 0),
-            CellPosition { col: 0, row: 0 }
+            CellPosition {
+                col: 0,
+                row: 0,
+                right_half: false
+            }
         );
     }
     #[test]

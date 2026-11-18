@@ -141,7 +141,7 @@ define_class!(
                             // Same canonical engine, synchronous order: scroll then extend.
                             v.engine.scroll(crate::terminal::engine::ScrollCmd::Delta(delta));
                             let (cols,rows)=v.engine.dims();let p=input::cell_position(x,y,v.cell.0,v.cell.1,cols,rows);
-                            v.engine.selection_update(usize::from(p.col),i32::from(p.row),crate::terminal::engine::CellSide::Right);
+                            v.engine.selection_update(usize::from(p.col),i32::from(p.row),p.selection_side());
                         }
                     }
                 }
@@ -495,7 +495,7 @@ impl TerminalView {
                     }
                 }
             });
-            let mut p = serde_json::json!({"id":id,"col":pos.col,"line":pos.row,"side":if start {"left"}else{"right"}});
+            let mut p = serde_json::json!({"id":id,"col":pos.col,"line":pos.row,"side":pos.selection_side()});
             if start {
                 p["kind"] =
                     serde_json::json!(macos_policy::selection_kind(event.clickCount(), m.alt));

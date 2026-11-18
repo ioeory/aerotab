@@ -99,7 +99,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.5-ui-20261117-webview-focus10';
+  const buildId = '0.3.6-ui-terminal-selection';
   type SettingsSectionId =
     | 'application'
     | 'appearance'

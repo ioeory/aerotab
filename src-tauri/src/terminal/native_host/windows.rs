@@ -399,7 +399,7 @@ impl Attachment {
         );
         let reporting = mode.active() && !m.shift;
         let selection = |dispatch: &InputDispatch, id: Uuid, start: bool| {
-            let mut p = serde_json::json!({"id":id,"col":pos.col,"line":pos.row,"side":if start{"left"}else{"right"}});
+            let mut p = serde_json::json!({"id":id,"col":pos.col,"line":pos.row,"side":pos.selection_side()});
             if start {
                 p["kind"] = serde_json::json!("simple");
             }

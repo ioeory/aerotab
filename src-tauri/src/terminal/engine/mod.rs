@@ -1553,6 +1553,9 @@ mod tests {
             .map(|r| r.chars.len())
             .sum();
         assert_eq!(selected, 5);
+        e.selection_start(4, 0, SelectionKind::Simple, CellSide::Right);
+        e.selection_update(0, 0, CellSide::Left);
+        assert_eq!(e.selection_text().as_deref(), Some("hello"));
         e.selection_clear();
         assert!(e.selection_text().is_none());
     }

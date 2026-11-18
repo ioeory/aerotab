@@ -204,7 +204,7 @@
     <!-- Keep mounted while maximized-away so VT/xterm are not remounted (same as layoutVisible). -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (focus-only mousedown guard; terminal descendants own keyboard input) -->
     <div
-      class="group absolute z-0 min-w-0 min-h-0 overflow-hidden bg-[var(--color-bg)]
+      class="group absolute z-0 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[var(--color-bg)]
              {focused && !hidden ? 'outline outline-1 outline-[var(--color-accent)] -outline-offset-1' : ''}"
       style={box && !hidden
         ? `left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px;`
@@ -229,15 +229,12 @@
       }}
     >
         {#if tab.panes.length > 1}
+          <div class="flex h-6 shrink-0 items-center gap-1 border-b border-[var(--color-border-soft)] bg-[var(--color-panel)]">
           <div
             role="button"
             tabindex="-1"
-            class="pane-drag-handle absolute top-0 left-0 z-[11] flex items-center gap-0.5 px-1 py-0.5 text-[12px]
-                   bg-[var(--color-panel)]/80 backdrop-blur border border-[var(--color-border-soft)]
-                   cursor-grab active:cursor-grabbing select-none touch-none
-                   opacity-0 pointer-events-none transition-opacity
-                   group-hover:opacity-100 group-hover:pointer-events-auto
-                   group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+            class="pane-drag-handle mr-auto flex h-full items-center gap-0.5 px-1 text-[12px]
+                   cursor-grab active:cursor-grabbing select-none touch-none"
             title={i18n.t('pane.movePane')}
             aria-label={i18n.t('pane.movePane')}
             onpointerdown={(e) => {
@@ -254,10 +251,7 @@
             type="button"
             title={tab.maximizedPaneId === pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
             aria-label={tab.maximizedPaneId === pane.id ? i18n.t('pane.restorePane') : i18n.t('pane.maximizePane')}
-            class="btn-ghost absolute top-1 right-7 z-[11] p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)]
-                   opacity-0 pointer-events-none transition-opacity
-                   group-hover:opacity-100 group-hover:pointer-events-auto
-                   group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+            class="btn-ghost p-1"
             onclick={(e) => toggleMaximize(pane.id, e)}
             onpointerdown={(e) => e.stopPropagation()}
           >
@@ -267,16 +261,15 @@
             type="button"
             title={i18n.t('pane.closePaneShortcut')}
             aria-label={i18n.t('pane.closePane')}
-            class="btn-ghost absolute top-1 right-1 z-[11] p-1 bg-[var(--color-panel)]/85 backdrop-blur border border-[var(--color-border-soft)] hover:!text-[var(--color-danger)]
-                   opacity-0 pointer-events-none transition-opacity
-                   group-hover:opacity-100 group-hover:pointer-events-auto
-                   group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+            class="btn-ghost mr-1 p-1 hover:!text-[var(--color-danger)]"
             onclick={(e) => closePane(pane.id, e)}
             onpointerdown={(e) => e.stopPropagation()}
           >
             <X size={12} />
           </button>
+          </div>
         {/if}
+        <div class="relative min-h-0 min-w-0 flex-1 overflow-hidden">
         {#if pane.connection}
           <div class="h-full flex flex-col items-center justify-center gap-3 p-6 text-center" role="status">
             <div class="font-medium">{pane.title}</div>
@@ -313,6 +306,7 @@
           {onError}
         />
         {/if}
+        </div>
         {#if dragHit?.kind === 'pane' && dragHit.paneId === pane.id && !hidden}
           <div class="absolute inset-0 z-20 pointer-events-none border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10">
             <div class="absolute bg-[var(--color-accent)]/25" style={dropBandStyle(dragHit.side)}></div>

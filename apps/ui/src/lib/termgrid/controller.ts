@@ -964,13 +964,14 @@ export class NativeTerminalController {
     });
   }
 
-  private cellAt(ev: { clientX: number; clientY: number }): { col: number; line: number } {
+  private cellAt(ev: { clientX: number; clientY: number }): { col: number; line: number; side: 'left' | 'right' } {
     const rect = this.opts.canvas.getBoundingClientRect();
     const x = ev.clientX - rect.left;
     const y = ev.clientY - rect.top;
     const col = Math.max(0, Math.min(this.cols - 1, Math.floor(x / this.metrics.width)));
     const line = Math.max(0, Math.min(this.rows - 1, Math.floor(y / this.metrics.height)));
-    return { col, line };
+    const side = x < (col + 0.5) * this.metrics.width ? 'left' : 'right';
+    return { col, line, side };
   }
 
   private async onPtrDown(ev: PointerEvent) {
@@ -987,7 +988,7 @@ export class NativeTerminalController {
     // handled below; keep primary clicks on the real editable input target.
     if (ev.button === 0) ev.preventDefault();
     this.ptrMoved = false;
-    const { col, line } = this.cellAt(ev);
+    const { col, line, side } = this.cellAt(ev);
 
     if (mouseReportingActive(this.mode)) {
       if (ev.button > 2) return;
@@ -1027,12 +1028,12 @@ export class NativeTerminalController {
       col,
       line,
       kind,
-      side: 'left',
+      side,
     });
   }
 
   private async onPtrMove(ev: PointerEvent) {
-    const { col, line } = this.cellAt(ev);
+    const { col, line, side } = this.cellAt(ev);
     if (this.mouseDown && mouseReportingActive(this.mode)) {
       this.ptrMoved = true;
       const seq = encodeMouseEvent({
@@ -1056,7 +1057,7 @@ export class NativeTerminalController {
         id: this.sessionId,
         col,
         line,
-        side: 'right',
+        side,
       });
       return;
     }
@@ -1067,7 +1068,7 @@ export class NativeTerminalController {
   }
 
   private async onPtrUp(ev: PointerEvent) {
-    const { col, line } = this.cellAt(ev);
+    const { col, line, side } = this.cellAt(ev);
     try {
       this.opts.canvas.releasePointerCapture(ev.pointerId);
     } catch {
@@ -1099,7 +1100,7 @@ export class NativeTerminalController {
         id: this.sessionId,
         col,
         line,
-        side: 'right',
+        side,
       });
       if (this.opts.copyOnSelect && this.ptrMoved) {
         const text = await this.selectionText();
