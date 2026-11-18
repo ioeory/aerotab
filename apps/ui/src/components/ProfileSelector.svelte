@@ -15,10 +15,11 @@
   import type { RpcClient } from '../lib/rpc';
   import type { StoredProfile } from '../lib/types';
   import { i18n } from '../lib/i18n.svelte';
+  import { hotkeys } from '../lib/hotkeys';
   import { getProfileCatalog } from '../lib/profileCatalog.svelte';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
   import { clampMenuToViewport } from '../lib/contextMenuPosition';
-  import type { SplitDir } from '../lib/tabs.svelte';
+  import type { SplitDir, SplitSide } from '../lib/tabs.svelte';
   import { matchesProfileQuery, profileEndpointLabel, profileGroupName, sortProfiles, displayGroupName, isUngroupedGroupKey, UNGROUPED_GROUP_KEY } from '../lib/profileMeta';
   import ProfileIcon from './ProfileIcon.svelte';
   import ProfileKindBadge from './ProfileKindBadge.svelte';
@@ -57,7 +58,7 @@
     rpc: RpcClient;
     onClose: () => void;
     onOpen: (item: PickerItem) => void;
-    onSplit: (profile: StoredProfile, direction: SplitDir) => Promise<boolean>;
+    onSplit: (profile: StoredProfile, direction: SplitDir, side?: SplitSide) => Promise<boolean>;
     canSplit?: boolean;
     busy?: boolean;
   }
@@ -279,12 +280,30 @@
     if (!addr) return;
     onOpen({ kind: 'address', address: addr });
   }
-  function clampHover(next: number): number {
-    if (navItems.length === 0) return 0;
-    return Math.max(0, Math.min(navItems.length - 1, next));
+  function wrapHover(next: number): number {
+    const count = navItems.length;
+    return count ? ((next % count) + count) % count : 0;
   }
   function onKey(ev: KeyboardEvent) {
+    if (ev.defaultPrevented || ev.isComposing || ev.getModifierState?.('AltGraph')) return;
     if (busy) { ev.preventDefault(); return; }
+    const selected = navItems[hover];
+    if (canSplit && selected?.kind === 'profile' && selected.profile.kind !== 'rdp' && selected.profile.kind !== 'vnc') {
+      const split = ([
+        ['split-right', 'row', 'after'], ['split-left', 'row', 'before'],
+        ['split-down', 'col', 'after'], ['split-up', 'col', 'before'],
+      ] as const).find(([action]) => hotkeys.matchesAction(ev, action));
+      if (split) {
+        const [, direction, side] = split;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (!ev.repeat) {
+          const profile = selected.profile;
+          void onSplit(profile, direction, side).then(opened => { if (opened) pushRecent(profile.id); });
+        }
+        return;
+      }
+    }
     if (ev.key === 'ContextMenu' || (ev.shiftKey && ev.key === 'F10')) {
       const item = navItems[hover];
       if (item?.kind === 'profile') void showProfileMenu(item.profile, ev);
@@ -293,12 +312,12 @@
     if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); onClose(); return; }
     if (ev.key === 'ArrowDown') {
       ev.preventDefault();
-      hover = clampHover(hover + 1);
+      hover = wrapHover(hover + 1);
       return;
     }
     if (ev.key === 'ArrowUp') {
       ev.preventDefault();
-      hover = clampHover(hover - 1);
+      hover = wrapHover(hover - 1);
       return;
     }
     if (ev.key === 'Home') {
@@ -308,7 +327,7 @@
     }
     if (ev.key === 'End') {
       ev.preventDefault();
-      hover = clampHover(navItems.length - 1);
+      hover = wrapHover(navItems.length - 1);
       return;
     }
     if (ev.key === 'Enter') {

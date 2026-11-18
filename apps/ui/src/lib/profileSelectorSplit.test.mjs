@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { compile } from 'svelte/compiler';
+import { HotkeyManager } from './hotkeys.ts';
 const read = p => readFileSync(new URL(p, import.meta.url), 'utf8');
 const app = read('../App.svelte'), picker = read('../components/ProfileSelector.svelte');
 const transpile = s => ts.transpileModule(s, { compilerOptions: { target: 99, module: 99 } }).outputText;
@@ -66,9 +67,9 @@ test('split picker captures target before await, prevents duplicate opens, and i
     tabs: { activeId: 'tab', tabs: [tab], activePane: t => ({ id: t.activePaneId }) },
     connectProfile: (...args) => { opened.push(args); return new Promise(r => { finish = r; }); },
     requestAnimationFrame: fn => fn(), focusActivePane() {} });
-  const first = api.onPickerSplit(profile, 'row');
+  const first = api.onPickerSplit(profile, 'row', 'before');
   tab.activePaneId = 'changed'; await api.onPickerSplit(profile, 'col');
-  assert.equal(opened.length, 1); assert.equal(opened[0][1].paneId, 'anchor');
+  assert.equal(opened.length, 1); assert.equal(opened[0][1].paneId, 'anchor'); assert.equal(opened[0][1].side, 'before');
   finish(false); await first;
   const retry = api.onPickerSplit(profile, 'col'); assert.equal(opened.length, 2); finish(true); await retry;
 });
@@ -80,6 +81,51 @@ test('no active terminal prevents any split connection', async () => {
     assert.equal(await api.onPickerSplit(profile, 'row'), false);
   }
 });
+test('picker arrows wrap across row kinds and keep Home/End navigation', () => {
+  const navItems = [{ kind: 'profile', profile }, { kind: 'shell' }, { kind: 'ssh-config' }];
+  const api = functions(picker, ['onKey', 'wrapHover'], { navItems, busy: false, canSplit: false }, 'let hover = 0; function selected() { return hover; }\nreturn { onKey, selected };');
+  const key = key => api.onKey({ key, preventDefault() {} });
+  key('ArrowUp'); assert.equal(api.selected(), 2);
+  key('ArrowDown'); assert.equal(api.selected(), 0);
+  key('End'); assert.equal(api.selected(), 2);
+  key('Home'); assert.equal(api.selected(), 0);
+  navItems.length = 0;
+  key('ArrowUp'); assert.equal(api.selected(), 0);
+});
+
+test('picker split bindings open the selected saved profile only and consume repeats', async () => {
+  const calls = [], recent = [];
+  const navItems = [{ kind: 'profile', profile }];
+  const hotkeys = new HotkeyManager();
+  hotkeys.loadFromMap({ 'split-right': ['Ctrl+J'], 'split-left': ['Ctrl+H'], 'split-down': ['Ctrl+K'], 'split-up': ['Ctrl+U'] });
+  const env = { navItems, busy: false, canSplit: true, hotkeys,
+    onSplit: async (p, dir, side) => { calls.push([p, dir, side]); return dir === 'row' && side === 'after'; },
+    pushRecent: id => recent.push(id) };
+  const api = functions(picker, ['onKey'], env, 'let hover = 0;');
+  const key = (key, extra = {}) => {
+    const ev = { key, ctrlKey: true, altKey: false, metaKey: false, shiftKey: false, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra };
+    api.onKey(ev);
+    return ev.defaultPrevented;
+  };
+  assert.equal(key('\\'), false, 'default binding no longer matches after a custom override');
+  assert.equal(key('j'), true);
+  assert.equal(key('k'), true);
+  assert.equal(key('h'), true);
+  assert.equal(key('u'), true);
+  assert.equal(key('j', { repeat: true }), true);
+  assert.equal(key('j', { isComposing: true }), false);
+  hotkeys.setBindings('split-down', []);
+  assert.equal(key('k'), false, 'clearing a binding disables it without a fallback');
+  for (const item of [{ kind: 'profile', profile: { ...profile, kind: 'rdp' } }, { kind: 'shell' }, { kind: 'ssh-config' }]) {
+    navItems[0] = item;
+    assert.equal(key('j'), false);
+  }
+  await Promise.resolve();
+  assert.deepEqual(calls, [[profile, 'row', 'after'], [profile, 'col', 'after'], [profile, 'row', 'before'], [profile, 'col', 'before']]);
+  assert.deepEqual(recent, ['saved']);
+});
+
 test('menu arrows wrap, Home/End focus endpoints and Escape/Tab close only the menu', () => {
   let focus = 0, closed = 0, stopped = 0;
   const buttons = [0, 1].map(index => ({ focus() { focus = index; } }));

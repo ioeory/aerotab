@@ -51,6 +51,17 @@ test('split reserves captured anchor immediately and a removed anchor never open
   assert.equal(tab.layout.direction, 'col'); assert.equal(tab.panes.length, 2); h.pending[0].resolve(live); await result;
   assert.equal(await api.openProfileConnection(p, { tabId: tab.id, paneId: 'gone', direction: 'row' }, h.deps), false); assert.equal(h.pending.length, 1);
 });
+test('left/up placement reserves the new pane before the captured anchor', async () => {
+  for (const direction of ['row', 'col']) {
+    const h = harness(); const tab = h.tabs.add({ id: 'anchor', kind: 'Ssh', title: 'A' });
+    const result = api.openProfileConnection(p, { tabId: tab.id, paneId: 'anchor', direction, side: 'before' }, h.deps);
+    assert.equal(tab.layout.direction, direction);
+    assert.equal(tab.layout.children[1].pane.id, 'anchor');
+    h.pending[0].resolve(live);
+    assert.equal(await result, true);
+    assert.equal(tab.layout.children[0].pane.id, 'live');
+  }
+});
 test('closing a retry placeholder also closes the late session and never restores it', async () => {
   const h = harness(); const initial = api.openProfileConnection(p, undefined, h.deps);
   h.pending[0].reject(Error('first failure')); await initial;

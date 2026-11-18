@@ -1,8 +1,8 @@
 import type { RpcClient } from './rpc';
-import type { tabs as tabStore, SplitDir } from './tabs.svelte';
+import type { tabs as tabStore, SplitDir, SplitSide } from './tabs.svelte';
 import type { SessionMeta, StoredProfile } from './types';
 
-export interface ProfileSplitTarget { tabId: string; paneId: string; direction: SplitDir }
+export interface ProfileSplitTarget { tabId: string; paneId: string; direction: SplitDir; side?: SplitSide }
 export interface ProfileConnectionDeps {
   rpc: RpcClient;
   tabs: typeof tabStore;
@@ -43,7 +43,7 @@ export async function openProfileConnection(profile: StoredProfile, target: Prof
   }
   const pane: SessionMeta = { id: `pending-profile:${deps.uuid()}`, kind: 'PendingSsh', title: profile.name, profileId: profile.id, connection: { status: 'connecting' } };
   if (target) {
-    if (!deps.tabs.addPane(target.tabId, pane, target.direction, 'after', target.paneId)) return false;
+    if (!deps.tabs.addPane(target.tabId, pane, target.direction, target.side ?? 'after', target.paneId)) return false;
   } else deps.tabs.add(pane);
   deps.onStart();
   return completeProfileConnection(pane, deps);

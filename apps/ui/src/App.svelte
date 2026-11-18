@@ -1516,12 +1516,12 @@
     void retryProfileConnection(pane, profileConnectionDeps());
   }
 
-  async function onPickerSplit(profile: StoredProfile, direction: SplitDir): Promise<boolean> {
+  async function onPickerSplit(profile: StoredProfile, direction: SplitDir, side: SplitSide = 'after'): Promise<boolean> {
     if (pickerConnecting) return false;
     const tab = tabs.tabs.find((t) => t.id === tabs.activeId);
     const pane = tab?.kind === 'terminal' ? tabs.activePane(tab) : undefined;
     if (!tab || !pane || profile.kind === 'rdp' || profile.kind === 'vnc') return false;
-    const target = { tabId: tab.id, paneId: pane.id, direction };
+    const target = { tabId: tab.id, paneId: pane.id, direction, side };
     pickerConnecting = true;
     try {
       const opened = await connectProfile(profile, target);
