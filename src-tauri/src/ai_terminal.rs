@@ -243,6 +243,7 @@ async fn execute_inner(
                 if cancel.is_cancelled() {
                     return Err("Canceled".to_string());
                 }
+                channel.note_terminal_input(&bytes);
                 match channel {
                     SessionChannel::Local(p) => {
                         if p.channel

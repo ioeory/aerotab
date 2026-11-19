@@ -82,6 +82,7 @@ use crate::sync::crypto::KdfParams;
 use crate::sync::oauth::{self, OAuthProvider};
 use crate::sync::persistence::SledStore;
 use crate::sync::{BlobStore, Group, OplogDriver, OplogStats, RecordId, SyncEngine, SyncStats};
+use crate::terminal::engine::{SessionOutput, SharedOutput};
 use crate::terminal::{PtyChannel, PtySize};
 
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
@@ -271,17 +272,37 @@ pub enum SessionChannel {
 pub struct LocalPty {
     pub channel: PtyChannel,
     /// `Arc` so `session.poll` can recv without holding the global `channels` lock (tab close stays fast).
-    pub rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    pub rx: SharedOutput,
 }
 
 pub struct SshSessionEntry {
     pub shell: Arc<SshShell>,
-    pub rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    pub rx: SharedOutput,
 }
 
 pub struct SerialSessionEntry {
     pub channel: SerialChannel,
-    pub rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    pub rx: SharedOutput,
+}
+
+impl SessionChannel {
+    fn output(&self) -> &SharedOutput {
+        match self {
+            Self::Local(p) => &p.rx,
+            Self::Ssh(s) => &s.rx,
+            Self::Serial(s) => &s.rx,
+        }
+    }
+
+    pub(crate) fn note_terminal_input(&self, bytes: &[u8]) {
+        self.output().note_input(bytes);
+    }
+
+    fn note_terminal_write(&self, bytes: &[u8]) {
+        if !crate::terminal::last_command::is_status_reply(bytes) {
+            self.note_terminal_input(bytes);
+        }
+    }
 }
 
 impl AppState {
@@ -393,7 +414,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Local(LocalPty {
                         channel,
-                        rx: Arc::new(Mutex::new(rx)),
+                        rx: SessionOutput::new(rx),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -439,7 +460,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Ssh(SshSessionEntry {
                         shell: Arc::new(shell),
-                        rx: Arc::new(Mutex::new(rx)),
+                        rx: SessionOutput::new(rx),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -497,7 +518,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Ssh(SshSessionEntry {
                         shell: Arc::new(shell),
-                        rx: Arc::new(Mutex::new(rx)),
+                        rx: SessionOutput::new(rx),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -517,6 +538,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let id = SessionId(p.id);
                 let chans = st.channels.lock().await;
                 let chan = chans.get(&id).ok_or_else(|| session_not_found(id))?;
+                chan.note_terminal_write(&bytes);
                 match chan {
                     SessionChannel::Local(pty) => pty
                         .channel
@@ -559,6 +581,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         let Some(chan) = chans.get(&id) else {
                             return false;
                         };
+                        chan.note_terminal_write(&data);
                         match chan {
                             SessionChannel::Local(pty) => pty.channel.write(&data).is_ok(),
                             SessionChannel::Ssh(s) => s.shell.write(&data).await.is_ok(),
@@ -618,6 +641,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 st.terminal_engines.remove(p.id);
                 let removed = st.channels.lock().await.remove(&id);
                 if let Some(chan) = removed {
+                    chan.output().close_capture();
                     match chan {
                         SessionChannel::Local(mut pty) => {
                             let _ = pty.channel.kill();
@@ -649,11 +673,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                 let rx = {
                     let chans = st.channels.lock().await;
                     let chan = chans.get(&id).ok_or_else(|| session_not_found(id))?;
-                    match chan {
-                        SessionChannel::Local(pty) => pty.rx.clone(),
-                        SessionChannel::Ssh(s) => s.rx.clone(),
-                        SessionChannel::Serial(s) => s.rx.clone(),
-                    }
+                    chan.output().clone()
                 };
                 let mut rx = rx.lock().await;
                 let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
@@ -690,7 +710,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         "native": true,
                     }));
                 }
-                let (rx, mut alive) = {
+                let (output, mut alive) = {
                     let mut chans = st.channels.lock().await;
                     let Some(chan) = chans.get_mut(&id) else {
                         return Ok(json!({ "chunks": Value::Array(vec![]), "alive": false }));
@@ -704,7 +724,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                         SessionChannel::Serial(s) => (s.rx.clone(), true),
                     }
                 };
-                let mut rx = rx.lock().await;
+                let mut rx = output.lock().await;
                 let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
                 use tokio::sync::mpsc::error::TryRecvError;
                 for _ in 0..max {
@@ -716,6 +736,9 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                             break;
                         }
                     }
+                }
+                if !alive {
+                    output.close_capture();
                 }
                 let chunks = coalesce_poll_output_chunks(raw_chunks);
                 Ok(json!({
@@ -759,7 +782,7 @@ pub fn register_all(dispatcher: &Dispatcher, state: Arc<AppState>) {
                     meta.id,
                     SessionChannel::Serial(SerialSessionEntry {
                         channel,
-                        rx: Arc::new(Mutex::new(rx)),
+                        rx: SessionOutput::new(rx),
                     }),
                 );
                 serde_json::to_value(OpenLocalResult { meta }).map_err(|e| internal(e.to_string()))
@@ -4972,21 +4995,11 @@ fn register_vault(dispatcher: &Dispatcher, state: Arc<AppState>) {
 async fn session_output_and_writer(
     st: &Arc<AppState>,
     id: SessionId,
-) -> Result<
-    (
-        crate::terminal::engine::SharedOutput,
-        mpsc::UnboundedSender<Vec<u8>>,
-    ),
-    RpcError,
-> {
+) -> Result<(SharedOutput, mpsc::UnboundedSender<Vec<u8>>), RpcError> {
     let rx = {
         let chans = st.channels.lock().await;
         let chan = chans.get(&id).ok_or_else(|| session_not_found(id))?;
-        match chan {
-            SessionChannel::Local(pty) => pty.rx.clone(),
-            SessionChannel::Ssh(s) => s.rx.clone(),
-            SessionChannel::Serial(s) => s.rx.clone(),
-        }
+        chan.output().clone()
     };
     let (tx, mut reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let st2 = st.clone();
@@ -5026,6 +5039,71 @@ fn register_terminal_engine(dispatcher: &Dispatcher, state: Arc<AppState>) {
     use crate::terminal::engine::{
         CellSide, EngineConfig, ScrollCmd, SearchDirection, SelectionKind, TerminalEngine,
     };
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.lastCommand.configure", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                struct P {
+                    id: Uuid,
+                    enabled: bool,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let id = SessionId(p.id);
+                let channels = st.channels.lock().await;
+                let channel = channels.get(&id).ok_or_else(|| session_not_found(id))?;
+                if p.enabled && matches!(channel, SessionChannel::Serial(_)) {
+                    return Err(invalid_params(
+                        "last command capture requires a shell session",
+                    ));
+                }
+                channel.output().configure_capture(p.enabled);
+                Ok(Value::Null)
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        dispatcher.register("terminal.lastCommand.get", move |params| {
+            let st = st.clone();
+            async move {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    id: Uuid,
+                    #[serde(default)]
+                    availability_only: bool,
+                }
+                let p: P =
+                    serde_json::from_value(params).map_err(|e| invalid_params(e.to_string()))?;
+                let channels = st.channels.lock().await;
+                let channel = channels.get(&SessionId(p.id));
+                if p.availability_only {
+                    return Ok(json!(channel.is_some_and(|channel| channel
+                        .output()
+                        .last_command(|result| result.is_some()))));
+                }
+                Ok(channel.map_or(Value::Null, |channel| {
+                    channel.output().last_command(|result| match result {
+                        Some(result) => {
+                            let mut value = json!({
+                                "command": result.command,
+                                "output": String::from_utf8_lossy(&result.output),
+                                "truncated": result.truncated,
+                            });
+                            if let Some(exit_code) = result.exit_code {
+                                value["exitCode"] = json!(exit_code);
+                            }
+                            value
+                        }
+                        None => Value::Null,
+                    })
+                }))
+            }
+        });
+    }
     {
         let st = state.clone();
         dispatcher.register("terminal.attach", move |params| {
@@ -7772,6 +7850,144 @@ mod tests {
         // Close.
         let r = d.dispatch(req("session.close", json!({"id": id}))).await;
         assert!(r.error.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn last_command_rpc_observes_poll_and_native_bytes_and_clears_on_disable_or_eof() {
+        let state = AppState::new();
+        let d = Dispatcher::new();
+        register_all(&d, state.clone());
+        let id = Uuid::new_v4();
+        let (tx, rx) = mpsc::channel(4);
+        // Inject packets at the common transport boundary, not through shell hooks.
+        state.channels.lock().await.insert(
+            SessionId(id),
+            SessionChannel::Local(LocalPty {
+                channel: PtyChannel::spawn_default_shell(PtySize::default()).unwrap(),
+                rx: SessionOutput::new(rx),
+            }),
+        );
+        let call = |method, params| {
+            let d = &d;
+            async move {
+                let response = d.dispatch(req(method, params)).await;
+                assert!(response.error.is_none(), "{:?}", response.error);
+                response.result.unwrap()
+            }
+        };
+        let get = || call("terminal.lastCommand.get", json!({"id":id}));
+        let configure = |enabled| {
+            call(
+                "terminal.lastCommand.configure",
+                json!({"id":id,"enabled":enabled}),
+            )
+        };
+        let marker = b"\x1b]633;E;echo captured\x07\x1b]633;C\x07captured\r\n\x1b]633;D;0\x07";
+        tx.send(marker.to_vec()).await.unwrap();
+        let poll = call("session.poll", json!({"id":id})).await;
+        assert_eq!(poll["chunks"], json!([BASE64.encode(marker)]));
+        assert!(get().await.is_null());
+
+        assert!(configure(true).await.is_null());
+        tx.send(marker.to_vec()).await.unwrap();
+        let poll = call("session.pollOutput", json!({"id":id})).await;
+        assert_eq!(poll, json!([BASE64.encode(marker)]));
+        assert_eq!(
+            get().await,
+            json!({"command":"echo captured","output":"captured\r\n","exitCode":0,"truncated":false})
+        );
+        let write = |bytes: &[u8]| {
+            call(
+                "session.write",
+                json!({"id":id,"data":BASE64.encode(bytes)}),
+            )
+        };
+        let write_many = |bytes: &[u8]| {
+            call(
+                "session.writeMany",
+                json!({"ids":[id],"data":BASE64.encode(bytes)}),
+            )
+        };
+        for reply in [
+            &b"\x1b[0n"[..],
+            b"\x1b[8;24;80t",
+            b"\x1b[?1;2c",
+            b"\x1b[>0;276;0c",
+            b"\x1b[12;3R",
+            b"\x1b[?1;2R",
+            b"\x1b[?25;1$y",
+            b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+            b"\x1bP1$r0m\x1b\\",
+        ] {
+            write(reply).await;
+            assert!(!get().await.is_null(), "valid reply {reply:?}");
+        }
+
+        let start = b"\x1b]633;E;query\x07\x1b]633;C\x07\x1b[6n";
+        let done = b"\x1b]633;D;0\x07";
+        tx.send(start.to_vec()).await.unwrap();
+        call("session.pollOutput", json!({"id":id})).await;
+        write_many(b"\x1b[12;7R").await;
+        tx.send(done.to_vec()).await.unwrap();
+        call("session.pollOutput", json!({"id":id})).await;
+        assert_eq!(get().await["command"], "query");
+
+        for input in [
+            &b"x"[..],
+            b"\x1b[1;2R", // Shift+F3 is indistinguishable from a CPR here.
+            b"\x1b[I",    // FocusIn is not an unambiguous status-query reply.
+            b"\x1b[12;3",
+            b"\x1b[12;0R",
+            b"\x1b[0nx",
+            b"\x1b[0n\x1b[?1;2c",
+        ] {
+            tx.send(marker.to_vec()).await.unwrap();
+            call("session.pollOutput", json!({"id":id})).await;
+            write(input).await;
+            assert!(get().await.is_null(), "unrecognized input {input:?}");
+        }
+        tx.send(start.to_vec()).await.unwrap();
+        call("session.pollOutput", json!({"id":id})).await;
+        write_many(b"x").await;
+        tx.send(done.to_vec()).await.unwrap();
+        call("session.pollOutput", json!({"id":id})).await;
+        assert!(get().await.is_null());
+
+        tx.send(marker.to_vec()).await.unwrap();
+        call("session.pollOutput", json!({"id":id})).await;
+        assert!(!get().await.is_null());
+        assert!(configure(false).await.is_null());
+        assert!(get().await.is_null());
+
+        call("terminal.attach", json!({"id":id})).await;
+        configure(true).await;
+        let native_marker = b"\x1b]633;E;echo native\x07\x1b]633;C\x07native\r\n\x1b]633;D\x07";
+        tx.send(native_marker.to_vec()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !get().await.is_null() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            get().await,
+            json!({"command":"echo native","output":"native\r\n","truncated":false})
+        );
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !get().await.is_null() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        call("session.close", json!({"id":id})).await;
+        assert!(get().await.is_null());
     }
 
     #[cfg(unix)]

@@ -8,6 +8,8 @@
   import { snapshotSessionLayout, parseSessionLayout, instantiateLayout } from './lib/sessionLayout';
   import Workbench from './components/Workbench.svelte';
   import AIChat from './components/AIChat.svelte';
+  import { aiPaneLabel, buildAiPaneDirectory } from './lib/aiPaneDirectory';
+  import { sanitizeTroubleshootText, type TroubleshootSeed } from './lib/aiTroubleshoot';
   import HostSystemPanel from './components/HostSystemPanel.svelte';
   import NotesWorkspace from './components/notes/NotesWorkspace.svelte';
   import SessionNotesPanel from './components/notes/SessionNotesPanel.svelte';
@@ -163,6 +165,18 @@
   let filesWorkspace: { openEndpoint: (side: 'left' | 'right', profileId: string, path?: string) => void } | null = $state(null);
   let sessionPanelVisible = $state({ notes: false, system: false });
   let aiVisible = $state(false);
+  let aiTroubleshootEnabled = $state(false);
+  let troubleshootSeed = $state<TroubleshootSeed>();
+  let troubleshootNonce = 0;
+  const aiPaneDirectory = $derived(buildAiPaneDirectory(tabs.tabs, tabs.activeId));
+  function stageAiTroubleshoot(id: string, text: string) {
+    const source = aiPaneDirectory.find(entry => entry.id === id);
+    if (!aiTroubleshootEnabled || !source) return;
+    const preview = sanitizeTroubleshootText(text);
+    if (!preview) return;
+    troubleshootSeed = { id, text: preview, label: aiPaneLabel(source, aiPaneDirectory), nonce: ++troubleshootNonce };
+    aiVisible = true;
+  }
   function toggleSessionAuxiliary(panel: 'system' | 'notes') {
     if (!tabs.activeId) return;
     sessionPanelVisible = { ...sessionPanelVisible, [panel]: !sessionPanelVisible[panel] };
@@ -2268,7 +2282,13 @@
         <button class="btn-ghost" disabled={!tabs.activeId} aria-pressed={sessionPanelVisible.notes} onclick={() => toggleSessionAuxiliary('notes')}>{i18n.t('shell.notes')}</button>
         <button class="btn-ghost" aria-pressed={aiVisible} onclick={() => aiVisible = !aiVisible}>{i18n.t('ai.title')}</button>
       </div>
-      {#snippet aiPanel()}<AIChat {rpc} activeSessionId={activePane?.connection ? undefined : activePane?.id} onSettings={() => openSettings('ai')} />{/snippet}
+      {#snippet aiPanel()}
+        <AIChat {rpc} {settingsRev} {troubleshootSeed} paneDirectory={aiPaneDirectory}
+          activeSessionId={activePane?.connection ? undefined : activePane?.id}
+          panelVisible={aiVisible && workspacePage === 'sessions'}
+          onAiEnabled={enabled => { aiTroubleshootEnabled = enabled; if (!enabled) troubleshootSeed = undefined; }}
+          onSettings={() => openSettings('ai')} />
+      {/snippet}
       <Workbench extraPanels={[{id:'ai-chat',type:'ai',title:i18n.t('ai.title'),content:aiPanel,visible:aiVisible}]} notesVisible={sessionPanelVisible.notes} systemVisible={sessionPanelVisible.system} sftpVisible={hasOpenSftpDock && !currentSftpCollapsed}>
         {#snippet terminal()}
         <div class="absolute inset-0">
@@ -2285,6 +2305,7 @@
                   tabVisible={workspacePage === 'sessions' && tabs.activeId === tab.id}
                   broadcastEnabled={broadcastOn}
                   broadcastTargetIds={broadcastTargets}
+                  onAiTroubleshoot={aiTroubleshootEnabled ? stageAiTroubleshoot : undefined}
                   onOpenSftp={() => { void openSftpForActivePane(); }}
                   onSplitRight={() => { void splitActive('row'); }}
                   onSplitDown={() => { void splitActive('col'); }}

@@ -4,7 +4,7 @@ members = ["src-tauri", "tools/bench"]
 exclude = ["third_party/tao"]
 
 [workspace.package]
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ioe/aerotab"

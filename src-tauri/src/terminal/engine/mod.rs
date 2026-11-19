@@ -36,12 +36,107 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Notify};
 use uuid::Uuid;
 
+use super::last_command::{Completed, Tracker};
 use frame::{FrameHeader, FrameWriter, RowRuns};
 
 /// Receives encoded frames (binary). Must be cheap and non-blocking.
 pub type FrameSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
-/// Session output receiver shared with the legacy `session.poll` path.
-pub type SharedOutput = Arc<AsyncMutex<mpsc::Receiver<Vec<u8>>>>;
+/// Session output shared by the native pump and the xterm poll path. Only a
+/// successful receive observes bytes; it always returns the original packet.
+pub type SharedOutput = Arc<SessionOutput>;
+
+pub struct SessionOutput {
+    receiver: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
+    capture: StdMutex<Capture>,
+}
+
+#[derive(Default)]
+struct Capture {
+    closed: bool,
+    tracker: Option<Box<Tracker>>,
+}
+
+impl SessionOutput {
+    pub fn new(receiver: mpsc::Receiver<Vec<u8>>) -> SharedOutput {
+        Arc::new(Self {
+            receiver: AsyncMutex::new(receiver),
+            capture: StdMutex::new(Capture::default()),
+        })
+    }
+
+    pub(crate) fn configure_capture(&self, enabled: bool) {
+        let mut capture = self.capture.lock().unwrap();
+        if !enabled {
+            capture.tracker = None;
+        } else if !capture.closed {
+            capture.tracker.get_or_insert_with(Box::default);
+        }
+    }
+
+    pub(crate) fn last_command<T>(&self, read: impl FnOnce(Option<&Completed>) -> T) -> T {
+        let capture = self.capture.lock().unwrap();
+        read(
+            capture
+                .tracker
+                .as_ref()
+                .and_then(|tracker| tracker.last.as_ref()),
+        )
+    }
+
+    pub(crate) fn note_input(&self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            if let Some(tracker) = &mut self.capture.lock().unwrap().tracker {
+                tracker.note_input();
+            }
+        }
+    }
+
+    pub(crate) fn close_capture(&self) {
+        let mut capture = self.capture.lock().unwrap();
+        capture.closed = true;
+        capture.tracker = None;
+    }
+
+    pub(crate) async fn lock(&self) -> ObservedOutput<'_> {
+        ObservedOutput {
+            output: self,
+            receiver: self.receiver.lock().await,
+        }
+    }
+
+    fn observe(&self, bytes: &[u8]) {
+        if let Some(tracker) = &mut self.capture.lock().unwrap().tracker {
+            tracker.observe(bytes);
+        }
+    }
+}
+
+pub(crate) struct ObservedOutput<'a> {
+    output: &'a SessionOutput,
+    receiver: tokio::sync::MutexGuard<'a, mpsc::Receiver<Vec<u8>>>,
+}
+
+impl ObservedOutput<'_> {
+    async fn recv(&mut self) -> Option<Vec<u8>> {
+        let bytes = self.receiver.recv().await;
+        if let Some(bytes) = &bytes {
+            self.output.observe(bytes);
+        } else {
+            self.output.close_capture();
+        }
+        bytes
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<Vec<u8>, mpsc::error::TryRecvError> {
+        let result = self.receiver.try_recv();
+        match &result {
+            Ok(bytes) => self.output.observe(bytes),
+            Err(mpsc::error::TryRecvError::Disconnected) => self.output.close_capture(),
+            Err(mpsc::error::TryRecvError::Empty) => (),
+        }
+        result
+    }
+}
 
 /// Minimum spacing between two frames (≈60 Hz).
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -1666,7 +1761,7 @@ mod tests {
     async fn pump_pushes_frames_and_reports_exit() {
         let (e, _pty_rx) = engine(10, 2);
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(8);
-        let shared: SharedOutput = Arc::new(AsyncMutex::new(out_rx));
+        let shared = SessionOutput::new(out_rx);
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         e.set_sink(Some(Arc::new(move |f| {
             let _ = frame_tx.send(f);

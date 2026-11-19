@@ -8,6 +8,7 @@
 //! [`engine`] hosts the native terminal engine (VT parsing + grid in Rust).
 
 pub mod engine;
+pub(crate) mod last_command;
 #[cfg(feature = "native-view")]
 pub mod native_host;
 #[path = "native_host/capabilities.rs"]

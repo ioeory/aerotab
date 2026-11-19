@@ -45,6 +45,7 @@
     broadcastTargetIds?: string[];
     tabVisible?: boolean;
     onError?: (msg: string) => void;
+    onAiTroubleshoot?: (id: string, text: string) => void;
   }
 
   let {
@@ -61,6 +62,7 @@
     broadcastTargetIds = [],
     tabVisible = true,
     onError,
+    onAiTroubleshoot,
   }: Props = $props();
 
   let gridEl: HTMLDivElement | null = $state(null);
@@ -303,6 +305,7 @@
           onMaximize={() => toggleMaximize(pane.id, new Event('click'))}
           {broadcastEnabled}
           {broadcastTargetIds}
+          {onAiTroubleshoot}
           {onError}
         />
         {/if}

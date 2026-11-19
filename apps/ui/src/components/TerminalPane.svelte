@@ -52,6 +52,7 @@
 
 <script lang="ts">
   import { workspaceMenu } from '../lib/workspaceMenu';
+  import { aiTroubleshootMessages } from '../lib/aiTroubleshootMessages';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { SESSIONS_CLOSING, type SessionsClosingDetail } from '../lib/sessionLifecycle';
   import { scheduleTerminalTeardown } from '../lib/terminalTeardown';
@@ -142,6 +143,7 @@
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
     onError?: (msg: string) => void;
+    onAiTroubleshoot?: (id: string, text: string) => void;
   }
   let {
     rpc,
@@ -161,6 +163,7 @@
     broadcastEnabled = false,
     broadcastTargetIds = [],
     onError,
+    onAiTroubleshoot,
   }: Props = $props();
 
   let host: HTMLDivElement | null = null;
@@ -1652,13 +1655,92 @@
     }
     ev.preventDefault();
     focusTerminalIfAllowed(term);
-    menuX = ev.clientX;
-    menuY = ev.clientY;
+    await openTerminalMenu(ev.clientX, ev.clientY);
+  }
+  async function openTerminalMenu(x: number, y: number) {
+    menuX = x;
+    menuY = y;
     menuOpen = true;
     await tick();
     const clamped = clampMenuToViewport(menuX, menuY, menuEl);
     menuX = clamped.x;
     menuY = clamped.y;
+    void updateLastCommandAvailability();
+  }
+  const aiText = $derived(aiTroubleshootMessages[i18n.resolvedLocale]);
+  const showNativeAiMenu = $derived(!!onAiTroubleshoot && useNative && nativeBackend === 'native-surface');
+  const canTrackLastCommand = $derived(!!onAiTroubleshoot && canOpenExternalNative && !exited);
+  let captureId = $state<string>();
+  let capturePending = $state(false);
+  let lastCommandAvailable = $state(false);
+  let menuCheck = 0;
+  async function updateLastCommandAvailability() {
+    const check = ++menuCheck;
+    const id = session.id;
+    lastCommandAvailable = false;
+    if (captureId !== id || !canTrackLastCommand) return;
+    try {
+      const available = await rpc.call<boolean>('terminal.lastCommand.get', { id, availabilityOnly: true });
+      if (!destroyed && menuOpen && check === menuCheck && id === session.id && captureId === id) {
+        lastCommandAvailable = available;
+      }
+    } catch { /* An unavailable record leaves manual selection as the fallback. */ }
+  }
+  $effect(() => {
+    if (captureId && (!canTrackLastCommand || captureId !== session.id)) {
+      const id = captureId;
+      captureId = undefined;
+      void rpc.call('terminal.lastCommand.configure', { id, enabled: false }).catch(() => {});
+    }
+  });
+  onDestroy(() => {
+    if (captureId) void rpc.call('terminal.lastCommand.configure', { id: captureId, enabled: false }).catch(() => {});
+  });
+  async function explainSelection() {
+    const id = session.id;
+    const selection = useNative ? nativeCtl?.selectionText() : term?.getSelection();
+    menuOpen = false;
+    try {
+      const text = await selection;
+      if (id !== session.id || !onAiTroubleshoot) return;
+      if (text?.trim()) onAiTroubleshoot?.(id, text);
+      else onError?.(aiText.noTerminalSelection);
+    } catch {
+      onError?.(aiText.noTerminalSelection);
+    }
+  }
+  async function toggleLastCommandCapture() {
+    if (destroyed || capturePending || !canTrackLastCommand) return;
+    const id = session.id;
+    const enabled = captureId !== id;
+    menuOpen = false;
+    capturePending = true;
+    try {
+      await rpc.call('terminal.lastCommand.configure', { id, enabled });
+      if (enabled && (destroyed || session.id !== id || !canTrackLastCommand)) {
+        await rpc.call('terminal.lastCommand.configure', { id, enabled: false });
+        return;
+      }
+      captureId = enabled ? id : undefined;
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : String(error));
+    } finally {
+      capturePending = false;
+    }
+  }
+  async function referenceLastCommand() {
+    const id = session.id;
+    if (captureId !== id || !canTrackLastCommand) return;
+    menuOpen = false;
+    try {
+      const record = await rpc.call<{command: string; output: string; exitCode?: number; truncated: boolean} | null>('terminal.lastCommand.get', { id });
+      if (session.id !== id || captureId !== id || !canTrackLastCommand) return;
+      if (!record) { onError?.(aiText.noLastCommand); return; }
+      const metadata = [record.exitCode === undefined ? '' : `${aiText.exitCode}: ${record.exitCode}`, record.truncated ? aiText.lastOutputTruncated : ''].filter(Boolean);
+      onAiTroubleshoot?.(id, [`${aiText.lastCommand}: ${record.command}`, ...metadata, `${aiText.lastOutput}:\n${record.output}`].join('\n'));
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : String(error));
+    }
   }
   async function doCopy() {
     menuOpen = false;
@@ -1890,12 +1972,23 @@
   }
 </script>
 
+{#if showNativeAiMenu}
+  <div class="flex h-6 justify-end border-b border-[var(--color-border-soft)] bg-[var(--color-panel)]">
+    <button type="button" class="btn-ghost px-2 py-0.5 text-xs" aria-haspopup="menu" aria-expanded={menuOpen}
+      disabled={!active}
+      onclick={event => {
+        const anchor = event.currentTarget.getBoundingClientRect();
+        void openTerminalMenu(anchor.right - 200, anchor.bottom);
+      }}>{aiText.title}</button>
+  </div>
+{/if}
 {#if useNative}
   <div
     bind:this={nativeHost}
     role="application"
     data-aerotab-context-menu=""
-    class="terminal-surface terminal-host h-full w-full min-h-0 min-w-0 relative overflow-hidden
+    class="terminal-surface terminal-host w-full min-h-0 min-w-0 relative overflow-hidden
+           {showNativeAiMenu ? 'h-[calc(100%-1.5rem)]' : 'h-full'}
            {active ? '' : 'opacity-[0.92]'}
            {active || nativeBackend !== 'native-surface' ? '' : 'pointer-events-none'}"
     oncontextmenu={onContextMenu}
@@ -2105,6 +2198,15 @@
       </button>
       <button type="button" class="menu-item" onclick={doPaste}><ClipboardPaste size={15} />{i18n.t('common.paste')}</button>
       <button type="button" class="menu-item" onclick={doSelectAll}><ScanText size={15} />{i18n.t('common.selectAll')}</button>
+      {#if onAiTroubleshoot}
+        <button type="button" class="menu-item" onclick={() => void explainSelection()}>{aiText.explainSelection}</button>
+        {#if canTrackLastCommand}
+          {#if captureId === session.id}
+            <button type="button" class="menu-item" disabled={capturePending || !lastCommandAvailable} title={lastCommandAvailable ? undefined : aiText.noLastCommand} onclick={() => void referenceLastCommand()}>{aiText.referenceLastCommand}</button>
+          {/if}
+          <button type="button" class="menu-item" disabled={capturePending} title={aiText.lastCommandRequirements} onclick={() => void toggleLastCommandCapture()}>{captureId === session.id ? aiText.disableLastCommand : aiText.enableLastCommand}</button>
+        {/if}
+      {/if}
       <div class="my-1 border-t border-[var(--color-border-soft)]"></div>
       {#if exited && canReconnect}
         <button type="button" class="menu-item" onclick={() => { menuOpen = false; void reconnectSession(); }}>
