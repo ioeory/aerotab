@@ -869,6 +869,7 @@ mod tests {
             "profile.importApply",
             "plugin.call",
             "session.poll",
+            "ssh.inspectHost",
             "session.pollOutput",
             "session.write",
             "session.openLocal",

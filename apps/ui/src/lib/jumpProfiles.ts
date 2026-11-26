@@ -128,22 +128,6 @@ export function jumpLineSubtitle(line: string, profiles: StoredProfile[]): strin
   return trimmed;
 }
 
-/** Match profile against picker search (name, group, host, port, user, tags). */
-export function profileMatchesJumpSearch(profile: StoredProfile, query: string): boolean {
-  if (profile.kind !== 'ssh') return false;
-  const needle = query.trim().toLowerCase();
-  if (!needle) return true;
-  const hay = [
-    profile.name,
-    profile.group ?? '',
-    profile.ssh.host,
-    String(profile.ssh.port),
-    profile.ssh.user,
-    ...(profile.tags ?? []),
-  ].join(' ').toLowerCase();
-  return hay.includes(needle);
-}
-
 /** Format a saved SSH profile as a ProxyJump line (`@Name`). */
 export function jumpLineForProfile(profile: StoredProfile): string {
   return `@${profile.name}`;

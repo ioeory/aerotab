@@ -18,7 +18,7 @@ test('activating a pane always schedules native/webview terminal focus', () => {
 });
 
 test('native surface focus export forces hostAdapter SetFocus, not click-only', () => {
-  const body = view.match(/export function focus\(opts\?: \{ force\?: boolean \}\) \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  const body = view.match(/export function focus\([^\n]*\) \{[\s\S]*?\n  \}/)?.[0] ?? '';
   assert.match(body, /hostAdapter\?\.focus/);
   assert.match(body, /setFocusAllowed/);
   assert.match(body, /tick\(\)\.then/);

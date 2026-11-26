@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { ChevronDown, ChevronUp, GripVertical, Plus, Search, X } from '@lucide/svelte';
+  import { ChevronDown, ChevronUp, GripVertical, X } from '@lucide/svelte';
+  import HostChoiceList, { profileChoices } from './HostChoiceList.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import {
     formatManualJumpLine,
@@ -7,10 +8,8 @@
     jumpLineForProfile,
     jumpLineSubtitle,
     jumpLineTitle,
-    profileMatchesJumpSearch,
     reorderJumpLines,
   } from '../lib/jumpProfiles';
-  import { profileEndpointLabel } from '../lib/profileMeta';
   import type { StoredProfile } from '../lib/types';
 
   interface Props {
@@ -27,7 +26,6 @@
     onError,
   }: Props = $props();
 
-  let pickerSearch = $state('');
   let showManualForm = $state(false);
   let manualUser = $state('');
   let manualHost = $state('');
@@ -41,10 +39,6 @@
         && p.id !== excludeProfileId
         && !isProfileInJumpChain(p, jumpChainLines),
     ),
-  );
-
-  const filteredPickableProfiles = $derived(
-    pickableProfiles.filter((p) => profileMatchesJumpSearch(p, pickerSearch)),
   );
 
   function addProfileToChain(profile: StoredProfile) {
@@ -191,42 +185,8 @@
       <div class="px-2 py-1.5 text-[length:var(--text-compact)] text-[var(--color-fg-muted)] bg-[var(--color-panel-2)] border-b border-[var(--color-border-soft)]">
         {i18n.t('profileModal.jumpPickFromList')}
       </div>
-      <div class="px-2 py-1.5 border-b border-[var(--color-border-soft)]">
-        <div class="flex items-center gap-1.5 rounded border border-[var(--color-border-soft)] bg-[var(--color-panel)] px-2 py-1 focus-within:ring-1 focus-within:ring-[var(--color-accent)]/40">
-          <Search size={13} class="shrink-0 text-[var(--color-fg-muted)]" />
-          <input
-            type="search"
-            bind:value={pickerSearch}
-            placeholder={i18n.t('profileModal.jumpSearchPlaceholder')}
-            class="flex-1 min-w-0 border-0 bg-transparent text-[length:var(--text-ui)] outline-none"
-            autocomplete="off"
-          />
-        </div>
-      </div>
-      <div class="jump-picker-list max-h-[160px] overflow-y-auto px-1 py-1">
-        {#if filteredPickableProfiles.length === 0}
-          <div class="px-2 py-3 text-[length:var(--text-compact)] text-[var(--color-fg-muted)] text-center">
-            {i18n.t('profileModal.jumpSearchEmpty')}
-          </div>
-        {:else}
-          {#each filteredPickableProfiles as jp (jp.id)}
-            <div class="jump-picker-row flex items-center gap-2 px-2 py-1 rounded hover:bg-[var(--color-panel-2)] text-[length:var(--text-ui)]">
-              <div class="min-w-0 flex-1">
-                <div class="break-words [overflow-wrap:anywhere] text-[var(--color-fg)]">{jp.name}</div>
-                <div class="break-words [overflow-wrap:anywhere] text-[length:var(--text-compact)] text-[var(--color-fg-muted)]">{profileEndpointLabel(jp)}</div>
-              </div>
-              <button
-                type="button"
-                class="btn-secondary shrink-0 p-1"
-                title={i18n.t('profileModal.jumpAddProfile')}
-                aria-label={i18n.t('profileModal.jumpAddProfile')}
-                onclick={() => addProfileToChain(jp)}
-              >
-                <Plus size={14} />
-              </button>
-            </div>
-          {/each}
-        {/if}
+      <div class="p-2">
+        <HostChoiceList choices={profileChoices(pickableProfiles)} onPick={id => { const profile = pickableProfiles.find(item => item.id === id); if (profile) addProfileToChain(profile); }} />
       </div>
     </section>
   {/if}
@@ -280,8 +240,7 @@
     flex-basis: 120px;
   }
 
-  .jump-chain-item button,
-  .jump-picker-row button {
+  .jump-chain-item button {
     min-width: 28px;
     min-height: 28px;
   }

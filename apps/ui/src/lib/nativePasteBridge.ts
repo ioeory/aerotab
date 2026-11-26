@@ -42,8 +42,9 @@ export async function preparePasteText(raw: string, policy: {
   trim: boolean; flatten: boolean; warn: boolean;
   confirm: (count: number) => Promise<boolean>;
 }, valid?: () => Promise<boolean>): Promise<string | null> {
-  // Native clipboard CR/CRLF must be visible to the existing multiline policy.
-  let text = valid ? raw.replace(/\r\n|\r/g, '\n') : raw;
+  // Normalize CR/CRLF first so multiline warn/flatten see one newline per line,
+  // and so non-native paste paths cannot forward Windows CRLF as double submits.
+  let text = raw.replace(/\r\n|\r/g, '\n');
   if (policy.trim) text = text.replace(/[ \t]+$/gm, '');
   if (policy.flatten) text = text.replace(/\r?\n/g, ' ');
   if (policy.warn && text.includes('\n') && text.length > 200) {

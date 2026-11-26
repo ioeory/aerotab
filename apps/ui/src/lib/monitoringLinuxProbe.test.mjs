@@ -17,7 +17,7 @@ test('actual Linux probe and Rust parser produce continuous network overview acr
   const source = readFileSync(new URL('../../../../src-tauri/src/ssh/stats.rs', import.meta.url), 'utf8');
   const command = source.match(/const HOST_STATS_COMMAND: &str = r#"([\s\S]*?)"#;/)?.[1];
   assert.ok(command, 'actual Linux probe command must be found');
-  const structs = source.slice(source.indexOf('#[derive(Debug, Clone, Serialize, PartialEq)]'), source.indexOf('pub async fn probe_host_stats')).replaceAll(', Serialize', '');
+  const structs = source.slice(source.indexOf('#[derive(Debug, Clone, Serialize, PartialEq)]'), source.indexOf('#[derive(Debug, Deserialize)]\n#[serde(tag = "kind"')).replaceAll(', Serialize', '');
   const parser = source.slice(source.indexOf('fn parse_host_stats('), source.indexOf('#[cfg(test)]'));
   const main = `fn main() { use std::io::Read; let mut input = String::new(); std::io::stdin().read_to_string(&mut input).unwrap(); let stats = parse_host_stats(&input); for row in stats.network_interfaces.unwrap_or_default() { println!("{}|{}|{}", row.name, row.rx_bytes, row.tx_bytes); } }`;
   const dir = mkdtempSync(join(tmpdir(), 'aerotab-network-probe-'));

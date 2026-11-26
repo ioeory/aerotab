@@ -62,8 +62,12 @@ export function encodeKeyEvent(ev: KeyboardEvent, opts: KeyEncodeOptions): strin
   if (ev.key === 'Insert') return '\x1b[2~';
   if (ev.key === 'Home') return appCursor ? '\x1bOH' : '\x1b[H';
   if (ev.key === 'End') return appCursor ? '\x1bOF' : '\x1b[F';
-  if (ev.key === 'PageUp') return '\x1b[5~';
-  if (ev.key === 'PageDown') return '\x1b[6~';
+  // Shift+PageUp/Down are local viewport scroll chords (see controller.onKey /
+  // hotkeys). Do not forward them to the PTY as CSI 5/6.
+  if (ev.key === 'PageUp' || ev.key === 'PageDown') {
+    if (ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) return null;
+    return ev.key === 'PageUp' ? '\x1b[5~' : '\x1b[6~';
+  }
 
   if (ev.key in APP_CURSOR || ev.key in NORM_CURSOR) {
     const table = appCursor ? APP_CURSOR : NORM_CURSOR;
@@ -108,10 +112,13 @@ export function encodeKeyEvent(ev: KeyboardEvent, opts: KeyEncodeOptions): strin
 }
 
 export function encodePaste(text: string, mode: number): string {
+  // PTY Enter is CR. Windows clipboard CRLF must not become two line submits
+  // (visible as a blank line between every pasted line).
+  const normalized = text.replace(/\r\n|\n|\r/g, '\r');
   if ((mode & MODE_BRACKETED_PASTE) !== 0) {
-    return `\x1b[200~${text}\x1b[201~`;
+    return `\x1b[200~${normalized}\x1b[201~`;
   }
-  return text;
+  return normalized;
 }
 
 function functionKey(n: number): string {

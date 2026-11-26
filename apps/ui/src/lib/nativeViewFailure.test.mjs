@@ -83,7 +83,7 @@ for (const direction of ['webview-to-native', 'native-to-webview']) {
         traceLayout() {}, traceView() {}, visible: true, occluded: false, globalOccluded: false, document: { hidden: false }, stagingError: null,
         runNativeViewTransaction: transactions.runNativeViewTransaction, nativeViewGeometryEquals, mountSurface: async () => mutate(), quiesceAndDrainNativeInput: async () => {},
         cleanupSurface: null, syncSurface: null, rollbackPending: false, unlistenInput: null, unlistenPaste: null, unlistenFontDelta: null,
-        canFocusSurface: () => false, onRecovered() {}, diagnostics: { record: (...args) => records.push(args) } };
+        canFocusSurface: () => false, shouldAutoFocusTerminal: () => true, onRecovered() {}, diagnostics: { record: (...args) => records.push(args) } };
       const name = forward ? 'stageNativeSurface' : 'stageWebviewSurface';
       const end = forward ? '  /** Native -> WebView' : '  export function cancelViewTransition';
       const body = component.slice(component.indexOf(`  export async function ${name}(`), component.indexOf(end)).replace('export async', 'async');

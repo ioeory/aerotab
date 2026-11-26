@@ -1,6 +1,8 @@
 <script lang="ts">
  import {onMount,onDestroy,tick,untrack} from 'svelte';
  import AiMarkdown from './ai/AiMarkdown.svelte';
+ import HostSelect from './HostSelect.svelte';
+ import { profileChoices } from './HostChoiceList.svelte';
  import AiToolActivity from './ai/AiToolActivity.svelte';
  import AiTroubleshoot from './ai/AiTroubleshoot.svelte';
  import {aiPaneLabel,type AiPaneDirectoryEntry} from '../lib/aiPaneDirectory';
@@ -10,20 +12,63 @@
  import type {RpcClient} from '../lib/rpc';
  import {uuidv4} from '../lib/rpc';
  import {i18n} from '../lib/i18n.svelte';
+ import { clampMenuToViewport } from '../lib/contextMenuPosition';
+ import { isAiCopyShortcut } from '../lib/hotkeys';
  import {boundedTerminalContext,profileContext,contextBytes,pollAi,expandResourceTemplate,type AiTerminalTarget,type AiContext,type AiActivity,type AiMessage,type AiEvent,type McpClientEntry,type McpCatalog} from '../lib/ai';
  import type {SessionMeta,StoredProfile} from '../lib/types';
  import type {NotesSnapshot} from '../lib/notesCore';
+
+ let copyMenu = $state<{x:number; y:number; text:string} | null>(null);
+ let copyButton = $state<HTMLButtonElement>();
+
+ function selectedText(root: HTMLElement, target: EventTarget | null): string {
+   if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+     const { selectionStart, selectionEnd, value } = target;
+     return selectionStart !== null && selectionEnd !== null ? value.slice(selectionStart, selectionEnd) : '';
+   }
+   const selection = window.getSelection();
+   return selection && root.contains(selection.anchorNode) && root.contains(selection.focusNode)
+     ? selection.toString() : '';
+ }
+
+ function copySelection(text: string) {
+   void navigator.clipboard.writeText(text).catch(() => {});
+ }
+
+ function onCopyShortcut(event: KeyboardEvent) {
+   if (!isAiCopyShortcut(event)) return;
+   const text = selectedText(event.currentTarget as HTMLElement, event.target);
+   if (!text) return;
+   event.preventDefault();
+   copySelection(text);
+ }
+
+ async function openCopyMenu(event: MouseEvent) {
+   const text = selectedText(event.currentTarget as HTMLElement, event.target);
+   if (!text) return;
+   event.preventDefault();
+   const menu = { x: event.clientX, y: event.clientY, text };
+   copyMenu = menu;
+   await tick();
+   if (copyMenu?.text !== text || !copyButton) return;
+   Object.assign(copyMenu, clampMenuToViewport(menu.x, menu.y, copyButton));
+ }
+
+ function dismissCopyMenu(event: PointerEvent) {
+   if (copyMenu && !event.composedPath().includes(copyButton!)) copyMenu = null;
+ }
  interface Props {
    rpc:RpcClient;
    onSettings:()=>void;
    activeSessionId?:string;
    paneDirectory?:readonly AiPaneDirectoryEntry[];
    troubleshootSeed?:TroubleshootSeed;
+   onAddIncidentEvidence?:(entry:import('../lib/operationsWorkbench').IncidentEvidence)=>boolean;
    panelVisible?:boolean;
    onAiEnabled?:(enabled:boolean)=>void;
    settingsRev?:number;
  }
- let {rpc,onSettings,activeSessionId,paneDirectory,troubleshootSeed,panelVisible=true,onAiEnabled,settingsRev}:Props=$props();
+ let {rpc,onSettings,activeSessionId,paneDirectory,troubleshootSeed,panelVisible=true,onAiEnabled,settingsRev,onAddIncidentEvidence}:Props=$props();
  let troubleshootOpen=$state(false),troubleshootMounted=$state(false);
  let acceptedSeed=$state<TroubleshootSeed>();
  let lastSettingsRev:number|undefined;
@@ -203,7 +248,12 @@
   {#each choices.unassociated as session (session.id)}<option value={session.id} title={paneTitle(session)}>{paneChoiceLabel(session)}</option>{/each}
  </optgroup>{/if}
 {/snippet}
-<div class="chat">
+<svelte:window onpointerdown={dismissCopyMenu} onblur={() => copyMenu = null}
+ onkeydown={event => { if (event.key === 'Escape' && copyMenu) copyMenu = null; }}/>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions (delegate copy shortcuts for selectable text and fields) -->
+<div class="chat" role="region" aria-label={t('title')} tabindex="-1"
+ data-aerotab-focus-zone="" data-aerotab-ai-panel=""
+ onkeydown={onCopyShortcut} oncontextmenu={openCopyMenu}>
  <header>
   <div class="heading"><span class="spark">✦</span><strong>{t('title')}</strong><span class="badge" hidden={panelVisible&&troubleshootOpen}>{t(running?'running':'ready')}</span></div>
   <div class="header-actions">
@@ -218,7 +268,7 @@
     <label>{t('model')}<select value={model} disabled={running||sending||!destinationReady||!providerId} onchange={event=>selectModel(event.currentTarget.value)}><option value="">{t(providerId?'modelUnavailable':'noProvider')}</option>{#each models as choice (choice)}<option value={choice}>{choice}</option>{/each}</select></label>
    </div>
    {#if error&&!destinationReady}<p role="alert" class="error">{error}</p>{/if}
-   <AiTroubleshoot {rpc} {...troubleshootDestination()} seed={acceptedSeed} active={panelVisible&&troubleshootOpen}/>
+   <AiTroubleshoot {rpc} {...troubleshootDestination()} seed={acceptedSeed} active={panelVisible&&troubleshootOpen} {onAddIncidentEvidence}/>
   </section>
  {/if}
  <div class="legacy-chat" hidden={panelVisible&&troubleshootOpen}>
@@ -249,7 +299,11 @@
  <details><summary>{t('context')} ({context.length})</summary>
  <button onclick={()=>execute(refresh)}>{t('refresh')}</button>
  <select aria-label={t('context')} bind:value={kind} onchange={()=>selected=''}><option value="terminal">{t('terminal')}</option><option value="notes">{t('notes')}</option><option value="profile">{t('profile')}</option></select>
- <select aria-label={t(kind)} bind:value={selected}><option value="">—</option>{#if kind==='terminal'}{@render terminalOptions()}{:else if kind==='notes'}{#each notes.notes as n}<option value={n.id}>{n.title}</option>{/each}{:else}{#each profiles as p}<option value={p.id}>{p.name}</option>{/each}{/if}</select>
+ {#if kind==='profile'}
+  <HostSelect choices={profileChoices(profiles)} value={selected} label={t('profile')} emptyLabel="—" onChange={id=>selected=id} />
+ {:else}
+  <select aria-label={t(kind)} bind:value={selected}><option value="">—</option>{#if kind==='terminal'}{@render terminalOptions()}{:else}{#each notes.notes as n (n.id)}<option value={n.id}>{n.title}</option>{/each}{/if}</select>
+ {/if}
  {#if kind==='terminal'}<label>{t('lines')}<input type="number" min="1" max="2000" bind:value={lines}/></label>{/if}<button disabled={!selected||running} onclick={()=>execute(attach)}>{t('attach')}</button>
  <p>{t('snapshot')}</p>
  </details>
@@ -268,8 +322,16 @@
  <div class="footer-status" role="status">{status||t(mode==='observer'?'observer':readAuthorized?'terminalShort':'noContext')}</div>
  </div>
  </div>
+ {#if copyMenu && panelVisible}
+  <button class="selection-copy" data-ai-selection-copy="" bind:this={copyButton}
+   style:left={`${copyMenu.x}px`} style:top={`${copyMenu.y}px`}
+   onclick={() => { if (copyMenu) copySelection(copyMenu.text); copyMenu = null; }}>{i18n.t('common.copy')}</button>
+ {/if}
 </div>
 <style>
+ .chat:focus { outline: none; }
+ .selection-copy { position: fixed; z-index: 70; padding: 6px 16px; box-shadow: 0 4px 12px var(--color-overlay); }
+ .selection-copy:hover { background: var(--color-accent-soft); }
  .legacy-chat{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
  .troubleshoot-view{flex:1;min-height:0;min-width:0;overflow:auto}
  .chat [hidden]{display:none}

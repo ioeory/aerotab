@@ -10,7 +10,7 @@ const end = text.indexOf('    const ro = new ResizeObserver', start);
 const body = ts.transpileModule(text.slice(start, end) + '\nreturn {sync, notify: () => syncSurface(), requestFocus: () => requestSurfaceFocus()};', {compilerOptions:{target:99,module:0}}).outputText;
 function fixture() {
  const events = [];
- const scope = {surface:{getBoundingClientRect:()=>({left:0,top:0,width:600,height:400})},
+ const scope = {shouldAutoFocusTerminal:()=>true,surface:{getBoundingClientRect:()=>({left:0,top:0,width:600,height:400})},
   nativeViewGeometry:r=>r,nativeViewGeometryEquals,window:{innerWidth:1000,innerHeight:800,devicePixelRatio:1},document:{hidden:false},
   hostAdapter:{setDrawVisible:v=>events.push(['visible',v]),start:async()=>events.push(['start']),
    setFocusAllowed(){},update:async()=>events.push(['update']),acknowledgeInput:async()=>{},waitForDraw:async()=>true,focus:async()=>{events.push(['focus']);return 'applied';}},
@@ -20,6 +20,13 @@ function fixture() {
  const api = new Function('scope', `with(scope){${body}}`)(scope);
  return {scope,api,events};
 }
+test('native draw completion leaves focus in the AI panel', async () => {
+ const f=fixture();f.scope.stagingNative=false;
+ f.scope.shouldAutoFocusTerminal=()=>false;
+ await f.api.sync();
+ assert.ok(f.events.some(([name])=>name==='update'), 'the terminal stays visible');
+ assert.ok(!f.events.some(([name])=>name==='focus'), 'draw completion must not take OS focus');
+});
 test('explicit focus waits for prop flush and does not discard a tab being shown', async () => {
  const events=[];
  const scope={backend:'native-surface',committedWebview:false,committedNative:false,
@@ -52,7 +59,7 @@ test('explicit activation retries focus after a busy draw even when already rest
  assert.equal(f.events.filter(e=>e[0]==='focus').length,2);
 });
 test('superseded activation cannot focus an inactive pane after prop flush', async () => {
- const scope={tick:async()=>{},canFocusSurface:()=>false,canTakeFocus:()=>false,fail:e=>{throw e;},
+ const scope={focusTrace:()=>{},visible:true,active:false,occluded:false,globalOccluded:false,document:{hidden:false},tick:async()=>{},canFocusSurface:()=>false,canTakeFocus:()=>false,fail:e=>{throw e;},
   desktopFocusRequest:0,focusWebviewDesktop:async()=>{},document:{activeElement:null,hidden:false}};
  const source=text.slice(text.indexOf('  export function focus('),text.indexOf('  /** Await OS view detach')).replace('export function','function');
  const js=ts.transpileModule(source+'\nreturn focus;', {compilerOptions:{target:99,module:0}}).outputText;
@@ -72,7 +79,7 @@ test('failed staged first draw retains source canvas/input and never commits own
  const source={resumeWebviewInput:()=>events.push('resume'),focus:()=>events.push('focus'),
   quiesceWebviewInput:async()=>events.push('drain-source'),commitNativeSurface:()=>events.push('commit')};
  const host={generation:()=> 'g',waitForDraw:async()=>false,quiesceInput:async()=>0,dispose:async()=>events.push('detach-target')};
- const scope={backend:'webview',committedWebview:false,committedNative:false,stagingNative:false,controller:source,
+ const scope={shouldAutoFocusTerminal:()=>true,backend:'webview',committedWebview:false,committedNative:false,stagingNative:false,controller:source,
   settlePaneLayout:async()=>{},surface:{getBoundingClientRect:()=>({x:0,y:0,width:600,height:400})},disposed:false,transitionClosing:false,
   viewConfig:()=>({}),traceLayout(){},traceView(){},stagingError:null,visible:true,occluded:false,globalOccluded:false,document:{hidden:false},
   runNativeViewTransaction,mountSurface:async()=>{},hostAdapter:host,inputQueue:{dispose:()=>events.push('queue.dispose')},
@@ -93,7 +100,7 @@ test('subpixel width jitter near 1920 does not supersede native staging', async 
   quiesceWebviewInput:async()=>events.push('drain-source'),commitNativeSurface:()=>events.push('commit')};
  const host={generation:()=>'g',waitForDraw:async()=>{width=1920.0004;return true;},
   acknowledgeInput:async()=>events.push('ack0'),quiesceInput:async()=>0,setFocusAllowed(){},dispose:async()=>events.push('detach')};
- const scope={backend:'webview',committedWebview:false,committedNative:false,stagingNative:false,controller:source,
+ const scope={shouldAutoFocusTerminal:()=>true,backend:'webview',committedWebview:false,committedNative:false,stagingNative:false,controller:source,
   settlePaneLayout:async()=>{},surface:{getBoundingClientRect:rect},disposed:false,transitionClosing:false,
   viewConfig:()=>({}),traceLayout(){},traceView(){},stagingError:null,visible:true,occluded:false,globalOccluded:false,document:{hidden:false},
   runNativeViewTransaction,mountSurface:async()=>{},hostAdapter:host,inputQueue:{dispose:()=>{}},

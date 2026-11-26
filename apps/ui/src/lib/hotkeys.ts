@@ -41,6 +41,8 @@ export const ACTIONS: ActionDef[] = [
   { id: 'toggle-sidebar', label: 'Toggle sidebar',      category: 'App',      defaultBindings: ['Ctrl+Alt+S'] },
   { id: 'search',      label: 'Search in pane',        category: 'Terminal', defaultBindings: ['Ctrl+F'] },
   { id: 'terminal-copy', label: 'Copy terminal selection', category: 'Terminal', defaultBindings: ['Ctrl+Shift+C'] },
+  { id: 'terminal-scroll-up', label: 'Scroll terminal up one page', category: 'Terminal', defaultBindings: ['Shift+PageUp'] },
+  { id: 'terminal-scroll-down', label: 'Scroll terminal down one page', category: 'Terminal', defaultBindings: ['Shift+PageDown'] },
   { id: 'terminal-font-increase', label: 'Increase terminal font size', category: 'Terminal', defaultBindings: ['Ctrl+='] },
   { id: 'terminal-font-decrease', label: 'Decrease terminal font size', category: 'Terminal', defaultBindings: ['Ctrl+-'] },
   { id: 'session-ended-close', label: 'Close pane after session ended', category: 'Terminal', defaultBindings: ['Enter'] },
@@ -120,6 +122,13 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 export function shouldDeferToTextInput(ev: KeyboardEvent): boolean {
   if (!isEditableTarget(ev.target)) return false;
   return !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+}
+
+/** Keep clipboard shortcuts in the AI panel even when bound to a global action. */
+export function isAiCopyShortcut(ev: KeyboardEvent): boolean {
+  return !ev.isComposing && (ev.ctrlKey || ev.metaKey) && !ev.altKey
+    && ev.key.toLowerCase() === 'c'
+    && ev.target instanceof Element && !!ev.target.closest('[data-aerotab-ai-panel]');
 }
 
 /** Format an event back into a binding string (used by the recorder UI). */

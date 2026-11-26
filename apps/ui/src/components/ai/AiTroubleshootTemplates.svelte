@@ -10,7 +10,7 @@
   let { t, disabled, onApply }: {
     t: (key: TroubleshootMessageKey) => string;
     disabled: boolean;
-    onApply: (prompt: string) => void;
+    onApply: (prompt: string, name: string) => void;
   } = $props();
 
   let entries = $state<TroubleshootTemplate[]>([]);
@@ -81,7 +81,7 @@
       {@const entry = { name: t(id), prompt: t(`${id}Prompt`) }}
       <li>
         <span class="template-title">{entry.name}</span>
-        <button type="button" {disabled} aria-label={`${t('templateApply')}: ${entry.name}`} onclick={() => onApply(entry.prompt)}>{t('templateApply')}</button>
+        <button type="button" {disabled} aria-label={`${t('templateApply')}: ${entry.name}`} onclick={() => onApply(entry.prompt, entry.name)}>{t('templateApply')}</button>
         <button type="button" aria-label={`${t('templateDuplicate')}: ${entry.name}`} onclick={() => duplicate(entry)}>{t('templateDuplicate')}</button>
       </li>
     {/each}
@@ -92,7 +92,7 @@
       {#each entries as entry (entry.id)}
         <li>
           <span class="template-title">{entry.name}</span>
-          <button type="button" {disabled} aria-label={`${t('templateApply')}: ${entry.name}`} onclick={() => onApply(entry.prompt)}>{t('templateApply')}</button>
+          <button type="button" {disabled} aria-label={`${t('templateApply')}: ${entry.name}`} onclick={() => onApply(entry.prompt, entry.name)}>{t('templateApply')}</button>
           <button type="button" aria-label={`${t('templateEdit')}: ${entry.name}`} onclick={() => edit(entry)}>{t('templateEdit')}</button>
           <button type="button" aria-label={`${t('templateDuplicate')}: ${entry.name}`} onclick={() => duplicate(entry)}>{t('templateDuplicate')}</button>
           <button type="button" aria-label={`${t('templateDelete')}: ${entry.name}`} onclick={() => remove(entry)}>{t('templateDelete')}</button>

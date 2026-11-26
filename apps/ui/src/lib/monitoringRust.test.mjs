@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 test('actual Rust HostStats parser tests pass independently of unrelated workspace compilation', () => {
   const source = readFileSync(new URL('../../../../src-tauri/src/ssh/stats.rs', import.meta.url), 'utf8');
-  const structs = source.slice(source.indexOf('#[derive(Debug, Clone, Serialize'), source.indexOf('pub async fn probe_host_stats'));
+  const structs = source.slice(source.indexOf('#[derive(Debug, Clone, Serialize'), source.indexOf('#[derive(Debug, Deserialize)]\n#[serde(tag = "kind"'));
   const parserAndTests = source.slice(source.indexOf('fn parse_host_stats('));
   const isolated = `${structs}\n${parserAndTests}`.replaceAll(', Serialize', '');
   const dir = mkdtempSync(join(tmpdir(), 'aerotab-stats-test-'));

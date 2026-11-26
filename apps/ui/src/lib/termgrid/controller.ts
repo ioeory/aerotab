@@ -93,6 +93,8 @@ export interface NativeTerminalOptions {
   onClipboard?: (bytes: Uint8Array) => void;
   /** WebView: pointer landed on this surface — promote the pane before focusing IME. */
   onActivate?: () => void;
+  /** Fired when scrollback viewport metrics change (for the overlay scrollbar). */
+  onScrollState?: (state: { displayOffset: number; historySize: number; rows: number }) => void;
 }
 
 class DrawConfigurationSuperseded extends Error {
@@ -394,6 +396,7 @@ export class NativeTerminalController {
       this.mode = frame.header.mode;
       this.cols = frame.header.cols;
       this.rows = frame.header.rows;
+      this.emitScrollState(frame.header);
       this.schedulePaint();
     })();
     try {
@@ -703,6 +706,7 @@ export class NativeTerminalController {
         this.mode = decoded.header.mode;
         this.cols = decoded.header.cols || this.cols;
         this.rows = decoded.header.rows || this.rows;
+        this.emitScrollState(decoded.header);
       }
       const f = decoded.header.flags;
       if (f & FLAG_BELL) this.opts.onBell?.();
@@ -731,6 +735,23 @@ export class NativeTerminalController {
     } catch (e) {
       console.warn('[termgrid] bad frame', e);
     }
+  }
+
+  private lastScrollEmit = { displayOffset: -1, historySize: -1, rows: -1 };
+
+  private emitScrollState(header: FrameHeader) {
+    const next = {
+      displayOffset: header.displayOffset,
+      historySize: header.historySize,
+      rows: header.rows,
+    };
+    if (
+      next.displayOffset === this.lastScrollEmit.displayOffset
+      && next.historySize === this.lastScrollEmit.historySize
+      && next.rows === this.lastScrollEmit.rows
+    ) return;
+    this.lastScrollEmit = next;
+    this.opts.onScrollState?.(next);
   }
 
   private schedulePaint() {
@@ -892,6 +913,20 @@ export class NativeTerminalController {
     // those must reach the PTY (SIGINT / EOF).
     if (ev.defaultPrevented) return;
     if (this.composing || ev.isComposing || ev.key === 'Process') return;
+    // Shift+PageUp/Down: local scrollback. Handled here because the IME
+    // textarea is an editable target and global hotkeys defer plain Shift chords.
+    if (
+      (ev.key === 'PageUp' || ev.key === 'PageDown')
+      && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey
+    ) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await this.rpc.call('terminal.scroll', {
+        id: this.sessionId,
+        cmd: ev.key === 'PageUp' ? 'pageUp' : 'pageDown',
+      });
+      return;
+    }
     const bytes = encodeKeyEvent(ev, {
       mode: this.mode,
       altIsMeta: this.opts.altIsMeta ?? false,

@@ -1,7 +1,7 @@
 export const PANEL_MIN_WIDTH=240, PANEL_MIN_HEIGHT=160;
 export function spanLimits(pair:number,pixels:number,minimum=PANEL_MIN_HEIGHT){const min=Math.min(pair*50,pair*100*minimum/Math.max(1,pixels));return{min,max:pair*100-min};}
 export function updateWorkbenchViewport(layout:WorkbenchLayout,view:Viewport){if(view.width<1||view.height<1)return layout;view={width:Math.max(view.width,PANEL_MIN_WIDTH),height:Math.max(view.height,PANEL_MIN_HEIGHT)};return{...layout,panels:layout.panels.map(p=>({...p,rect:clampRect(p.rect,view)}))};}
-export type PanelType = 'sftp' | 'notes' | 'system' | 'ai';
+export type PanelType = 'sftp' | 'notes' | 'system' | 'ai' | 'operations';
 export type Side = 'left' | 'right' | 'top' | 'bottom' | 'float';
 export interface Rect { x: number; y: number; width: number; height: number }
 export interface Viewport { width: number; height: number }

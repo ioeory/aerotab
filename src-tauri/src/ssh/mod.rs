@@ -503,6 +503,15 @@ impl SshShell {
             .map_err(SshError::from)
     }
 
+    /// Run inspection on an isolated exec channel without closing the live connection.
+    pub(crate) async fn inspect(
+        &self,
+        checks: &[stats::InspectionCheck],
+        command: &str,
+    ) -> Result<Vec<stats::InspectionResult>, SshError> {
+        stats::inspect_on_handle(&self._handle, checks, command).await
+    }
+
     /// Opens SFTP on the same SSH connection as this shell (no second `connect_authenticated`).
     pub async fn open_sftp(
         &self,

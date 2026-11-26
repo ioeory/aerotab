@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import HostSelect from '../HostSelect.svelte';
+  import { profileChoices } from '../HostChoiceList.svelte';
   import type { RpcClient } from '../../lib/rpc';
   import type { StoredProfile, GroupSshDefaults } from '../../lib/types';
   import { resolveGroupDefaults } from '../../lib/profileCatalogHelpers';
@@ -249,10 +251,7 @@
               <p class="hint">{i18n.t('groupDefaults.jumpOrder')}</p>
               {#each jumpIds as id, index (`${index}:${id}`)}
                 <div class="jump">
-                  <select aria-label={i18n.t('groupDefaults.hop', { index: index + 1 })} value={id} onchange={(event) => { jumpIds = jumpIds.map((old, i) => i === index ? event.currentTarget.value : old); }}>
-                    {#if !profiles.some(profile => profile.kind === 'ssh' && profile.id === id)}<option value={id}>{i18n.t('groupDefaults.unavailable')}</option>{/if}
-                    {#each profiles.filter(profile => profile.kind === 'ssh') as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}
-                  </select>
+                  <HostSelect inline choices={profileChoices(profiles, true)} label={i18n.t('groupDefaults.hop', { index: index + 1 })} value={id} missingLabel={i18n.t('groupDefaults.unavailable')} onChange={value => { jumpIds = jumpIds.map((old, i) => i === index ? value : old); }} />
                   <button type="button" onclick={() => { jumpIds = jumpIds.filter((_, i) => i !== index); }}>{i18n.t('common.delete')}</button>
                 </div>
               {/each}

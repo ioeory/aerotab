@@ -16,6 +16,34 @@ const load = async (name) => {
 };
 const core = await load('aiTroubleshoot');
 const templates = await load('aiTroubleshootTemplates');
+
+test('local resume stores only the confirmed question, template, shell and editable command', () => {
+  const storage = new Map();
+  const local = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
+  const draft = core.buildTroubleshootResume({ question: 'Check the listener', template: 'Ports', shell: 'bash', command: 'ss -ltn', commandShell: 'sh',
+    origin: { id: 'private-pane' }, output: 'private-output', reply: 'private-reply', endpoint: 'private-endpoint' });
+  assert.equal(storage.size, 0, 'preview does not persist');
+  assert.ok(core.saveTroubleshootResume(local, draft));
+  const expected = { question: 'Check the listener', template: 'Ports', shell: 'bash', command: 'ss -ltn', commandShell: 'sh' };
+  assert.deepEqual(core.loadTroubleshootResume(local), expected);
+  assert.deepEqual([...storage.values()].map(JSON.parse), [{ version: 1, ...expected }]);
+  assert.ok(core.removeTroubleshootResume(local));
+  assert.equal(core.loadTroubleshootResume(local), null);
+});
+
+test('resume masks recognized secrets, bounds text, and fails safely on invalid or blocked storage', () => {
+  const draft = core.buildTroubleshootResume({ question: `password=hidden\n${'日'.repeat(20_000)}`, shell: 'invalid', command: 'curl --token hidden', commandShell: 'sh' });
+  assert.doesNotMatch(JSON.stringify(draft), /hidden|invalid/);
+  assert.ok(Buffer.byteLength(draft.question) <= core.TROUBLESHOOT_MAX_BYTES);
+  assert.equal(draft.command, 'curl --token [redacted]');
+  assert.equal(core.buildTroubleshootResume({ command: 'with\na newline', commandShell: 'sh' }), null);
+  assert.equal(core.loadTroubleshootResume({ getItem: () => '{"version":2,"question":"ignored"}' }), null);
+  assert.equal(core.loadTroubleshootResume({ getItem: () => '{invalid' }), null);
+  const blocked = () => { throw Error('blocked'); };
+  assert.equal(core.loadTroubleshootResume({ getItem: blocked }), null);
+  assert.equal(core.saveTroubleshootResume({ setItem: blocked }, draft), false);
+  assert.equal(core.removeTroubleshootResume({ removeItem: blocked }), false);
+});
 const dest = { providerId: 'p', model: 'm', endpoint: 'https://test.invalid/v1' };
 const review = () => core.buildTroubleshootReview('terminal_explain', 'sample', dest, { id: 's1', label: 'Terminal A' });
 function deferred() {
@@ -24,6 +52,18 @@ function deferred() {
   return { promise, resolve };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('comparison requires two sides, bounds each independently, and sends no source metadata or tool fields', () => {
+  const a = { text: `password=secret\n${'日'.repeat(20_000)}`, id: 'private-pane', label: 'private-host' };
+  assert.equal(core.buildTroubleshootComparison(a, { text: ' ' }, dest), null);
+  const comparison = core.buildTroubleshootComparison(a, { text: 'unique evidence B' }, dest);
+  const request = core.troubleshootRequest(comparison, 'comparison');
+  assert.deepEqual(Object.keys(request).sort(), ['conversationId','expectedEndpoint','message','model','providerId','purpose']);
+  assert.equal(request.purpose, 'terminal_explain');
+  assert.doesNotMatch(request.message, /secret|private-pane|private-host|\uFFFD/);
+  assert.match(request.message, /unique evidence B/);
+  assert.ok(Buffer.byteLength(request.message) <= core.TROUBLESHOOT_MAX_BYTES);
+});
 
 test('preflight strips terminal escapes and common credentials, with a UTF-8 byte cap', () => {
   assert.equal(typeof core.sanitizeTroubleshootText, 'function');
@@ -246,7 +286,7 @@ test('analysis save opens the blank editor without passing context and template 
   assert.match(analysisSource, /onclick=\{\(\) => templateEditor\?\.openBlankEditor\(\)\}/);
   assert.match(analysisSource, /onApply=\{applyTemplate\}/);
   assert.match(templateSource, /onclick=\{\(\) => duplicate\(entry\)\}/);
-  assert.match(templateSource, /onclick=\{\(\) => onApply\(entry\.prompt\)\}/);
+  assert.match(templateSource, /onclick=\{\(\) => onApply\(entry\.prompt, entry\.name\)\}/);
 });
 
 const chatSource = readFileSync(new URL('../components/AIChat.svelte', import.meta.url), 'utf8');

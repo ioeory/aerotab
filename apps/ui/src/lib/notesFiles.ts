@@ -32,8 +32,13 @@ export async function importNotes(store: NotesStore, parent_id: string | null): 
   }
 }
 export async function exportNote(note: Note): Promise<void> {
-  const path = await invoke<string | null>('pick_save_file', { defaultName: `${safeFilename(note.title)}.md` });
-  if (path) await invoke('local_write_chunk', { path, offset: 0, data: encode(note.markdown), create: true });
+  await exportMarkdownFile(note.title, note.markdown);
+}
+export async function exportMarkdownFile(title: string, markdown: string): Promise<boolean> {
+  const path = await invoke<string | null>('pick_save_file', { defaultName: `${safeFilename(title)}.md` });
+  if (!path) return false;
+  await invoke('local_write_chunk', { path, offset: 0, data: encode(markdown), create: true });
+  return true;
 }
 /** Uses relative-path Tauri helpers. Exports into a fresh, non-colliding child directory. */
 export async function exportFolder(snapshot: NotesSnapshot, folderId: string | null): Promise<void> {

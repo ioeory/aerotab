@@ -39,6 +39,26 @@ test('one paste event handled in window capture and target writes only once', as
   assert.deepEqual(writes, ['one paste', 'one paste'], 'distinct paste events must both work');
 });
 
+test('DOM paste collapses Windows CRLF to a single CR per line', async () => {
+  const writes = [];
+  const ctl = new NativeTerminalController({
+    sessionId: 's', rpc: { call: async () => {} }, canvas: { focus() {} },
+    cursorBlink: false, writeInput: async text => writes.push(text),
+  });
+  globalThis.requestAnimationFrame = globalThis.requestAnimationFrame ?? (() => 0);
+  ctl.focus();
+  ctl.shouldHandleGlobalInput = () => true;
+  const event = {
+    defaultPrevented: false,
+    clipboardData: { getData: () => 'a\r\nb\r\n' },
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() {},
+  };
+  ctl.boundWinPaste(event);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(writes, ['a\rb\r']);
+});
+
 test('switching away during IME composition cannot leave the current terminal permanently rejecting keys', async () => {
   const writes = [], windowListeners = new Map(), inputListeners = new Map();
   // Node has no DOM; supply the minimal surface the controller touches:
@@ -97,15 +117,25 @@ test('terminal input blur also cancels stale composition without requiring a tab
 });
 
 const pane = readFileSync(new URL('../../components/TerminalPane.svelte', import.meta.url), 'utf8');
-const source = pane.slice(pane.indexOf('  async function sendSessionInputAsync('), pane.indexOf('  function sendSessionInput('));
-const js = ts.transpileModule(source + '\nreturn sendSessionInputAsync;', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+const helperStart = pane.indexOf('  /** SGR / X10 / urxvt mouse reports');
+const source = pane.slice(helperStart, pane.indexOf('  function sendSessionInput('));
+const js = ts.transpileModule(source + '\nreturn { sendSessionInputAsync, isMouseReportInput };', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+function makeWriter({ useNative = true, scrollOnInput = true } = {}) {
+  const calls = [];
+  const api = new Function(
+    'useNative', 'scrollOnInput', 'session', 'rpc', 'sendSessionBytes', 'encoder', 'terminalInputBytes',
+    'interruptOutputCooldownUntil', 'INTERRUPT_OUTPUT_COOLDOWN_MS', 'performance',
+    js,
+  )(
+    useNative, scrollOnInput, { id: 's' }, { call: async (...args) => calls.push(args) },
+    async bytes => calls.push(['write', [...bytes]]), new TextEncoder(), async x => x,
+    0, 0, { now: () => 0 },
+  );
+  return { calls, ...api };
+}
 for (const useNative of [true, false]) {
   test(`Enter returns to live input before writing (native=${useNative})`, async () => {
-    const calls = [];
-    const fn = new Function('useNative', 'session', 'rpc', 'sendSessionBytes', 'encoder', 'terminalInputBytes', js)(
-      useNative, { id: 's' }, { call: async (...args) => calls.push(args) },
-      async bytes => calls.push(['write', [...bytes]]), new TextEncoder(), async x => x,
-    );
+    const { calls, sendSessionInputAsync: fn } = makeWriter({ useNative });
     await fn('\r');
     assert.deepEqual(calls, [...(useNative ? [['terminal.scroll', { id: 's', cmd: 'bottom' }]] : []), ['write', [13]]]);
     calls.length = 0;
@@ -113,3 +143,18 @@ for (const useNative of [true, false]) {
     assert.equal(calls.length, 1, 'mouse reports must not jump to bottom');
   });
 }
+test('Ctrl+C returns to live input when scrolled into history', async () => {
+  const { calls, sendSessionInputAsync: fn } = makeWriter({ useNative: true });
+  await fn('\x03');
+  assert.deepEqual(calls, [['terminal.scroll', { id: 's', cmd: 'bottom' }], ['write', [3]]]);
+});
+test('scrollOnInput=false keeps viewport on keyboard input', async () => {
+  const { calls, sendSessionInputAsync: fn } = makeWriter({ useNative: true, scrollOnInput: false });
+  await fn('\x03');
+  assert.deepEqual(calls, [['write', [3]]]);
+});
+test('Shift+PageUp/Down scroll chords are not mouse reports', () => {
+  const { isMouseReportInput } = makeWriter();
+  assert.equal(isMouseReportInput('\x1b[<0;1;1M'), true);
+  assert.equal(isMouseReportInput('\x03'), false);
+});

@@ -45,7 +45,7 @@
     broadcastTargetIds?: string[];
     tabVisible?: boolean;
     onError?: (msg: string) => void;
-    onAiTroubleshoot?: (id: string, text: string) => void;
+    onAiTroubleshoot?: (id: string, text: string, evidence?: import('../lib/aiTroubleshoot').TroubleshootEvidenceTarget) => void;
   }
 
   let {

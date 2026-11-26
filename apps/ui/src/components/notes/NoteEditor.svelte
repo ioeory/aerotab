@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import HostChoiceList, { profileChoices } from '../HostChoiceList.svelte';
   import type { Component } from 'svelte';
   import { Bold, ChevronLeft, Code, Ellipsis, Eye, FileDown, Heading, Image, Italic, Link, List, ListOrdered, ListTodo, Minus, Pencil, Quote, Redo2, RotateCw, Server, SquareCode, Strikethrough, Table, Tag, Undo2 } from '@lucide/svelte';
   import type { Note } from '../../lib/notesCore';
@@ -91,9 +92,7 @@
       if (edit) { event.preventDefault(); commit(edit); }
     }
   }
-  function toggleProfile(id: string, checked: boolean): void {
-    draft.value.profile_ids = checked ? [...draft.value.profile_ids, id] : draft.value.profile_ids.filter(p => p !== id); changed();
-  }
+  const hostChoices = $derived(profileChoices(profiles));
 </script>
 <svelte:window onpointerdown={dismissMenus} />
 <div class="editor" bind:this={root}>
@@ -117,8 +116,7 @@
     <details class="menu" data-popover>
       <summary class="chip" title={nm('profiles')} aria-label={`${nm('profiles')} (${draft.value.profile_ids.length})`}><Server size={13} />{draft.value.profile_ids.length}</summary>
       <div class="popover right hosts">
-        {#each profiles as profile (profile.id)}<label class="host"><input type="checkbox" checked={draft.value.profile_ids.includes(profile.id)} onchange={event => toggleProfile(profile.id, event.currentTarget.checked)} />{profile.name}</label>
-        {:else}<p class="muted">{nm('noHosts')}</p>{/each}
+        <HostChoiceList choices={hostChoices} selected={draft.value.profile_ids} onChange={ids => { draft.value.profile_ids = ids; changed(); }} />
       </div>
     </details>
   </div>
@@ -167,8 +165,6 @@
   .popover.right { left:auto; right:0; }
   .popover button { display:flex; align-items:center; gap:8px; width:100%; padding:6px 8px; border:0; border-radius:4px; background:none; cursor:pointer; text-align:left; font-size:12px; white-space:nowrap; }
   .popover button:hover { background:var(--color-surface-hover); }
-  .host { display:flex; align-items:center; gap:8px; padding:5px 6px; font-size:12px; border-radius:4px; cursor:pointer; } .host:hover { background:var(--color-surface-hover); }
-  .muted { margin:6px; font-size:12px; color:var(--color-fg-subtle); }
   textarea { flex:1; min-height:120px; resize:none; border:0; outline:none; padding:10px 12px; background:none; color:inherit; font-family:var(--font-mono, monospace); font-size:13px; line-height:1.65; tab-size:2; }
   .hint { margin:0; padding:6px 12px; font-size:11px; color:var(--color-fg-subtle); border-top:1px solid var(--color-border-soft); flex-shrink:0; }
   .preview { flex:1; min-height:0; overflow:auto; padding:10px 14px; line-height:1.7; overflow-wrap:anywhere; }

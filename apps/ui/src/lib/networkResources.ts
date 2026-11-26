@@ -1,5 +1,4 @@
 export type NetworkRpc = { call<T>(method: string, params?: unknown): Promise<T> };
-export type NetworkProfile = { id: string; name: string; kind: string };
 export type ProxyConfig =
   | { kind: 'ssh_jump'; profile_id: string }
   | { kind: 'socks5' | 'http_connect'; host: string; port: number; vault_entry_id: string | null };

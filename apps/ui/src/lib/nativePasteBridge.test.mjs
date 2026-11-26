@@ -48,3 +48,7 @@ test('native CR input still confirms and trim/flatten use the same policy', asyn
   assert.equal(confirmations, 1);
   assert.equal(await preparePasteText('a  \r\nb\t\n', { ...policy, flatten: true }, async () => true), 'a b ');
 });
+test('clipboard CRLF is normalized even without a native validity gate', async () => {
+  const policy = { trim: false, flatten: false, warn: false, confirm: async () => true };
+  assert.equal(await preparePasteText('a\r\nb\r\n', policy), 'a\nb\n');
+});

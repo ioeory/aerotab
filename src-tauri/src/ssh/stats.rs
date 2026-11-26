@@ -6,11 +6,78 @@
 use std::time::Duration;
 
 use russh::{ChannelMsg, Disconnect};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use super::known_hosts::KnownHosts;
 use super::{connect_authenticated, SshError, SshProfile, SshTransportSettings};
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+
+    #[test]
+    fn inspection_accepts_typed_targets_only() {
+        assert!(inspection_command(&[
+            InspectionCheck::Service {
+                unit: "nginx.service".into()
+            },
+            InspectionCheck::TcpListen { port: 443 }
+        ])
+        .is_ok());
+        for unit in [
+            "--help.service",
+            "a;pwd.service",
+            "../../test.service",
+            "hello world.service",
+        ] {
+            assert!(inspection_command(&[InspectionCheck::Service { unit: unit.into() }]).is_err());
+        }
+        assert!(inspection_command(&[InspectionCheck::TcpListen { port: 0 }]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn combined_inspection_script_is_valid_posix_shell() {
+        let script = inspection_command(&[
+            InspectionCheck::Resources,
+            InspectionCheck::Inodes,
+            InspectionCheck::TcpListen { port: 443 },
+            InspectionCheck::Service {
+                unit: "nginx.service".into(),
+            },
+        ])
+        .unwrap();
+        let status = std::process::Command::new("sh")
+            .args(["-n", "-c", &script])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn inspection_missing_or_malformed_output_is_never_healthy() {
+        let checks = [
+            InspectionCheck::Inodes,
+            InspectionCheck::TcpListen { port: 443 },
+            InspectionCheck::Service {
+                unit: "nginx.service".into(),
+            },
+        ];
+        let results = parse_inspection(&checks, "0=92%\n1=not-listening\n2=unexpected\n");
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.status)
+                .collect::<Vec<_>>(),
+            ["warning", "failed", "unavailable"]
+        );
+        assert_eq!(
+            parse_inspection(&checks, "1=listening\n1=listening\n")[1].status,
+            "unavailable"
+        );
+    }
+}
 
 const HOST_STATS_COMMAND: &str = r#"LC_ALL=C; export LC_ALL;
 host=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo ""); [ -n "$host" ] && printf 'hostname=%s\n' "$host";
@@ -105,6 +172,167 @@ pub struct HostStats {
     pub disk_percent: Option<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InspectionCheck {
+    Resources,
+    Inodes,
+    Service { unit: String },
+    TcpListen { port: u16 },
+}
+
+#[derive(Debug, Serialize)]
+pub struct InspectionResult {
+    status: &'static str,
+    detail: String,
+}
+
+pub fn inspection_command(checks: &[InspectionCheck]) -> Result<String, &'static str> {
+    if checks.is_empty() || checks.len() > 16 {
+        return Err("select 1 to 16 checks");
+    }
+    let mut script = String::from("LC_ALL=C; export LC_ALL\n");
+    if checks
+        .iter()
+        .any(|check| matches!(check, InspectionCheck::Resources))
+    {
+        script.push_str(HOST_STATS_COMMAND);
+    }
+    for (index, check) in checks.iter().enumerate() {
+        let probe = match check {
+            InspectionCheck::Resources => continue,
+            InspectionCheck::Inodes => {
+                r#"df -Pi / 2>/dev/null | awk 'NR==1 {for(i=1;i<=NF;i++) if ($i=="IUse%" || $i=="%iused") col=i} NR==2 && col && $col ~ /^[0-9]+%$/ {print $col}'"#.to_owned()
+            }
+            InspectionCheck::Service { unit } => {
+                if unit.len() > 120
+                    || !unit.ends_with(".service")
+                    || !unit
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    || !unit
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.@:".contains(&b))
+                {
+                    return Err("invalid systemd service name");
+                }
+                format!(
+                    r#"systemctl show --no-pager -p LoadState -p ActiveState -- '{unit}' 2>/dev/null | awk -F= '$1=="LoadState" {{load=$2}} $1=="ActiveState" {{active=$2}} END {{if(load=="not-found")print "not-found"; else if(load=="masked")print "masked"; else if(load=="loaded" && active!="")print active}}'"#
+                )
+            }
+            InspectionCheck::TcpListen { port } => {
+                if *port == 0 {
+                    return Err("invalid TCP port");
+                }
+                format!(
+                    r#"if rows=$(ss -H -lnt 2>/dev/null); then
+    printf '%s\n' "$rows" | awk -v p='{port}' '$4 ~ (":" p "$") {{found=1}} END {{print found ? "listening" : "not-listening"}}';
+elif [ -r /proc/net/tcp ]; then
+    set -- /proc/net/tcp; if [ -r /proc/net/tcp6 ]; then set -- "$@" /proc/net/tcp6; fi;
+    if state=$(awk -v p='{hex:04X}' 'FNR>1 && $4=="0A" && toupper($2) ~ (":" p "$") {{found=1}} END {{print found ? "listening" : "not-listening"}}' "$@" 2>/dev/null); then printf '%s\n' "$state"; fi;
+fi"#,
+                    hex = port
+                )
+            }
+        };
+        script.push_str(&format!("v=$({probe}); printf '{index}=%s\\n' \"$v\"\n"));
+    }
+    script.push_str("exit 0\n");
+    Ok(script)
+}
+
+fn parse_inspection(checks: &[InspectionCheck], text: &str) -> Vec<InspectionResult> {
+    let stats = parse_host_stats(text);
+    let result = |status, detail: &str| InspectionResult {
+        status,
+        detail: detail.into(),
+    };
+    checks
+        .iter()
+        .enumerate()
+        .map(|(index, check)| {
+            let key = format!("{index}=");
+            let mut values = text.lines().filter_map(|line| line.strip_prefix(&key));
+            let value = values.next().unwrap_or_default();
+            if values.next().is_some() {
+                return result("unavailable", "no-data");
+            }
+            match check {
+                InspectionCheck::Resources => {
+                    let disk = stats
+                        .mounts
+                        .as_ref()
+                        .and_then(|mounts| {
+                            mounts.iter().map(|mount| mount.percent).reduce(f64::max)
+                        })
+                        .or(stats.disk_percent);
+                    let valid = |n: f64| n.is_finite() && n >= 0.0;
+                    let cpu = stats.cpu_percent.filter(|n| valid(*n));
+                    let memory = stats.mem_percent.filter(|n| valid(*n));
+                    let disk = disk.filter(|n| valid(*n));
+                    let load = stats.load1.filter(|n| valid(*n));
+                    let status = if [cpu, memory, disk].into_iter().flatten().any(|n| n >= 90.0) {
+                        "warning"
+                    } else if [cpu, memory, disk, load]
+                        .into_iter()
+                        .any(|value| value.is_none())
+                    {
+                        "unavailable"
+                    } else {
+                        "ok"
+                    };
+                    let fmt = |value: Option<f64>| {
+                        value.map_or_else(|| "—".into(), |n| format!("{n:.1}"))
+                    };
+                    InspectionResult {
+                        status,
+                        detail: format!(
+                            "CPU {}% · RAM {}% · Disk max {}% · Load(1m) {}",
+                            fmt(cpu),
+                            fmt(memory),
+                            fmt(disk),
+                            fmt(load)
+                        ),
+                    }
+                }
+                InspectionCheck::Inodes => {
+                    match value.strip_suffix('%').and_then(|n| n.parse::<u16>().ok()) {
+                        Some(n) => result(if n >= 90 { "warning" } else { "ok" }, value),
+                        None => result("unavailable", "no-data"),
+                    }
+                }
+                InspectionCheck::Service { .. } => match value {
+                    "active" => result("ok", value),
+                    "inactive" | "failed" | "not-found" | "masked" => result("failed", value),
+                    "activating" | "deactivating" | "reloading" => result("warning", value),
+                    _ => result("unavailable", "no-systemd-data"),
+                },
+                InspectionCheck::TcpListen { .. } => match value {
+                    "listening" => result("ok", value),
+                    "not-listening" => result("failed", value),
+                    _ => result("unavailable", "no-listener-data"),
+                },
+            }
+        })
+        .collect()
+}
+
+pub async fn probe_inspection(
+    profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+    checks: &[InspectionCheck],
+    command: &str,
+) -> Result<Vec<InspectionResult>, SshError> {
+    let stdout = timeout(
+        Duration::from_secs(20),
+        probe_stdout(profile, known_hosts, command),
+    )
+    .await
+    .map_err(|_| SshError::Channel("inspection timed out".into()))??;
+    Ok(parse_inspection(checks, &String::from_utf8_lossy(&stdout)))
+}
+
 pub async fn probe_host_stats(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
@@ -121,18 +349,48 @@ async fn probe_host_stats_inner(
     profile: &SshProfile,
     known_hosts: Option<KnownHosts>,
 ) -> Result<HostStats, SshError> {
+    let stdout = probe_stdout(profile, known_hosts, HOST_STATS_COMMAND).await?;
+    Ok(parse_host_stats(&String::from_utf8_lossy(&stdout)))
+}
+
+async fn probe_stdout(
+    profile: &SshProfile,
+    known_hosts: Option<KnownHosts>,
+    command: &str,
+) -> Result<Vec<u8>, SshError> {
     let handle =
         connect_authenticated(profile, known_hosts, SshTransportSettings::default()).await?;
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| SshError::Channel(format!("host stats channel: {e}")))?;
-    channel
-        .exec(true, HOST_STATS_COMMAND)
-        .await
-        .map_err(|e| SshError::Channel(format!("host stats exec: {e}")))?;
+    let result = inspect_stdout(&handle, command).await;
+    let _ = timeout(
+        Duration::from_secs(1),
+        handle.disconnect(Disconnect::ByApplication, "host stats complete", "en"),
+    )
+    .await;
+    result
+}
 
+pub(super) async fn inspect_on_handle(
+    handle: &russh::client::Handle<super::TrustingClient>,
+    checks: &[InspectionCheck],
+    command: &str,
+) -> Result<Vec<InspectionResult>, SshError> {
+    let stdout = inspect_stdout(handle, command).await?;
+    Ok(parse_inspection(checks, &String::from_utf8_lossy(&stdout)))
+}
+
+async fn inspect_stdout(
+    handle: &russh::client::Handle<super::TrustingClient>,
+    command: &str,
+) -> Result<Vec<u8>, SshError> {
+    let mut channel = timeout(Duration::from_secs(5), handle.channel_open_session())
+        .await
+        .map_err(|_| SshError::Channel("inspection channel timed out".into()))?
+        .map_err(|e| SshError::Channel(format!("host stats channel: {e}")))?;
     let collect = async {
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| SshError::Channel(format!("host stats exec: {e}")))?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_status = None;
@@ -155,12 +413,8 @@ async fn probe_host_stats_inner(
         Ok::<_, SshError>((stdout, stderr, exit_status))
     };
     let collected = timeout(Duration::from_secs(10), collect).await;
-    // Close even when collection fails, times out or exceeds the output bound.
-    let _ = timeout(
-        Duration::from_secs(1),
-        handle.disconnect(Disconnect::ByApplication, "host stats complete", "en"),
-    )
-    .await;
+    // Close only this exec channel; it may share the user's live transport.
+    let _ = timeout(Duration::from_secs(1), channel.close()).await;
     let (stdout, stderr, exit_status) =
         collected.map_err(|_| SshError::Channel("host stats timed out".into()))??;
 
@@ -179,8 +433,7 @@ async fn probe_host_stats_inner(
         }));
     }
 
-    let text = String::from_utf8_lossy(&stdout);
-    Ok(parse_host_stats(&text))
+    Ok(stdout)
 }
 
 fn parse_host_stats(output: &str) -> HostStats {

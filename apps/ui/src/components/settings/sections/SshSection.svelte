@@ -5,6 +5,8 @@
   import { RefreshCw, Server, Trash2 } from '@lucide/svelte';
   import type { RpcClient } from '../../../lib/rpc';
   import type { KnownHostEntry, StoredProfile, TunnelKind, TunnelMeta } from '../../../lib/types';
+  import HostSelect from '../../HostSelect.svelte';
+  import { profileChoices } from '../../HostChoiceList.svelte';
   import { i18n } from '../../../lib/i18n.svelte';
   import { settingsCoord } from '../../../lib/settingsStore.svelte';
   import { appConfirm } from '../../../lib/confirm.svelte';
@@ -378,14 +380,10 @@
       <option value="dynamic">{i18n.t('ssh.tunnelKind.dynamic')}</option>
     </select>
   </label>
-  <label class="row">
+  <div class="row">
     <span class="row-label">{i18n.t('ssh.tunnelProfile')}</span>
-    <select bind:value={tunnelProfileId} disabled={sshProfiles.length === 0}>
-      {#each sshProfiles as p (p.id)}
-        <option value={p.id}>{p.name}</option>
-      {/each}
-    </select>
-  </label>
+    <HostSelect choices={profileChoices(sshProfiles)} value={tunnelProfileId} label={i18n.t('ssh.tunnelProfile')} disabled={sshProfiles.length === 0} onChange={id => { tunnelProfileId = id; }} />
+  </div>
   <label class="row">
     <span class="row-label">
       {tunnelKind === 'remote' ? i18n.t('ssh.tunnelRemoteBind') : i18n.t('ssh.tunnelBind')}

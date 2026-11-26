@@ -15,6 +15,8 @@
   import { getProfileCatalog } from '../../lib/profileCatalog.svelte';
   import type { ProfileModalOpenOptions } from '../ProfileModal.svelte';
   import JumpChainEditor from '../JumpChainEditor.svelte';
+  import HostSelect from '../HostSelect.svelte';
+  import { profileChoices } from '../HostChoiceList.svelte';
   import ProfileIcon from '../ProfileIcon.svelte';
   import ProfileTag from '../ProfileTag.svelte';
   import ProfileTagEditor from '../ProfileTagEditor.svelte';
@@ -215,7 +217,7 @@
     <details class="section"><summary>{i18n.t('profileModal.proxyJump')}</summary><div class="fields">{#if inherited('jump')}<p>{previewValue('jump')}</p>{:else}<JumpChainEditor profiles={tunnels} excludeProfileId={editingId} bind:jumpChainLines={jumps} {onError} />{/if}</div></details>
   {:else}
     <details class="section"><summary>{i18n.t('profileModal.sshTunnel')}</summary><div class="fields">
-      <label for="pm-tunnel">{i18n.t('profileModal.sshTunnel')}</label><select id="pm-tunnel" class="input" bind:value={draft.remoteSshProfileId}><option value="">(direct)</option>{#if draft.remoteSshProfileId && !tunnels.some(profile => profile.id === draft.remoteSshProfileId)}<option value={draft.remoteSshProfileId}>{draft.remoteSshProfileId}</option>{/if}{#each tunnels as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}</select>
+      <span>{i18n.t('profileModal.sshTunnel')}</span><HostSelect choices={profileChoices(tunnels)} value={draft.remoteSshProfileId} label={i18n.t('profileModal.sshTunnel')} emptyLabel={i18n.t('groupDefaults.direct')} onChange={id => { draft.remoteSshProfileId = id; }} />
       <label for="pm-lport">{i18n.t('profileModal.localBindPort')}</label><input id="pm-lport" class="input" bind:value={draft.localBindPort} type="number" min="1" max="65535" placeholder="auto" />
     </div></details>
   {/if}

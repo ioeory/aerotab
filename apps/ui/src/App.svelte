@@ -9,7 +9,11 @@
   import Workbench from './components/Workbench.svelte';
   import AIChat from './components/AIChat.svelte';
   import { aiPaneLabel, buildAiPaneDirectory } from './lib/aiPaneDirectory';
-  import { sanitizeTroubleshootText, type TroubleshootSeed } from './lib/aiTroubleshoot';
+  import OperationsWorkbench from './components/OperationsWorkbench.svelte';
+  import { incidentEvidenceLimit, type IncidentEvidence, type IncidentRecord, type InspectionPane } from './lib/operationsWorkbench';
+  import { operationsMessages } from './lib/operationsMessages';
+  import type { EventScene, SceneNode } from './lib/opsProject';
+  import { sanitizeTroubleshootText, type TroubleshootEvidenceTarget, type TroubleshootSeed } from './lib/aiTroubleshoot';
   import HostSystemPanel from './components/HostSystemPanel.svelte';
   import NotesWorkspace from './components/notes/NotesWorkspace.svelte';
   import SessionNotesPanel from './components/notes/SessionNotesPanel.svelte';
@@ -42,7 +46,7 @@
   import { i18n } from './lib/i18n.svelte';
   import { categoryForStatus, diagnostics, exportDiagnosticPack, instrumentRpcClient, sanitizeMessage } from './lib/diagnostics.svelte';
   import type { HostStats, SessionMeta, SshProfileSpec, StoredProfile } from './lib/types';
-  import { hotkeys, hotkeyLabel, shouldDeferToTextInput } from './lib/hotkeys';
+  import { hotkeys, hotkeyLabel, isAiCopyShortcut, shouldDeferToTextInput } from './lib/hotkeys';
   import { dispatchFitAllPanes, dispatchFocusPane } from './lib/focusPane';
   import { isOverlayBlockingInput, shouldAutoFocusTerminal } from './lib/modalFocus';
   import { focusTrace, focusWebviewDesktop } from './lib/desktopFocus';
@@ -101,7 +105,7 @@
   import logoUrl from './assets/logo.png';
 
   const rpc = instrumentRpcClient(selectClient());
-  const buildId = '0.3.6-ui-terminal-selection';
+  const buildId = '0.3.8-terminal-scroll-ops';
   type SettingsSectionId =
     | 'application'
     | 'appearance'
@@ -169,12 +173,41 @@
   let troubleshootSeed = $state<TroubleshootSeed>();
   let troubleshootNonce = 0;
   const aiPaneDirectory = $derived(buildAiPaneDirectory(tabs.tabs, tabs.activeId));
-  function stageAiTroubleshoot(id: string, text: string) {
+  const operationsText = $derived(operationsMessages[i18n.resolvedLocale]);
+  let operationsVisible = $state(false);
+  let incident = $state<IncidentRecord>({ title: '', conclusion: '', evidence: [], steps: [] });
+  const inspectionPanes = $derived.by<InspectionPane[]>(() => tabs.tabs.flatMap((tab, index) => tab.kind !== 'terminal' ? [] : tab.panes.flatMap((pane, paneIndex) => {
+    if (!isSshPane(pane)) return [];
+    const ssh = pane.sshProfile;
+    const hostKey = pane.profileId ? `profile:${pane.profileId}`
+      : ssh ? `inline:${JSON.stringify([ssh.host, ssh.port, ssh.user, ssh.proxy_id, ssh.jump_profile_ids, ssh.jump_via?.map(hop => [hop.host, hop.port, hop.user])])}`
+        : `pane:${pane.id}`;
+    const label = pane.connection ? `${index + 1}. ${tab.title} / #${paneIndex + 1} ${pane.title}`
+      : aiPaneLabel(pane, aiPaneDirectory, i18n.resolvedLocale);
+    return [{ id: pane.id, kind: 'Ssh', hostKey, hostLabel: ssh?.host ?? pane.title, label,
+      pending: pane.connection?.status, profileId: pane.profileId }];
+  })));
+  function addIncidentEvidence(entry: IncidentEvidence) {
+    if (incident.evidence.length >= incidentEvidenceLimit) return false;
+    const text = Array.from(sanitizeTroubleshootText(entry.text)).slice(0, 4000).join('');
+    if (!text) return false;
+    incident.evidence.push({ label: sanitizeTroubleshootText(entry.label).slice(0, 240), text, source: entry.source, at: entry.at ?? Date.now() });
+    operationsVisible = true;
+    return true;
+  }
+  function showInspectionPane(id: string) {
+    const tab = tabs.tabs.find(candidate => candidate.panes.some(pane => pane.id === id));
+    if (!tab) return;
+    if (tab.maximizedPaneId && tab.maximizedPaneId !== id) tabs.toggleMaximize(tab.id, tab.maximizedPaneId);
+    tabs.focusPane(tab.id, id);
+    requestAnimationFrame(() => dispatchFocusPane(id));
+  }
+  function stageAiTroubleshoot(id: string, text: string, evidence?: TroubleshootEvidenceTarget) {
     const source = aiPaneDirectory.find(entry => entry.id === id);
     if (!aiTroubleshootEnabled || !source) return;
     const preview = sanitizeTroubleshootText(text);
     if (!preview) return;
-    troubleshootSeed = { id, text: preview, label: aiPaneLabel(source, aiPaneDirectory), nonce: ++troubleshootNonce };
+    troubleshootSeed = { id, text: preview, label: aiPaneLabel(source, aiPaneDirectory), nonce: ++troubleshootNonce, evidence };
     aiVisible = true;
   }
   function toggleSessionAuxiliary(panel: 'system' | 'notes') {
@@ -558,6 +591,43 @@
       children,
       ratios: normalizeRatios(keptRatios, children.length),
     };
+  }
+
+  function captureOperationsScene(paneId?: string): EventScene | null {
+    const tab = paneId ? tabs.tabs.find(item => item.panes.some(pane => pane.id === paneId)) : activeTab;
+    if (!tab || tab.kind !== 'terminal' || !tab.layout) return null;
+    const profileByPane = new Map(tab.panes.flatMap(pane => pane.profileId && isSshPane(pane) ? [[pane.id, pane.profileId] as const] : []));
+    const capture = (node: PaneNode): SceneNode | null => {
+      if (node.type === 'leaf') {
+        const profileId = profileByPane.get(node.pane.id);
+        return profileId ? { profileId } : null;
+      }
+      const children: SceneNode[] = [], ratios: number[] = [];
+      node.children.forEach((child, index) => { const value = capture(child); if (value) { children.push(value); ratios.push(node.ratios[index] ?? 1); } });
+      return children.length < 2 ? children[0] ?? null : { direction: node.direction, ratios: normalizeRatios(ratios, children.length), children };
+    };
+    const layout = capture(tab.layout);
+    return layout ? { title: sanitizeTroubleshootText(tabs.displayTitle(tab)).slice(0, 100), layout } : null;
+  }
+
+  async function reopenOperationsScene(scene: EventScene): Promise<boolean> {
+    const panes: Restorable[] = [];
+    function decode(node: SceneNode): WorkspaceNode {
+      if ('profileId' in node) return { type: 'leaf', paneIndex: panes.push({ kind: 'ssh-profile', id: node.profileId }) - 1 };
+      return { type: 'split', direction: node.direction, ratios: [...node.ratios], children: node.children.map(decode) };
+    }
+    const layout = decode(scene.layout);
+    if (!panes.length || panes.some(pane => pane.kind !== 'ssh-profile' || !sharedCatalog.profiles.some(profile => profile.kind === 'ssh' && profile.id === pane.id))) return false;
+    const opened: Array<OpenedRestorable | null> = [];
+    for (const pane of panes) {
+      try { opened.push(await openRestorableSessionTimed(pane)); }
+      catch { opened.push(null); }
+    }
+    const restored = instantiateWorkspaceNode(layout, opened);
+    if (!restored) return false;
+    tabs.addLayout(scene.title, restored);
+    for (const entry of opened) if (entry) recordRestore(entry.session.id, entry.restore);
+    return opened.every(Boolean);
   }
 
   function normalizeSessionWorkspaces(value: unknown): SessionWorkspace[] {
@@ -1928,6 +1998,12 @@
     hotkeys.registerHandler('terminal-copy', () => {
       document.dispatchEvent(new CustomEvent('aerotab:terminal-copy'));
     });
+    hotkeys.registerHandler('terminal-scroll-up', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:terminal-scroll', { detail: 'pageUp' }));
+    });
+    hotkeys.registerHandler('terminal-scroll-down', () => {
+      document.dispatchEvent(new CustomEvent('aerotab:terminal-scroll', { detail: 'pageDown' }));
+    });
     hotkeys.registerHandler('terminal-font-increase', () => {
       document.dispatchEvent(new CustomEvent('aerotab:terminal-font-delta', { detail: 1 }));
     });
@@ -1995,7 +2071,7 @@
         e.preventDefault();
         return;
       }
-      if (shouldDeferToTextInput(e)) return;
+      if (isAiCopyShortcut(e) || shouldDeferToTextInput(e)) return;
       hotkeys.dispatch(e);
     };
     window.addEventListener('keydown', kbdHandler, true);
@@ -2280,16 +2356,22 @@
         <button class="btn-ghost" disabled={!activePane || !isSshPane(activePane)} aria-pressed={hasOpenSftpDock && !currentSftpCollapsed} onclick={()=>{void openSftpForActivePane();}}>{i18n.t('shell.files')}</button>
         <button class="btn-ghost" disabled={!activePane || !isSshPane(activePane)} aria-pressed={sessionPanelVisible.system} onclick={() => toggleSessionAuxiliary('system')}>{i18n.t('shell.system')}</button>
         <button class="btn-ghost" disabled={!tabs.activeId} aria-pressed={sessionPanelVisible.notes} onclick={() => toggleSessionAuxiliary('notes')}>{i18n.t('shell.notes')}</button>
+        <button class="btn-ghost" aria-pressed={operationsVisible} onclick={() => operationsVisible = !operationsVisible}>{operationsText.title}</button>
         <button class="btn-ghost" aria-pressed={aiVisible} onclick={() => aiVisible = !aiVisible}>{i18n.t('ai.title')}</button>
       </div>
       {#snippet aiPanel()}
-        <AIChat {rpc} {settingsRev} {troubleshootSeed} paneDirectory={aiPaneDirectory}
+        <AIChat {rpc} {settingsRev} {troubleshootSeed} paneDirectory={aiPaneDirectory} onAddIncidentEvidence={addIncidentEvidence}
           activeSessionId={activePane?.connection ? undefined : activePane?.id}
           panelVisible={aiVisible && workspacePage === 'sessions'}
           onAiEnabled={enabled => { aiTroubleshootEnabled = enabled; if (!enabled) troubleshootSeed = undefined; }}
           onSettings={() => openSettings('ai')} />
       {/snippet}
-      <Workbench extraPanels={[{id:'ai-chat',type:'ai',title:i18n.t('ai.title'),content:aiPanel,visible:aiVisible}]} notesVisible={sessionPanelVisible.notes} systemVisible={sessionPanelVisible.system} sftpVisible={hasOpenSftpDock && !currentSftpCollapsed}>
+      {#snippet operationsPanel()}
+        <OperationsWorkbench {rpc} visible={operationsVisible && workspacePage === 'sessions'} bind:record={incident} panes={inspectionPanes}
+          onFocusPane={showInspectionPane} onAddEvidence={addIncidentEvidence} captureScene={captureOperationsScene}
+          reopenScene={reopenOperationsScene} profileIds={sharedCatalog.profiles.filter(profile => profile.kind === 'ssh').map(profile => profile.id)} />
+      {/snippet}
+      <Workbench extraPanels={[{id:'ai-chat',type:'ai',title:i18n.t('ai.title'),content:aiPanel,visible:aiVisible},{id:'operations',type:'operations',title:operationsText.title,content:operationsPanel,visible:operationsVisible}]} notesVisible={sessionPanelVisible.notes} systemVisible={sessionPanelVisible.system} sftpVisible={hasOpenSftpDock && !currentSftpCollapsed}>
         {#snippet terminal()}
         <div class="absolute inset-0">
           {#each tabs.tabs as tab (tab.id)}

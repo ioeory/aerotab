@@ -143,7 +143,7 @@
     broadcastEnabled?: boolean;
     broadcastTargetIds?: string[];
     onError?: (msg: string) => void;
-    onAiTroubleshoot?: (id: string, text: string) => void;
+    onAiTroubleshoot?: (id: string, text: string, evidence?: import('../lib/aiTroubleshoot').TroubleshootEvidenceTarget) => void;
   }
   let {
     rpc,
@@ -194,6 +194,8 @@
   let nativeAltIsMeta = $state(false);
   let nativeLigatures = $state(false);
   let nativeTransferDetect = $state(false);
+  /** Mirrors Settings → Terminal → scroll on user input (native path). */
+  let scrollOnInput = true;
   let pollHandle: number | null = null;
   let pollIntervalMs = 0;
   let pollInFlight = false;
@@ -716,12 +718,31 @@
     }
   }
 
+  /** SGR / X10 / urxvt mouse reports — never jump the viewport on these. */
+  function isMouseReportInput(text: string): boolean {
+    return text.startsWith('\x1b[<') || text.startsWith('\x1b[M') || text.startsWith('\x1b[T');
+  }
+
+  async function scrollTerminalViewport(cmd: 'pageUp' | 'pageDown' | 'top' | 'bottom' | { delta: number }) {
+    if (useNative) {
+      await rpc.call('terminal.scroll', { id: session.id, cmd });
+      return;
+    }
+    if (!term) return;
+    if (cmd === 'pageUp') term.scrollPages(-1);
+    else if (cmd === 'pageDown') term.scrollPages(1);
+    else if (cmd === 'top') term.scrollToTop();
+    else if (cmd === 'bottom') term.scrollToBottom();
+    else if (typeof cmd === 'object' && 'delta' in cmd) term.scrollLines(cmd.delta);
+  }
+
   async function sendSessionInputAsync(input: TrzszTerminalInput): Promise<void> {
     if (typeof input === 'string') {
       // Both the WebView grid and HWND input bridge use this ordered writer.
-      // Enter must reveal the live cursor after browsing scrollback; mouse
-      // reports and unrelated control sequences must retain the viewport.
-      if (useNative && (input.includes('\r') || input.includes('\n'))) {
+      // Keyboard/paste (including Ctrl+C) must reveal the live cursor after
+      // browsing scrollback when scroll-on-input is enabled; mouse reports keep
+      // the viewport so selection/apps that use mouse mode stay put.
+      if (useNative && scrollOnInput && !isMouseReportInput(input)) {
         await rpc.call('terminal.scroll', { id: session.id, cmd: 'bottom' });
       }
       if (input.includes('\x03')) {
@@ -991,6 +1012,7 @@
     nativeAltIsMeta = cfg.altIsMeta;
     nativeLigatures = cfg.ligatures;
     nativeTransferDetect = cfg.experimentalTransferDetection;
+    scrollOnInput = cfg.scrollOnInput;
     nativeTheme = paletteFromCfg(cfg) as NativeThemeColors;
   }
 
@@ -1002,6 +1024,12 @@
     };
     const searchListener = () => { if (active) openSearch(); };
     const copyListener = () => { if (active) void doCopy(); };
+    const scrollListener = (ev: Event) => {
+      if (!active || exited) return;
+      const cmd = (ev as CustomEvent<'pageUp' | 'pageDown'>).detail;
+      if (cmd !== 'pageUp' && cmd !== 'pageDown') return;
+      void scrollTerminalViewport(cmd);
+    };
     const fontListener = (ev: Event) => {
       if (!active) return;
       const delta = (ev as CustomEvent<number>).detail;
@@ -1042,6 +1070,7 @@
     document.addEventListener('aerotab:settings-changed', settingsListener);
     document.addEventListener('aerotab:search', searchListener);
     document.addEventListener('aerotab:terminal-copy', copyListener);
+    document.addEventListener('aerotab:terminal-scroll', scrollListener);
     document.addEventListener('aerotab:terminal-font-delta', fontListener);
     document.addEventListener('aerotab:session-ended-action', endedListener);
     document.addEventListener('aerotab:focus-pane', focusListener);
@@ -1052,6 +1081,7 @@
       document.removeEventListener('aerotab:settings-changed', settingsListener);
       document.removeEventListener('aerotab:search', searchListener);
       document.removeEventListener('aerotab:terminal-copy', copyListener);
+      document.removeEventListener('aerotab:terminal-scroll', scrollListener);
       document.removeEventListener('aerotab:terminal-font-delta', fontListener);
       document.removeEventListener('aerotab:session-ended-action', endedListener);
       document.removeEventListener('aerotab:focus-pane', focusListener);
@@ -1081,7 +1111,7 @@
       lineHeight: 1 + cfg.linePadding / Math.max(cfg.fontSize, 1),
       minimumContrastRatio: cfg.minContrastRatio,
       macOptionIsMeta: cfg.altIsMeta,
-      scrollOnUserInput: cfg.scrollOnInput,
+      scrollOnUserInput: (scrollOnInput = cfg.scrollOnInput),
       wordSeparator: cfg.wordSeparator,
       allowProposedApi: true,
       allowTransparency: isTranslucent(),
@@ -1316,7 +1346,7 @@
     }
     scheduleTerminalFit(() => {
       safeFit(true);
-      if (searchOpen) return;
+      if (searchOpen || !shouldAutoFocusTerminal(host)) return;
       if (useNative) nativeView?.focus({ force: true });
       else focusTerminalAuto(term, host);
     });
@@ -1539,6 +1569,7 @@
     term.options.lineHeight = 1 + cfg.linePadding / Math.max(cfg.fontSize, 1);
     term.options.minimumContrastRatio = cfg.minContrastRatio;
     term.options.macOptionIsMeta = cfg.altIsMeta;
+    scrollOnInput = cfg.scrollOnInput;
     term.options.scrollOnUserInput = cfg.scrollOnInput;
     term.options.wordSeparator = cfg.wordSeparator;
     term.options.allowTransparency = isTranslucent();
@@ -1696,14 +1727,15 @@
   onDestroy(() => {
     if (captureId) void rpc.call('terminal.lastCommand.configure', { id: captureId, enabled: false }).catch(() => {});
   });
-  async function explainSelection() {
+  const evidenceSides = ['A', 'B'] as const;
+  async function explainSelection(side?: import('../lib/aiTroubleshoot').TroubleshootEvidenceSide) {
     const id = session.id;
     const selection = useNative ? nativeCtl?.selectionText() : term?.getSelection();
     menuOpen = false;
     try {
       const text = await selection;
-      if (id !== session.id || !onAiTroubleshoot) return;
-      if (text?.trim()) onAiTroubleshoot?.(id, text);
+      if (destroyed || id !== session.id || !onAiTroubleshoot) return;
+      if (text?.trim()) onAiTroubleshoot?.(id, text, side ? { side, source: 'selection' } : undefined);
       else onError?.(aiText.noTerminalSelection);
     } catch {
       onError?.(aiText.noTerminalSelection);
@@ -1728,16 +1760,16 @@
       capturePending = false;
     }
   }
-  async function referenceLastCommand() {
+  async function referenceLastCommand(side?: import('../lib/aiTroubleshoot').TroubleshootEvidenceSide) {
     const id = session.id;
     if (captureId !== id || !canTrackLastCommand) return;
     menuOpen = false;
     try {
       const record = await rpc.call<{command: string; output: string; exitCode?: number; truncated: boolean} | null>('terminal.lastCommand.get', { id });
-      if (session.id !== id || captureId !== id || !canTrackLastCommand) return;
+      if (destroyed || session.id !== id || captureId !== id || !canTrackLastCommand) return;
       if (!record) { onError?.(aiText.noLastCommand); return; }
       const metadata = [record.exitCode === undefined ? '' : `${aiText.exitCode}: ${record.exitCode}`, record.truncated ? aiText.lastOutputTruncated : ''].filter(Boolean);
-      onAiTroubleshoot?.(id, [`${aiText.lastCommand}: ${record.command}`, ...metadata, `${aiText.lastOutput}:\n${record.output}`].join('\n'));
+      onAiTroubleshoot?.(id, [`${aiText.lastCommand}: ${record.command}`, ...metadata, `${aiText.lastOutput}:\n${record.output}`].join('\n'), side ? { side, source: 'lastCommand' } : undefined);
     } catch (error) {
       onError?.(error instanceof Error ? error.message : String(error));
     }
@@ -1786,11 +1818,13 @@
       else await nativeCtl?.paste(text);
       return;
     }
+    // xterm.paste normalizes newlines; the bypass path must do the same so
+    // Windows CRLF does not become an empty line between every pasted line.
+    const ptyText = text.replace(/\r\n|\n|\r/g, '\r');
     if (bracketedPaste) {
       term?.paste(text);
     } else {
-      // Bypass bracketed-paste wrapping by writing through onData path.
-      sendSessionInput(text);
+      sendSessionInput(ptyText);
     }
   }
   async function doPaste() { await doPasteFromClipboard(); }
@@ -2200,9 +2234,15 @@
       <button type="button" class="menu-item" onclick={doSelectAll}><ScanText size={15} />{i18n.t('common.selectAll')}</button>
       {#if onAiTroubleshoot}
         <button type="button" class="menu-item" onclick={() => void explainSelection()}>{aiText.explainSelection}</button>
+        {#each evidenceSides as side (side)}
+          <button type="button" class="menu-item" onclick={() => void explainSelection(side)}>{aiText.compareSelection} {side}</button>
+        {/each}
         {#if canTrackLastCommand}
           {#if captureId === session.id}
             <button type="button" class="menu-item" disabled={capturePending || !lastCommandAvailable} title={lastCommandAvailable ? undefined : aiText.noLastCommand} onclick={() => void referenceLastCommand()}>{aiText.referenceLastCommand}</button>
+            {#each evidenceSides as side (side)}
+              <button type="button" class="menu-item" disabled={capturePending || !lastCommandAvailable} onclick={() => void referenceLastCommand(side)}>{aiText.compareLastCommand} {side}</button>
+            {/each}
           {/if}
           <button type="button" class="menu-item" disabled={capturePending} title={aiText.lastCommandRequirements} onclick={() => void toggleLastCommandCapture()}>{captureId === session.id ? aiText.disableLastCommand : aiText.enableLastCommand}</button>
         {/if}

@@ -13,6 +13,7 @@
   } from '../lib/nativeViewHost';
   import { completeNativeFocusHandoff } from '../lib/nativeFocusHandoff';
   import { focusWebviewDesktop, focusTrace } from '../lib/desktopFocus';
+  import { shouldAutoFocusTerminal } from '../lib/modalFocus';
   import { tracePaste } from '../lib/nativePasteTrace';
   import { NATIVE_ACTIVATION_EVENT, nativeActivationRouter, type NativeActivation } from '../lib/nativeActivation';
   import {
@@ -127,7 +128,73 @@
   let ackRecovering = $state(false);
   let inputBackpressure = $state(false);
   let rollbackPending = $state(false);
+  let scrollOffset = $state(0);
+  let scrollHistory = $state(0);
+  let scrollRows = $state(0);
+  let scrollDrag: { pointerId: number; startY: number; startOffset: number } | null = null;
   let pasteGate = createPasteRequestGate();
+
+  const scrollTrackMetrics = $derived.by(() => {
+    const history = Math.max(0, scrollHistory);
+    const rows = Math.max(1, scrollRows);
+    const total = history + rows;
+    if (history <= 0) return null;
+    const thumbRatio = Math.min(1, rows / total);
+    // displayOffset=0 → live bottom → thumb at bottom; higher → scrolled into history.
+    const maxOffset = history;
+    const offset = Math.max(0, Math.min(maxOffset, scrollOffset));
+    const travel = 1 - thumbRatio;
+    const thumbTop = travel * (1 - (maxOffset === 0 ? 0 : offset / maxOffset));
+    return { thumbRatio, thumbTop, maxOffset, offset };
+  });
+
+  function scrollToOffset(target: number) {
+    const max = Math.max(0, scrollHistory);
+    const next = Math.max(0, Math.min(max, Math.round(target)));
+    const delta = next - scrollOffset;
+    if (!delta) return;
+    scrollOffset = next; // optimistic; frame will reconcile
+    void rpc.call('terminal.scroll', { id: sessionId, cmd: { delta } }).catch(() => {});
+  }
+
+  function onScrollTrackPointerDown(ev: PointerEvent) {
+    if (ev.button !== 0 || !scrollTrackMetrics || !surface) return;
+    const track = ev.currentTarget as HTMLElement;
+    const rect = track.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    const metrics = scrollTrackMetrics;
+    const thumbPx = metrics.thumbRatio * rect.height;
+    const y = ev.clientY - rect.top;
+    const thumbTopPx = metrics.thumbTop * rect.height;
+    if (y < thumbTopPx || y > thumbTopPx + thumbPx) {
+      // Click in the track: jump so the thumb centers on the click.
+      const travel = Math.max(1, rect.height - thumbPx);
+      const ratio = Math.max(0, Math.min(1, (y - thumbPx / 2) / travel));
+      scrollToOffset(metrics.maxOffset * (1 - ratio));
+    }
+    scrollDrag = { pointerId: ev.pointerId, startY: ev.clientY, startOffset: scrollOffset };
+    track.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+
+  function onScrollTrackPointerMove(ev: PointerEvent) {
+    if (!scrollDrag || scrollDrag.pointerId !== ev.pointerId || !scrollTrackMetrics) return;
+    const track = ev.currentTarget as HTMLElement;
+    const rect = track.getBoundingClientRect();
+    const thumbPx = scrollTrackMetrics.thumbRatio * rect.height;
+    const travel = Math.max(1, rect.height - thumbPx);
+    const deltaRatio = (ev.clientY - scrollDrag.startY) / travel;
+    // Dragging down decreases displayOffset (toward live bottom).
+    scrollToOffset(scrollDrag.startOffset - deltaRatio * scrollTrackMetrics.maxOffset);
+    ev.preventDefault();
+  }
+
+  function onScrollTrackPointerUp(ev: PointerEvent) {
+    if (!scrollDrag || scrollDrag.pointerId !== ev.pointerId) return;
+    scrollDrag = null;
+    try { (ev.currentTarget as HTMLElement).releasePointerCapture(ev.pointerId); } catch { /* */ }
+  }
   let unlistenPaste: (() => void) | null = null;
   let unlistenInput: (() => void) | null = null;
   let unlistenActivation: (() => void) | null = null;
@@ -359,7 +426,7 @@
           }
           // Re-check latest props after async show: another pane/modal may now own focus.
           hostAdapter!.setFocusAllowed(canFocusSurface() && shown);
-          if (!focusRestored && canFocusSurface() && shown) {
+          if (!focusRestored && canFocusSurface() && shown && shouldAutoFocusTerminal(surface)) {
             const request = focusRequest;
             const result = await hostAdapter!.focus();
             if (request === focusRequest) {
@@ -488,7 +555,9 @@
             unlistenFontDelta?.(); unlistenFontDelta = null;
             stagingNative = false; rollbackPending = false;
             if (!disposed && !transitionClosing) {
-              source.resumeWebviewInput(); source.focus(); onRecovered?.(source, 'webview', request);
+              source.resumeWebviewInput();
+              if (shouldAutoFocusTerminal(surface)) source.focus();
+              onRecovered?.(source, 'webview', request);
             }
           }
         };
@@ -555,7 +624,7 @@
         source.beginWebviewInputHandoff();
         webviewHandoff = true;
         await tick();
-        source.focusWebviewHandoff();
+        if (shouldAutoFocusTerminal(surface)) source.focusWebviewHandoff();
         suspended = true;
         await drainSource();
       },
@@ -571,7 +640,7 @@
         hostAdapter = null;
         // Ownership is already committed; detach failure must not run source rollback.
         void host.dispose().catch(error => onError?.(nativeSurfaceError(error).message));
-        if (canFocusSurface()) source.focus();
+        if (canFocusSurface() && shouldAutoFocusTerminal(surface)) source.focus();
       },
       rollback: async () => {
         const retained = () => !disposed && !transitionClosing && controller === source && hostAdapter === host && host.generation() === generation;
@@ -756,6 +825,11 @@
       // Same callback as native HWND activation: first WebView click must also
       // flip activePaneId so focus does not stay on the previous pane.
       onActivate: () => onActivate?.(),
+      onScrollState: (state) => {
+        scrollOffset = state.displayOffset;
+        scrollHistory = state.historySize;
+        scrollRows = state.rows;
+      },
     });
     controller = ctl;
     startup = ctl.start().then(async () => {
@@ -766,7 +840,7 @@
         await ctl.waitForInitialDraw();
         if (disposed || surfaceError) return;
         onReady?.(ctl);
-        if (visible && active && !occluded && !globalOccluded) ctl.focus();
+        if (visible && active && !occluded && !globalOccluded && shouldAutoFocusTerminal(surface)) ctl.focus();
       }
     }).catch((error: unknown) => { if (!disposed) fail(error); });
   });
@@ -793,7 +867,7 @@
     if (!controller) return;
     occlusionFocusArmed = true;
     requestAnimationFrame(() => {
-      if (disposed || backend !== 'webview' || !canFocusSurface()) return;
+      if (disposed || backend !== 'webview' || !canFocusSurface() || !shouldAutoFocusTerminal(surface)) return;
       controller?.focus();
     });
   });
@@ -848,7 +922,7 @@
   });
 </script>
 
-<div bind:this={surface} data-native-session={sessionId} data-native-input-active={active && visible && !occluded && !globalOccluded && !surfaceError && !rollbackPending} data-terminal-view-backend={backend} class="native-term absolute inset-0 min-h-0 min-w-0 overflow-hidden">
+<div bind:this={surface} id={`native-term-${sessionId}`} data-native-session={sessionId} data-native-input-active={active && visible && !occluded && !globalOccluded && !surfaceError && !rollbackPending} data-terminal-view-backend={backend} class="native-term absolute inset-0 min-h-0 min-w-0 overflow-hidden">
   {#if floatTransitionError}<div role="alert" class="absolute bottom-2 left-2 z-30 text-xs">{i18n.t('workbench.nativeCovered')}: {floatTransitionError}</div>{/if}
   {#if inputBackpressure}
     <div role="alert" class="absolute bottom-2 left-2 right-2 text-xs text-[var(--color-warning)]">{i18n.t('terminal.inputBackpressure')}</div>
@@ -879,6 +953,28 @@
     tabindex="0"
     aria-label="Terminal input"
   ></textarea>
+  {#if scrollTrackMetrics && !(((backend === 'native-surface' && !committedWebview) || committedNative) && !webviewHandoff)}
+    <div
+      class="term-scrollbar"
+      role="scrollbar"
+      aria-controls={`native-term-${sessionId}`}
+      aria-orientation="vertical"
+      aria-valuemin={0}
+      aria-valuemax={scrollTrackMetrics.maxOffset}
+      aria-valuenow={scrollTrackMetrics.offset}
+      aria-label="Terminal scrollback"
+      onpointerdown={onScrollTrackPointerDown}
+      onpointermove={onScrollTrackPointerMove}
+      onpointerup={onScrollTrackPointerUp}
+      onpointercancel={onScrollTrackPointerUp}
+    >
+      <div
+        class="term-scrollbar-thumb"
+        style:height="{Math.max(8, scrollTrackMetrics.thumbRatio * 100)}%"
+        style:top="{scrollTrackMetrics.thumbTop * 100}%"
+      ></div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -887,6 +983,34 @@
    * WebView2 drops key events to elements painted under the canvas (z-index < 0).
    * pointer-events:none so clicks hit the canvas; controller.focus() still works.
    */
+  .term-scrollbar {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    bottom: 2px;
+    width: 10px;
+    z-index: 5;
+    border-radius: 8px;
+    background: transparent;
+    pointer-events: auto;
+    cursor: default;
+  }
+  .term-scrollbar:hover,
+  .term-scrollbar:active {
+    background: color-mix(in srgb, var(--color-scrollbar-thumb, #49515c) 18%, transparent);
+  }
+  .term-scrollbar-thumb {
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    min-height: 8px;
+    border-radius: 8px;
+    background: var(--color-scrollbar-thumb, #49515c);
+  }
+  .term-scrollbar:hover .term-scrollbar-thumb,
+  .term-scrollbar:active .term-scrollbar-thumb {
+    background: var(--color-scrollbar-hover, #b5bcc6);
+  }
   .native-term-ime {
     position: absolute;
     left: 0;

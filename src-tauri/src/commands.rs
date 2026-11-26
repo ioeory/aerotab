@@ -1646,7 +1646,57 @@ struct HostStatsParams {
     profile_id: Option<Uuid>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostInspectionParams {
+    profile_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    checks: Vec<ssh::stats::InspectionCheck>,
+}
+
 fn register_ssh_stats(dispatcher: &Dispatcher, state: Arc<AppState>) {
+    let st = state.clone();
+    let slots = Arc::new(tokio::sync::Semaphore::new(4));
+    dispatcher.register("ssh.inspectHost", move |params| {
+        let st = st.clone();
+        let slots = slots.clone();
+        async move {
+            let p: HostInspectionParams = serde_json::from_value(params)
+                .map_err(|_| invalid_params("invalid host inspection request"))?;
+            let command = ssh::stats::inspection_command(&p.checks).map_err(invalid_params)?;
+            let _permit = slots
+                .try_acquire()
+                .map_err(|_| internal("inspection busy"))?;
+            let probe = match (p.profile_id, p.session_id) {
+                (Some(id), None) => {
+                    let profile = resolve_ssh_profile(&st, id)
+                        .await
+                        .map_err(|_| internal("profile-unavailable"))?;
+                    let kh = st.known_hosts.lock().await.clone();
+                    ssh::stats::probe_inspection(&profile, kh, &p.checks, &command).await
+                }
+                (None, Some(id)) => {
+                    let shell = {
+                        let channels = st.channels.lock().await;
+                        match channels.get(&SessionId(id)) {
+                            Some(SessionChannel::Ssh(entry)) => entry.shell.clone(),
+                            _ => return Err(internal("session-unavailable")),
+                        }
+                    };
+                    shell.inspect(&p.checks, &command).await
+                }
+                _ => return Err(invalid_params("select exactly one profile or session")),
+            };
+            let results = probe.map_err(|error| {
+                internal(match error {
+                    ssh::SshError::HostKeyMismatch(_) => "host-key",
+                    ssh::SshError::Auth | ssh::SshError::Agent(_) => "auth",
+                    _ => "ssh-or-probe",
+                })
+            })?;
+            serde_json::to_value(results).map_err(|e| internal(e.to_string()))
+        }
+    });
     let st = state.clone();
     dispatcher.register("ssh.hostStats", move |params| {
         let st = st.clone();

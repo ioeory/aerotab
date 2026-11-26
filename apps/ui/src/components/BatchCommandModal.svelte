@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { X } from '@lucide/svelte';
+  import HostChoiceList from './HostChoiceList.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { isSshPane } from '../lib/broadcast';
   import { scheduleModalFieldFocus } from '../lib/modalFocus';
@@ -65,13 +66,6 @@
     await tick();
     scheduleModalFieldFocus(focusCommandInput);
   });
-
-  function togglePane(id: string) {
-    const next = new Set(selectedIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    selectedIds = next;
-  }
 
   function selectAllPanes() {
     selectedIds = new Set(paneOptions.map((p) => p.sessionId));
@@ -193,25 +187,12 @@
         </span>
       </div>
 
-      <div class="border border-[var(--color-border-soft)] rounded-md max-h-[220px] overflow-y-auto divide-y divide-[var(--color-border-soft)]">
-        {#if paneOptions.length === 0}
-          <div class="px-3 py-4 text-[length:var(--text-compact,14px)] text-[var(--color-fg-muted)] italic">
-            {i18n.t('batchCommand.noSshPanes')}
-          </div>
-        {:else}
-          {#each paneOptions as opt (opt.sessionId)}
-            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--color-panel-2)] cursor-pointer text-[length:var(--text-compact,14px)]">
-              <input
-                type="checkbox"
-                checked={selectedIds.has(opt.sessionId)}
-                onchange={() => togglePane(opt.sessionId)}
-              />
-              <span class="min-w-0 flex-1 [overflow-wrap:anywhere] text-[var(--color-fg-muted)]">{opt.tabTitle}</span>
-              <span class="min-w-0 flex-1 [overflow-wrap:anywhere] font-mono text-[var(--color-fg)]">{opt.title}</span>
-            </label>
-          {/each}
-        {/if}
-      </div>
+      {#if paneOptions.length === 0}
+        <p>{i18n.t('batchCommand.noSshPanes')}</p>
+      {:else}
+        <HostChoiceList choices={paneOptions.map(pane => ({ id: pane.sessionId, label: pane.title, group: pane.tabTitle }))}
+          selected={[...selectedIds]} onChange={ids => { selectedIds = new Set(ids); }} disabled={busy} />
+      {/if}
     </div>
 
     <footer class="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-[var(--color-border-soft)]">

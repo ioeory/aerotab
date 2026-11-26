@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import HostSelect from './HostSelect.svelte';
+  import { profileChoices } from './HostChoiceList.svelte';
   import type { RpcClient } from '../lib/rpc';
   import type { StoredProfile } from '../lib/types';
   import { ScriptRunner, scriptPayload, type ScriptInput, type SavedScript, type ScriptTask, type ScriptConfirmation } from '../lib/scripts';
@@ -22,7 +24,7 @@
   let timer: ReturnType<typeof setInterval> | undefined;
   const runner = new ScriptRunner(rpc);
   const dirty = $derived(draft !== null && JSON.stringify(scriptPayload(draft)) !== saved);
-  const sshProfiles = $derived(profiles.filter(p => p.kind === 'ssh'));
+  const hostChoices = $derived(profileChoices(profiles, true));
   function report(cause: unknown) { error = cause instanceof Error ? cause.message : String(cause); onError(error); }
   async function action(work: () => Promise<void>) {
     if (busy) return;
@@ -55,7 +57,7 @@
   }
   async function prepare() {
     if (!draft || dirty) { report(t('unsaved')); return; }
-    if (!sshProfiles.some(p => p.id === targetId)) { report(t('missing')); return; }
+    if (!hostChoices.some(p => p.id === targetId)) { report(t('missing')); return; }
     confirmation = await runner.prepare(draft.id, targetId, timeout);
   }
   async function run() {
@@ -94,13 +96,7 @@
           <label>{t('name')}<input maxlength="256" bind:value={draft.name} disabled={busy || !!confirmation} /></label>
           <label>{t('description')}<textarea rows="2" maxlength="16384" bind:value={draft.description} disabled={busy || !!confirmation}></textarea></label>
           <label>{t('command')}<textarea class="command" rows="8" maxlength="65536" bind:value={draft.command} disabled={busy || !!confirmation} spellcheck="false"></textarea></label>
-          <label>{t('target')}
-            <select bind:value={draft.profile_id} disabled={busy || !!confirmation}>
-              <option value={null}>{t('none')}</option>
-              {#each sshProfiles as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}
-              {#if draft.profile_id && !sshProfiles.some(p => p.id === draft?.profile_id)}<option value={draft.profile_id}>{t('missing')}</option>{/if}
-            </select>
-          </label>
+          <div>{t('target')}<HostSelect choices={hostChoices} value={draft.profile_id ?? ''} label={t('target')} emptyLabel={t('none')} missingLabel={t('missing')} disabled={busy || !!confirmation} onChange={id => { if (draft) draft.profile_id = id || null; }} /></div>
         </div>
         <div class="actions">
           <button disabled={busy || !dirty || !draft.name.trim() || !draft.command.trim() || !!confirmation} onclick={() => action(save)}>{t('save')}</button>
@@ -115,10 +111,7 @@
           </div>
         {/if}
         <div class="run-controls">
-          <label>{t('target')}<select bind:value={targetId} disabled={busy || !!confirmation}>
-            <option value="">{t('select')}</option>
-            {#each sshProfiles as profile (profile.id)}<option value={profile.id}>{profile.name} — {profile.kind === 'ssh' ? `${profile.ssh.user}@${profile.ssh.host}:${profile.ssh.port}` : ''}</option>{/each}
-          </select></label>
+          <div>{t('target')}<HostSelect choices={hostChoices} value={targetId} label={t('target')} placeholder={t('select')} missingLabel={t('missing')} disabled={busy || !!confirmation} onChange={id => { targetId = id; }} /></div>
           <label>{t('timeout')}<input type="number" min="1" max="300" bind:value={timeout} disabled={busy || !!confirmation} /></label>
           <button disabled={busy || dirty || version === 0 || !targetId || !!confirmation || task?.status === 'running'} onclick={() => action(prepare)}>{t('run')}</button>
         </div>

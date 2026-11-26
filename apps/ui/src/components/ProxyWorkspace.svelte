@@ -1,8 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { newProxyResource, proxyConfig, networkError, type NetworkRpc, type NetworkProfile, type ProxyResource, type ProxyConfig, type VaultMeta } from '../lib/networkResources';
+  import HostSelect from './HostSelect.svelte';
+  import { profileChoices } from './HostChoiceList.svelte';
+  import type { StoredProfile } from '../lib/types';
+  import { newProxyResource, proxyConfig, networkError, type NetworkRpc, type ProxyResource, type ProxyConfig, type VaultMeta } from '../lib/networkResources';
   import { networkMessages, networkLocale, type NetworkLocale } from '../lib/networkMessages';
-  let { rpc, profiles, onError, locale = networkLocale() }: { rpc: NetworkRpc; profiles: NetworkProfile[]; onError: (message: string) => void; locale?: NetworkLocale } = $props();
+  let { rpc, profiles, onError, locale = networkLocale() }: { rpc: NetworkRpc; profiles: StoredProfile[]; onError: (message: string) => void; locale?: NetworkLocale } = $props();
   const m = $derived(networkMessages[locale]);
   let resources = $state<ProxyResource[]>([]);
   let draft = $state<ProxyResource | null>(null);
@@ -10,11 +13,11 @@
   let busy = $state(false);
   let confirmDelete = $state(false);
   let error = $state('');
-  const sshProfiles = $derived(profiles.filter(p => p.kind === 'ssh'));
+  const hostChoices = $derived(profileChoices(profiles, true));
   async function perform(action: () => Promise<void>) { if (busy) return; busy = true; error = ''; try { await action(); } catch (e) { error = networkError(e); onError(error); } finally { busy = false; } }
   async function refresh() { resources = await rpc.call<ProxyResource[]>('proxy.list'); }
   function edit(resource: ProxyResource) { draft = JSON.parse(JSON.stringify(resource)); confirmDelete = false; error = ''; }
-  function changeKind(kind: ProxyConfig['kind']) { if (draft) draft.config = proxyConfig(kind, sshProfiles[0]?.id); }
+  function changeKind(kind: ProxyConfig['kind']) { if (draft) draft.config = proxyConfig(kind, profiles.find(profile => profile.kind === 'ssh')?.id); }
   async function save() { await perform(async () => { if (!draft || !draft.name.trim()) throw Error(m.invalid); await rpc.call('proxy.save', { resource: draft }); await refresh(); confirmDelete = false; }); }
   async function remove() { await perform(async () => { if (!draft) return; await rpc.call('proxy.delete', { id: draft.id }); draft = null; await refresh(); }); }
   onMount(() => { void perform(refresh); });
@@ -30,7 +33,7 @@
         <label>{m.name}<input required maxlength="256" bind:value={draft.name} disabled={busy} /></label>
         <label>{m.kind}<select value={draft.config.kind} disabled={busy} onchange={event => changeKind(event.currentTarget.value as ProxyConfig['kind'])}><option value="socks5">{m.socks5}</option><option value="http_connect">{m.http_connect}</option><option value="ssh_jump">{m.ssh_jump}</option></select></label>
         {#if draft.config.kind === 'ssh_jump'}
-          <label>{m.profile}<select required bind:value={draft.config.profile_id} disabled={busy}><option value="">{m.missingProfile}</option>{#each sshProfiles as profile (profile.id)}<option value={profile.id}>{profile.name}</option>{/each}</select></label>
+          <div>{m.profile}<HostSelect choices={hostChoices} value={draft.config.profile_id} label={m.profile} placeholder={m.missingProfile} missingLabel={m.missingProfile} disabled={busy} onChange={id => { if (draft?.config.kind === 'ssh_jump') draft.config.profile_id = id; }} /></div>
         {:else}
           <label>{m.host}<input required bind:value={draft.config.host} disabled={busy} /></label>
           <label>{m.port}<input required type="number" min="1" max="65535" bind:value={draft.config.port} disabled={busy} /></label>
